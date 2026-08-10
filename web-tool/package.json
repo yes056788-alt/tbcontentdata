@@ -1,0 +1,8 @@
+{
+  "name": "taobao-full-chain-web-tool",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

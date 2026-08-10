@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "type": "user-confirmed-screenshot",
+    "recordedAt": "2026-07-27",
+    "note": "圈选条件按达摩盘人群列表中可见的摘要原样记录；未补充截图中未展示的细分规则。"
+  },
+  "crowds": [
+    {
+      "crowdId": "53417997",
+      "name": "内容人群资产_智篆",
+      "role": "content_audience_asset",
+      "visibleConditionSummary": "淘宝内容行为人群, 淘宝内容行为人群, 万相台无界版回流再营销, 店铺行为人群",
+      "conditionTypes": [
+        "淘宝内容行为人群",
+        "万相台无界版回流再营销",
+        "店铺行为人群"
+      ]
+    },
+    {
+      "crowdId": "53406568",
+      "name": "超级短视频_30天_曝光_智篆",
+      "role": "super_short_video_30d_exposure",
+      "visibleConditionSummary": "万相台无界版回流再营销",
+      "conditionTypes": [
+        "万相台无界版回流再营销"
+      ]
+    },
+    {
+      "crowdId": "53406550",
+      "name": "手淘内容_自制_逛逛_播放_智篆",
+      "role": "mobile_content_owned_guangguang_play",
+      "visibleConditionSummary": "淘宝内容行为人群",
+      "conditionTypes": [
+        "淘宝内容行为人群"
+      ]
+    },
+    {
+      "crowdId": "53406548",
+      "name": "手淘内容_自制_搜推_播放_智篆",
+      "role": "mobile_content_owned_search_recommend_play",
+      "visibleConditionSummary": "淘宝内容行为人群",
+      "conditionTypes": [
+        "淘宝内容行为人群"
+      ]
+    },
+    {
+      "crowdId": "53406541",
+      "name": "手淘内容_自制_全部_播放_智篆",
+      "role": "mobile_content_owned_all_play",
+      "visibleConditionSummary": "淘宝内容行为人群",
+      "conditionTypes": [
+        "淘宝内容行为人群"
+      ]
+    }
+  ]
+}

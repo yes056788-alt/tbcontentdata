@@ -1,0 +1,41 @@
+.DS_Store
+.claude/
+.playwright-mcp/
+.gh-config/
+.gh-home/
+
+# Dependencies and build output
+node_modules/
+.next/
+.vinext/
+.wrangler/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local runtime state and credentials
+.env
+.env.*
+!.env.production.example
+.dev.vars*
+.data/
+outputs/
+work/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+*.tbmig
+*.pem
+*.key
+*.log
+
+# Local release and backup artifacts
+*.tar.gz
+*.dmg
+*.bak
+*.backup
+backups/

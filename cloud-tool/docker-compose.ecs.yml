@@ -1,0 +1,29 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: cloud-tool/Dockerfile
+    image: taobao-business-tool:node24
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      APP_DATA_DIR: /data
+      DATABASE_PATH: /data/team.sqlite
+      RUNS_PATH: /data/objects
+      MIGRATIONS_PATH: /app/drizzle
+    ports:
+      - "127.0.0.1:${APP_PORT:-3401}:3000"
+    volumes:
+      - tbdata-data:/data
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+volumes:
+  tbdata-data:
+    name: taobao-business-data

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>诊断报告 - 淘宝经营数据</title>
+  <link rel="stylesheet" href="/portal.css">
+</head>
+<body data-task-type="report">
+  <header class="portal-topbar">
+    <a class="portal-brand" href="/index.html"><span class="portal-brand-mark" aria-hidden="true">TB</span><span><strong>淘宝经营数据</strong><small>项目管理</small></span></a>
+    <nav class="portal-nav" aria-label="主要工作区"><a href="/index.html">项目管理</a><a href="/collect.html">经营取数</a><a class="active" href="/report.html" aria-current="page">诊断报告</a><a href="/accounts.html">账号库管理</a></nav>
+    <div class="portal-status"><span id="connectionState" class="connection-state connecting">正在连接数据助手</span><span id="extensionVersion" class="portal-version"></span></div>
+  </header>
+  <main class="portal-main">
+    <p id="pageNotice" class="portal-notice" role="status" aria-live="polite"></p>
+    <div class="portal-heading"><div><span class="section-kicker">DIAGNOSIS</span><h1>诊断报告</h1><p>先选择执行方式和店铺，再生成流量、光合、万相台和内容人群画像诊断</p></div></div>
+    <div class="task-layout">
+      <section class="task-setup">
+        <div class="task-panel-head"><h2>报告取数设置</h2><p>当前登录账号可直接执行；批量账号按店铺分组或单个店铺执行</p></div>
+        <div class="mode-switch" role="tablist" aria-label="执行方式"><button class="active" type="button" data-task-mode="current">当前登录账号</button><button type="button" data-task-mode="batch">批量账号库</button></div>
+        <div id="currentModePanel" class="task-mode-panel">
+          <div class="task-fields"><div class="field-block"><label for="taskGroupSelect">店铺分组</label><select id="taskGroupSelect"></select></div><div class="field-block"><label for="taskStoreSelect">本次报告归属店铺</label><select id="taskStoreSelect"></select></div></div>
+          <fieldset class="platform-picker" data-platform-picker="current"><legend>执行平台</legend><div class="platform-picker-grid"><label><input type="checkbox" value="sycm" checked><span><strong>生意参谋</strong><small>流量诊断</small></span></label><label><input type="checkbox" value="guanghe" checked><span><strong>光合</strong><small>渠道与资产</small></span></label><label><input type="checkbox" value="wxt" checked><span><strong>万相台</strong><small>营销与短视频</small></span></label><label><input type="checkbox" value="dmp" checked><span><strong>达摩盘</strong><small>人群画像</small></span></label></div></fieldset>
+          <div class="task-scope">报告范围：生意参谋流量诊断、光合渠道与资产诊断、万相台营销报告、短视频诊断、DMP 内容人群画像。</div>
+          <div class="task-actions"><button id="startCurrentTaskBtn" class="button primary" type="button">开始生成诊断报告</button></div>
+        </div>
+        <div id="batchModePanel" class="task-mode-panel" hidden>
+          <div id="batchSessionNotice" class="batch-session-notice" role="status"></div>
+          <div id="batchSetupPanel">
+            <div class="batch-selection-grid"><div class="field-block"><label for="batchScopeType">执行范围</label><select id="batchScopeType"><option value="storeGroup">店铺分组</option><option value="store">单个店铺</option></select></div><div class="field-block"><label id="batchScopeLabel" for="batchScopeSelect">选择店铺分组</label><select id="batchScopeSelect"></select></div><div class="batch-account-summary"><span>本次执行账号</span><strong id="batchAccountSummary">0 个</strong></div></div>
+            <fieldset class="platform-picker" data-platform-picker="batch"><legend>执行平台</legend><div class="platform-picker-grid"><label><input type="checkbox" value="sycm" checked><span><strong>生意参谋</strong><small>流量诊断</small></span></label><label><input type="checkbox" value="guanghe" checked><span><strong>光合</strong><small>渠道与资产</small></span></label><label><input type="checkbox" value="wxt" checked><span><strong>万相台</strong><small>营销与短视频</small></span></label><label><input type="checkbox" value="dmp" checked><span><strong>达摩盘</strong><small>人群画像</small></span></label></div></fieldset>
+            <div class="task-scope">系统将依次登录所选范围内的启用淘宝账号，为每个店铺生成诊断报告；遇到验证码时暂停并发送已配置的钉钉提醒。</div>
+            <div class="task-actions"><button id="startBatchTaskBtn" class="button primary" type="button">开始批量诊断报告</button><button id="resumeBatchTaskBtn" class="button primary" type="button" hidden>继续任务</button><button id="cancelBatchTaskBtn" class="button danger" type="button" disabled>取消任务</button><a class="button" href="/accounts.html">管理账号</a></div>
+          </div>
+        </div>
+      </section>
+      <aside class="task-status-panel">
+        <div class="task-panel-head"><h2>最近任务状态</h2><p id="taskStatusDescription">当前登录账号的报告生成进度</p></div>
+        <div class="task-status-body"><div class="task-state-line"><span id="currentTaskStore">尚未启动</span><strong id="currentTaskState">等待开始</strong></div><div class="progress-track"><span id="currentTaskProgress"></span></div><p id="currentTaskCopy" class="task-status-copy">选择店铺后启动任务。</p><button id="openLatestTaskBtn" class="button" type="button" hidden>打开本次报告</button><div class="task-status-meta"><div><span>开始时间</span><strong id="currentTaskStartedAt">-</strong></div><div><span>完成时间</span><strong id="currentTaskFinishedAt">-</strong></div></div></div>
+      </aside>
+    </div>
+    <section class="section-band">
+      <div class="section-head"><div><h2>诊断报告运行日志</h2><p>报告生成完成后从这里打开，不会在进入页面时直接展示旧报告</p></div><span id="taskLogCount" class="section-count">0 条</span></div>
+      <div class="data-table-wrap"><table class="data-table"><thead><tr><th>店铺</th><th>执行方式</th><th>执行账号</th><th>完成时间</th><th>状态</th><th>平台异常</th><th>操作</th></tr></thead><tbody id="taskRunRows"></tbody></table></div>
+    </section>
+  </main>
+  <script src="/task.js"></script>
+</body>
+</html>

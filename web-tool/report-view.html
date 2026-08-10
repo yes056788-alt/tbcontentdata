@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>诊断报告记录 - 淘宝经营数据</title>
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/report.css">
+  <link rel="stylesheet" href="/portal.css">
+</head>
+<body>
+  <header class="portal-topbar">
+    <a class="portal-brand" href="/index.html">
+      <span class="portal-brand-mark" aria-hidden="true">TB</span>
+      <span><strong>淘宝经营数据</strong><small>项目管理</small></span>
+    </a>
+    <nav class="portal-nav" aria-label="主要工作区">
+      <a href="/index.html">项目管理</a>
+      <a href="/collect.html">经营取数</a>
+      <a href="/report.html">诊断报告</a>
+      <a href="/accounts.html">账号库管理</a>
+    </nav>
+    <div class="portal-status">
+      <span id="connectionState" class="connection-state connecting">正在连接数据助手</span>
+      <span id="extensionVersion" class="portal-version"></span>
+    </div>
+  </header>
+
+  <section class="command-band" aria-label="报告操作">
+    <div class="command-primary">
+      <a class="button" href="/index.html">返回项目管理</a>
+      <a class="button" href="/report.html">返回报告任务</a>
+      <span id="generatedAt" class="command-note">尚未生成</span>
+    </div>
+    <div class="command-actions">
+      <button id="generateReportBtn" class="button primary" type="button" hidden>一键生成报告</button>
+      <button id="refreshReportBtn" class="button" type="button">刷新</button>
+      <button id="exportReportBtn" class="button primary" type="button">导出报告</button>
+      <button id="clearReportBtn" class="button danger" type="button" hidden>清空报告</button>
+    </div>
+  </section>
+
+  <main class="report-workspace">
+    <p id="reportNotice" class="hint report-notice" role="status" aria-live="polite"></p>
+    <section class="run-section report-run">
+      <div class="section-heading">
+        <div><h2>报告生成结果</h2><p id="reportRunCopy">四个平台并行生成，万相台两章按依赖顺序执行</p></div>
+        <div class="progress-track" aria-hidden="true"><span id="reportProgressBar"></span></div>
+      </div>
+      <div id="reportSteps" class="report-steps"></div>
+    </section>
+
+    <section class="report-shell">
+      <nav id="reportIndex" class="report-index" aria-label="报告章节">
+        <button class="report-tab active" type="button" data-section="flow">01 流量诊断</button>
+        <button class="report-tab" type="button" data-section="guanghe">02 光合渠道诊断</button>
+        <button class="report-tab" type="button" data-section="wxt">03 万相台报告</button>
+        <button class="report-tab" type="button" data-section="shortVideo">04 短视频诊断</button>
+        <button class="report-tab" type="button" data-section="dmp">05 内容人群画像</button>
+      </nav>
+      <div class="report-stage">
+        <div id="emptyReport" class="empty-report">
+          <div><strong>暂无可查看的归档报告</strong><p>请返回项目管理，从店铺历史记录中打开一份诊断报告。</p></div>
+        </div>
+
+        <section id="flowSection" class="report-section" data-report-section="flow" hidden>
+          <header class="report-section-head"><div><span>01 / TRAFFIC</span><h2>生意参谋流量诊断</h2><p id="flowContext">最近30个完整自然日</p></div><b>内容指标来自光合</b></header>
+          <div id="flowReport"></div>
+        </section>
+
+        <section id="guangheSection" class="report-section" data-report-section="guanghe" hidden>
+          <header class="report-section-head">
+            <div><span>02 / GUANGHE</span><h2>光合渠道诊断</h2><p id="guangheContext">最近30个完整自然日</p></div>
+            <div class="view-switch" role="tablist" aria-label="光合诊断视角"><button class="active" type="button" data-guanghe-view="channel">渠道视角</button><button type="button" data-guanghe-view="asset">资产视角</button></div>
+          </header>
+          <div id="guangheReport"></div>
+        </section>
+
+        <section id="wxtSection" class="report-section embedded-section" data-report-section="wxt" hidden>
+          <div id="wxtMarketingMount" class="embedded-report"></div>
+        </section>
+
+        <section id="shortVideoSection" class="report-section embedded-section" data-report-section="shortVideo" hidden>
+          <div id="wxtShortVideoMount" class="embedded-report"></div>
+        </section>
+
+        <section id="dmpSection" class="report-section" data-report-section="dmp" hidden>
+          <header class="report-section-head"><div><span>05 / DMP</span><h2>内容人群画像诊断</h2><p id="dmpContext">达摩盘·年龄与消费能力等级</p></div><b>四个人群对比</b></header>
+          <div id="dmpReport"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script src="/report.js"></script>
+</body>
+</html>

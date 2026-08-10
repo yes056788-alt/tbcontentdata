@@ -1,0 +1,133 @@
+.migration-shell {
+  padding-bottom: 70px;
+}
+
+.migration-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, .9fr);
+  gap: 18px;
+}
+
+.migration-card {
+  padding: 26px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 35px rgba(21, 54, 93, .06);
+}
+
+.migration-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.migration-card__head > svg {
+  width: 39px;
+  height: 39px;
+  flex: 0 0 39px;
+  padding: 9px;
+  border-radius: 10px;
+  background: var(--blue-50);
+  color: var(--blue-700);
+}
+
+.migration-card h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.migration-card p,
+.migration-notes span {
+  color: var(--ink-500);
+  font-size: 12px;
+}
+
+.migration-card p {
+  margin: 5px 0 0;
+}
+
+.migration-form {
+  display: grid;
+  gap: 9px;
+  padding-top: 20px;
+}
+
+.migration-form label {
+  margin-top: 6px;
+  color: var(--ink-800);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.migration-form input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink-950);
+}
+
+.migration-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 13px;
+  margin: 4px 0 8px;
+  color: var(--ink-500);
+  font-size: 11px;
+}
+
+.migration-rules span::before {
+  margin-right: 4px;
+  content: "○";
+}
+
+.migration-rules span[data-valid="true"] {
+  color: var(--green);
+}
+
+.migration-rules span[data-valid="true"]::before {
+  content: "✓";
+}
+
+.migration-download {
+  width: 100%;
+  min-height: 44px;
+  gap: 7px;
+  margin-top: 2px;
+}
+
+.migration-notes ul {
+  display: grid;
+  gap: 16px;
+  padding: 0;
+  margin: 20px 0 0;
+  list-style: none;
+}
+
+.migration-notes li {
+  display: grid;
+  gap: 3px;
+  padding-left: 15px;
+  border-left: 3px solid var(--blue-100);
+}
+
+.migration-notes strong {
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .migration-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .migration-card {
+    padding: 20px 17px;
+  }
+}

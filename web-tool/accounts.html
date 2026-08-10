@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>账号库管理 - 淘宝经营数据</title>
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/accounts.css">
+</head>
+<body class="management-body">
+  <header class="management-topbar">
+    <a class="management-brand" href="/index.html" aria-label="返回项目管理">
+      <span class="management-brand-mark" aria-hidden="true">TB</span>
+      <span><strong>淘宝经营数据</strong><small>账号库管理</small></span>
+    </a>
+    <nav class="management-global-nav" aria-label="主要工作区">
+      <a href="/index.html">项目管理</a>
+      <a href="/collect.html">经营取数</a>
+      <a href="/report.html">诊断报告</a>
+      <a class="active" href="/accounts.html" aria-current="page">账号库管理</a>
+    </nav>
+    <div class="management-status">
+      <span id="connectionState" class="connection-state connecting">正在连接数据助手</span>
+      <span id="extensionVersion" class="extension-version"></span>
+      <button id="lockVaultBtn" class="topbar-action" type="button" hidden>锁定账号库</button>
+    </div>
+  </header>
+
+  <main class="management-main account-library-main">
+    <p id="pageNotice" class="hint account-notice" role="status" aria-live="polite"></p>
+
+    <section id="vaultGate" class="vault-gate" aria-labelledby="vaultTitle">
+      <div class="vault-panel">
+        <span class="section-kicker">LOCAL VAULT</span>
+        <h1 id="vaultTitle">解锁账号库</h1>
+        <p id="vaultCopy">账号密码使用主密码加密保存在本机。</p>
+        <form id="vaultForm">
+          <label for="masterPassword">主密码</label>
+          <input id="masterPassword" name="masterPassword" type="password" autocomplete="current-password" minlength="8" required>
+          <div id="confirmPasswordRow" hidden>
+            <label for="confirmPassword">确认主密码</label>
+            <input id="confirmPassword" name="confirmPassword" type="password" autocomplete="new-password" minlength="8">
+          </div>
+          <div class="form-actions">
+            <button id="unlockVaultBtn" class="button primary" type="submit">解锁</button>
+            <button id="resetVaultBtn" class="button danger subtle" type="button" hidden>重置账号库</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section id="vaultWorkspace" class="account-library" hidden>
+      <div class="page-heading">
+        <div><span class="section-kicker">ACCOUNT LIBRARY</span><h1>账号与分组</h1><p id="accountCount">0 个账号</p></div>
+      </div>
+
+      <div class="account-library-grid">
+        <section class="library-panel group-library" aria-labelledby="groupLibraryTitle">
+          <div class="library-panel-head"><div><h2 id="groupLibraryTitle">店铺分组</h2><p>项目与批量任务共用</p></div><span id="storeGroupCount">0 个</span></div>
+          <form id="storeGroupForm" class="group-create-form">
+            <label class="sr-only" for="storeGroupName">分组名称</label>
+            <input id="storeGroupName" type="text" maxlength="40" placeholder="输入新分组名称" required>
+            <button class="button primary" type="submit">新增</button>
+          </form>
+          <div id="storeGroupList" class="group-list"></div>
+        </section>
+
+        <section class="library-panel account-library-list" aria-labelledby="accountLibraryTitle">
+          <div class="library-panel-head"><div><h2 id="accountLibraryTitle">账号列表</h2><p>淘宝与小红书账号统一维护</p></div><span id="accountFilterSummary">0 个</span></div>
+          <div class="toolbar-band account-toolbar">
+            <input id="accountSearch" type="search" placeholder="搜索店铺或登录账号">
+            <select id="storeGroupFilter" aria-label="按店铺分组筛选"></select>
+          </div>
+          <div class="data-table-wrap account-table-wrap">
+            <table class="data-table"><thead><tr><th>平台</th><th>店铺</th><th>登录账号</th><th>店铺分组</th><th>登录身份</th><th>状态</th><th>操作</th></tr></thead><tbody id="accountRows"></tbody></table>
+          </div>
+        </section>
+      </div>
+
+      <details class="notification-inline">
+        <summary>验证码钉钉提醒</summary>
+        <form id="notificationForm" class="notification-form compact-notification">
+          <div class="form-field"><label for="dingWebhook">自定义机器人 Webhook</label><input id="dingWebhook" type="url" autocomplete="off" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."></div>
+          <div class="form-field"><label for="dingSecret">加签密钥</label><input id="dingSecret" type="password" autocomplete="off" placeholder="SEC..."><label class="check-row"><input id="showDingSecret" type="checkbox">显示密钥</label></div>
+          <div class="form-actions"><button class="button primary" type="submit">保存提醒设置</button><button id="testDingTalkBtn" class="button" type="button">发送测试消息</button></div>
+        </form>
+      </details>
+    </section>
+  </main>
+
+  <dialog id="accountDialog" class="management-dialog">
+    <form id="accountForm" method="dialog">
+      <div class="dialog-head"><h2 id="accountDialogTitle">新增账号</h2><button id="closeAccountDialogBtn" class="dialog-close" type="button" aria-label="关闭">×</button></div>
+      <input id="accountId" type="hidden">
+      <div class="form-grid">
+        <div><label for="accountPlatform">账号平台</label><select id="accountPlatform"><option value="taobao">淘宝</option><option value="xiaohongshu">小红书</option></select></div>
+        <div><label for="accountStoreGroupSelect">店铺分组</label><select id="accountStoreGroupSelect"></select></div>
+        <div><label for="accountStoreName">店铺名称</label><input id="accountStoreName" type="text" maxlength="80" list="knownStoreNames" required><datalist id="knownStoreNames"></datalist></div>
+        <div><label for="loginUsername">登录账号</label><input id="loginUsername" type="text" maxlength="160" autocomplete="off" required></div>
+        <div><label for="loginPassword">登录密码</label><input id="loginPassword" type="password" maxlength="240" autocomplete="new-password" required><label class="check-row"><input id="showAccountPassword" type="checkbox">显示密码</label></div>
+        <div id="roleKeywordField"><label for="roleKeyword">淘宝登录身份</label><input id="roleKeyword" type="text" maxlength="50" value="品牌" placeholder="例如：品牌"></div>
+        <label id="accountEnabledField" class="check-row account-enabled"><input id="accountEnabled" type="checkbox" checked>参与淘宝批量任务</label>
+      </div>
+      <div class="form-actions end"><button id="cancelAccountBtn" class="button" type="button">取消</button><button class="button primary" type="submit">保存账号</button></div>
+    </form>
+  </dialog>
+
+  <script src="/account-vault.js"></script>
+  <script src="/accounts.js"></script>
+</body>
+</html>

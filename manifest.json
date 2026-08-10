@@ -1,0 +1,112 @@
+{
+  "manifest_version": 3,
+  "name": "淘宝内容诊断插件",
+  "version": "2.37.3",
+  "description": "为淘宝全链路取数网页提供光合、生意参谋、万相台和DMP后台取数能力",
+  "permissions": ["storage", "unlimitedStorage", "webRequest", "downloads", "tabs", "scripting", "webNavigation"],
+  "action": {
+    "default_title": "淘宝全链路取数数据助手",
+    "default_popup": "diagnosis-popup.html"
+  },
+  "host_permissions": [
+    "*://*.taobao.com/*",
+    "*://*.alimama.com/*",
+    "*://*.alimama.hk/*",
+    "*://*.alicdn.com/*",
+    "*://*.aliyuncs.com/*",
+    "https://xstore.insights.1688.com/*",
+    "https://oapi.dingtalk.com/*",
+    "http://localhost:3400/*",
+    "http://127.0.0.1:3400/*",
+    "https://tbdata.aizicheng.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://adstar.alimama.com/*",
+        "*://login.taobao.com/*",
+        "*://passport.taobao.com/*",
+        "*://login.tmall.com/*"
+      ],
+      "js": ["xinghe-content-script.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    },
+    {
+      "matches": [
+        "*://creator.guanghe.taobao.com/*",
+        "https://xstore.insights.1688.com/*",
+        "*://web.taobao.com/s-guanghe-creator/asset-overview*"
+      ],
+      "js": ["page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "*://creator.guanghe.taobao.com/*",
+        "https://xstore.insights.1688.com/*",
+        "*://web.taobao.com/s-guanghe-creator/asset-overview*"
+      ],
+      "js": ["vendor/xlsx.full.min.js", "rules.js", "content-script.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["*://dmp.taobao.com/*"],
+      "js": ["dmp-page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://dmp.taobao.com/*"],
+      "js": ["dmp-content-script.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://one.alimama.com/*", "*://one.alimama.hk/*"],
+      "js": ["wxt-report-page-hook.js", "wxt-report-response-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://one.alimama.com/*", "*://one.alimama.hk/*"],
+      "js": ["wxt-report-trace.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://one.alimama.com/*", "*://one.alimama.hk/*"],
+      "js": ["vendor/xlsx.full.min.js", "wxt-report-content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "http://localhost:3400/*",
+        "http://127.0.0.1:3400/*",
+        "https://tbdata.aizicheng.com/*"
+      ],
+      "js": ["web-tool-bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "*://*.taobao.com/*",
+        "*://*.alicdn.com/*",
+        "*://*.aliyuncs.com/*"
+      ],
+      "exclude_matches": ["*://creator.guanghe.taobao.com/*"],
+      "js": ["sycm-content-script.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ]
+}

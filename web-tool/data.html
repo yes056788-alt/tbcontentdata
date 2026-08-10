@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>经营数据记录 - 淘宝经营数据</title>
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/portal.css">
+</head>
+<body>
+  <header class="portal-topbar">
+    <a class="portal-brand" href="/index.html">
+      <span class="portal-brand-mark" aria-hidden="true">TB</span>
+      <span><strong>淘宝经营数据</strong><small>项目管理</small></span>
+    </a>
+    <nav class="portal-nav" aria-label="主要工作区">
+      <a href="/index.html">项目管理</a>
+      <a href="/collect.html">经营取数</a>
+      <a href="/report.html">诊断报告</a>
+      <a href="/accounts.html">账号库管理</a>
+    </nav>
+    <div class="portal-status">
+      <span id="connectionState" class="connection-state connecting">正在连接数据助手</span>
+      <span id="extensionVersion" class="portal-version"></span>
+    </div>
+  </header>
+
+  <section class="command-band" aria-label="数据操作">
+    <div class="command-primary">
+      <a class="button" href="/index.html">返回项目管理</a>
+      <div><strong>已归档经营数据</strong><span id="lastSync" class="command-note"></span></div>
+    </div>
+    <div class="command-actions">
+      <button id="autoCollectBtn" class="button primary" type="button" hidden>一键取数</button>
+      <button id="refreshBtn" class="button" type="button">刷新</button>
+      <button id="copyBtn" class="button" type="button">复制表格</button>
+      <button id="exportBtn" class="button primary" type="button">导出 Excel</button>
+      <button id="clearBtn" class="button danger" type="button" hidden>清空数据</button>
+    </div>
+  </section>
+
+  <main class="data-view-workspace">
+    <p id="hint" class="hint" role="status" aria-live="polite"></p>
+
+    <section class="run-section">
+      <div class="section-heading">
+        <div><h2>归档任务结果</h2><p>四个平台的完成状态与异常说明</p></div>
+        <div class="progress-track" aria-hidden="true"><span id="runProgressBar"></span></div>
+      </div>
+      <div id="platformProgress" class="platform-progress"></div>
+    </section>
+
+    <section class="metrics-section platform-data-section" aria-labelledby="metricTableTitle">
+      <div class="metrics-toolbar">
+        <div class="platform-data-heading">
+          <h2 id="metricTableTitle">经营数据表格</h2>
+          <p class="platform-selector-note">选择平台查看对应数据，默认展示淘宝数据表格</p>
+        </div>
+        <div class="filter-tabs" role="tablist" aria-label="数据平台">
+          <button id="taobaoTableTab" class="filter-tab active" type="button" role="tab"
+            aria-selected="true" aria-controls="taobaoMetricsPanel" data-platform-table="taobao">淘宝数据表格</button>
+          <button id="xiaohongshuTableTab" class="filter-tab" type="button" role="tab" tabindex="-1"
+            aria-selected="false" aria-controls="xiaohongshuMetricsPanel" data-platform-table="xiaohongshu">小红书数据表格</button>
+        </div>
+      </div>
+
+      <div id="taobaoMetricsPanel" class="platform-table-panel platform-metrics taobao-metrics"
+        role="tabpanel" aria-labelledby="taobaoTableTab">
+        <div class="platform-panel-heading metrics-title-group">
+          <span class="platform-chip taobao">淘宝</span>
+          <div class="metrics-title-copy">
+            <h3 id="taobaoMetricsTitle">淘宝经营数据</h3>
+            <p>由光合、生意参谋、万相台和达摩盘自动取数，派生指标自动计算</p>
+          </div>
+          <span id="taobaoMetricCount" class="visible-count"></span>
+        </div>
+        <div class="table-wrap platform-table-wrap">
+          <table>
+            <thead><tr><th>模块</th><th>指标</th><th>数值</th><th>状态</th><th>来源 / 公式</th><th>更新时间</th></tr></thead>
+            <tbody id="taobaoMetricRows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="xiaohongshuMetricsPanel" class="platform-table-panel platform-metrics xiaohongshu-metrics"
+        role="tabpanel" aria-labelledby="xiaohongshuTableTab" hidden>
+        <div class="platform-panel-heading metrics-title-group">
+          <span class="platform-chip xiaohongshu">小红书</span>
+          <div class="metrics-title-copy">
+            <h3 id="xiaohongshuMetricsTitle">小红书经营数据</h3>
+            <p>原始数据手动填写并自动保存；总花费、ROI 等派生指标仍按公式自动计算</p>
+          </div>
+          <span id="xiaohongshuMetricCount" class="visible-count"></span>
+        </div>
+        <div class="manual-entry-note" role="note">
+          蓝色输入框均可反复修改，按 Enter 或移开焦点保存。百分比可填写“30”或“30%”，均按 30% 处理。
+        </div>
+        <div class="table-wrap platform-table-wrap">
+          <table>
+            <thead><tr><th>模块</th><th>指标</th><th>数值</th><th>状态</th><th>参考来源 / 公式</th><th>更新时间</th></tr></thead>
+            <tbody id="xiaohongshuMetricRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/xlsx.full.min.js"></script>
+  <script src="/diagnosis-spec.js"></script>
+  <script src="/diagnosis-popup.js"></script>
+</body>
+</html>

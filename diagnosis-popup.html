@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>经营攻防一键取数</title>
+  <style>
+    html {
+      width: 780px;
+      min-width: 780px;
+      height: 600px;
+      min-height: 600px;
+    }
+    body {
+      width: 780px;
+      min-width: 780px;
+      height: 600px;
+      min-height: 600px;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: #f6f8fb;
+      color: #20242c;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 18px;
+      background: #fff;
+      border-bottom: 1px solid #e6e9ef;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.2;
+    }
+    .subtitle {
+      margin-top: 3px;
+      color: #667085;
+      font-size: 12px;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    button {
+      height: 34px;
+      padding: 0 12px;
+      border: 1px solid #d0d5dd;
+      border-radius: 5px;
+      background: #fff;
+      color: #344054;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button.primary {
+      border-color: #1677ff;
+      background: #1677ff;
+      color: #fff;
+    }
+    button.danger {
+      border-color: #f3b7b7;
+      color: #b42318;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: .55;
+    }
+    main {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      min-height: 0;
+      padding: 14px;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .summary div {
+      background: #fff;
+      border: 1px solid #e6e9ef;
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+    .summary span {
+      display: block;
+      color: #667085;
+      font-size: 12px;
+    }
+    .summary strong {
+      display: block;
+      margin-top: 3px;
+      font-size: 22px;
+    }
+    .hint {
+      margin: 0 0 12px;
+      padding: 10px 12px;
+      border-left: 3px solid #f79009;
+      background: #fffaeb;
+      color: #7a4b00;
+      font-size: 12px;
+    }
+    .table-wrap {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      background: #fff;
+      border: 1px solid #e6e9ef;
+      border-radius: 6px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 1120px;
+    }
+    th, td {
+      border-bottom: 1px solid #eef1f5;
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #f2f5f9;
+      color: #344054;
+      font-size: 12px;
+    }
+    td.value {
+      font-variant-numeric: tabular-nums;
+      font-weight: 650;
+    }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      height: 22px;
+      padding: 0 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .ok { background: #e7f8f0; color: #08765b; }
+    .missing { background: #fff1e6; color: #a34b00; }
+    .pending { background: #eef4ff; color: #315efb; }
+    .muted { color: #667085; }
+    .manual-input {
+      width: 118px;
+      height: 28px;
+      box-sizing: border-box;
+      border: 1px solid #d0d5dd;
+      border-radius: 4px;
+      padding: 0 8px;
+      font: inherit;
+    }
+    .manual-input:focus {
+      outline: 2px solid rgba(22, 119, 255, .18);
+      border-color: #1677ff;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>经营攻防一键取数</h1>
+      <div class="subtitle">按钉钉文档指标口径汇总光合、达摩盘、生意参谋和万相台数据</div>
+    </div>
+    <div class="actions">
+      <button id="autoCollectBtn" class="primary" type="button">自动取数</button>
+      <button id="refreshBtn" type="button">刷新</button>
+      <button id="copyBtn" type="button">复制表格</button>
+      <button id="exportBtn" type="button">导出 Excel</button>
+      <button id="clearBtn" class="danger" type="button">清空数据</button>
+    </div>
+  </header>
+  <main>
+    <section class="summary" id="summary"></section>
+    <p class="hint" id="hint"></p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>平台</th>
+            <th>模块</th>
+            <th>指标</th>
+            <th>数值</th>
+            <th>状态</th>
+            <th>来源/公式</th>
+            <th>更新时间</th>
+          </tr>
+        </thead>
+        <tbody id="metricRows"></tbody>
+      </table>
+    </div>
+  </main>
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="diagnosis-spec.js"></script>
+  <script src="diagnosis-popup.js"></script>
+</body>
+</html>

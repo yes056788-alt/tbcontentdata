@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>项目管理 - 淘宝经营数据</title>
+  <link rel="stylesheet" href="/portal.css">
+</head>
+<body class="project-page">
+  <header class="portal-topbar">
+    <a class="portal-brand" href="/index.html">
+      <span class="portal-brand-mark" aria-hidden="true">TB</span>
+      <span><strong>淘宝经营数据</strong><small>全链路经营工作台</small></span>
+    </a>
+    <nav class="portal-nav" aria-label="主要工作区">
+      <a class="active" href="/index.html" aria-current="page">项目管理</a>
+      <a href="/collect.html">经营取数</a>
+      <a href="/report.html">诊断报告</a>
+      <a href="/accounts.html">账号库管理</a>
+    </nav>
+    <div class="portal-status">
+      <span id="connectionState" class="connection-state connecting">正在连接数据助手</span>
+      <span id="extensionVersion" class="portal-version"></span>
+    </div>
+  </header>
+
+  <div class="project-shell">
+    <aside class="project-sidebar" aria-label="店铺项目">
+      <div class="project-sidebar-head">
+        <div><span class="section-kicker">PROJECTS</span><strong>店铺项目</strong></div>
+        <a href="/accounts.html">管理</a>
+      </div>
+      <nav id="projectTree" class="project-tree" aria-label="店铺分组与店铺"></nav>
+      <div id="projectTreeEmpty" class="project-tree-empty" hidden>
+        <strong>还没有店铺</strong>
+        <a href="/accounts.html">新增账号</a>
+      </div>
+    </aside>
+
+    <main class="project-main">
+      <p id="pageNotice" class="portal-notice" role="status" aria-live="polite"></p>
+
+      <section id="projectEmpty" class="project-empty project-empty-main">
+        <strong>从左侧选择店铺</strong>
+        <p>选中店铺后将默认显示最近一次诊断报告。</p>
+      </section>
+
+      <section id="projectDashboard" class="project-dashboard project-workspace" hidden>
+        <header class="project-title-band">
+          <div>
+            <span id="selectedStoreGroup" class="section-kicker">未分组</span>
+            <h1 id="selectedStoreName">店铺</h1>
+            <p id="selectedStoreCopy">暂无运行记录</p>
+          </div>
+          <div class="heading-actions">
+            <a id="storeCollectLink" class="button" href="/collect.html">经营取数</a>
+            <a id="storeReportLink" class="button primary" href="/report.html">生成诊断报告</a>
+          </div>
+        </header>
+
+        <div class="project-viewbar">
+          <div class="project-view-tabs" role="tablist" aria-label="店铺结果视图">
+            <button class="active" type="button" data-project-view="report">诊断报告</button>
+            <button type="button" data-project-view="data">数据表格</button>
+            <button type="button" data-project-view="history">运行记录</button>
+          </div>
+          <div class="project-view-tools">
+            <label id="projectHistoryPicker" class="project-history-picker" hidden>
+              <span>历史记录</span>
+              <select id="projectRunSelect" aria-label="选择历史记录"></select>
+            </label>
+            <span id="projectViewMeta">最近诊断报告</span>
+            <button id="projectExportBtn" class="button" type="button" disabled>导出诊断报告</button>
+          </div>
+        </div>
+
+        <section id="projectReportPanel" class="project-result-panel" data-project-panel="report">
+          <div id="projectReportState" class="project-view-state"><strong>正在载入最近诊断报告</strong><p>请稍候</p></div>
+          <iframe id="projectReportFrame" class="project-view-frame" title="店铺诊断报告" hidden></iframe>
+        </section>
+
+        <section id="projectDataPanel" class="project-result-panel" data-project-panel="data" hidden>
+          <div id="projectDataState" class="project-view-state"><strong>正在载入最近数据表格</strong><p>请稍候</p></div>
+          <iframe id="projectDataFrame" class="project-view-frame" title="店铺经营数据表格" hidden></iframe>
+        </section>
+
+        <section id="projectHistoryPanel" class="section-band project-history-panel" data-project-panel="history" hidden>
+          <div class="section-head"><div><h2>历史报告与取数记录</h2><p>当前账号与批量账号任务统一归档</p></div><span id="storeHistoryCount" class="section-count">0 条</span></div>
+          <div class="data-table-wrap"><table class="data-table"><thead><tr><th>任务类型</th><th>执行方式</th><th>执行账号</th><th>完成时间</th><th>状态</th><th>平台异常</th><th>操作</th></tr></thead><tbody id="projectRunRows"></tbody></table></div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="/project.js"></script>
+</body>
+</html>
