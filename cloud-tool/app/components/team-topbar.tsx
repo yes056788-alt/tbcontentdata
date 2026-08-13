@@ -6,7 +6,7 @@ import { LockIcon } from "./icons";
 import { LogoutButton } from "./logout-button";
 import { useEffect, useRef } from "react";
 
-export type TeamTopbarPage = "home" | "projects" | "collect" | "report" | "accounts" | "team";
+export type TeamTopbarPage = "home" | "projects" | "report" | "accounts" | "team";
 
 type TeamTopbarProps = {
   activePage: TeamTopbarPage;
@@ -18,8 +18,7 @@ type TeamTopbarProps = {
 const navigation = [
   { id: "home", href: "/", label: "首页" },
   { id: "projects", href: "/workspace.html", label: "项目管理" },
-  { id: "collect", href: "/collect.html", label: "经营取数" },
-  { id: "report", href: "/report.html", label: "诊断报告" },
+  { id: "report", href: "/report.html", label: "一键取数" },
   { id: "accounts", href: "/accounts.html", label: "账号库管理" },
   { id: "team", href: "/admin", label: "团队管理" },
 ] as const;

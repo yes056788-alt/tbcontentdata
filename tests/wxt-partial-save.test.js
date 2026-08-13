@@ -9,6 +9,9 @@ assert.match(content, /requestReportData\(dateRange, 'marketingScene', \{ silent
 assert.match(content, /capturedMetrics/);
 assert.match(content, /missingMetrics/);
 assert.match(content, /saveBusinessDefenseWxtSnapshot\(data, 'marketingScene'\)/);
+assert.match(content, /async function saveBusinessDefenseWxtSnapshot/);
+assert.match(content, /await chrome\.storage\.local\.set/);
+assert.match(content, /await saveBusinessDefenseWxtSnapshot\(data, 'marketingScene'\)/);
 assert.doesNotMatch(content, /万相台接口已返回，但缺少.*missing\.join/);
 assert.match(background, /已取：.*capturedMetrics/);
 assert.match(background, /待补：.*missingMetrics/);

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,14 +11,17 @@ const webToolRoot = resolve(extensionRoot, "web-tool");
 const publicRoot = resolve(siteRoot, "public");
 const distClientRoot = resolve(siteRoot, "dist/client");
 const generatedAssetsPath = resolve(siteRoot, "app/server/generated-protected-assets.ts");
-const cloudNavigationStylesheet = "/cloud-team-navigation.css";
-const cloudNavigationScript = "/cloud-team-navigation.js";
+const cloudNavigationStylesheet = await versionedPublicAssetUrl("cloud-team-navigation.css");
+const cloudNavigationScript = await versionedPublicAssetUrl("cloud-team-navigation.js");
+const cloudAccountLockIcon = '<svg class="cloud-team-account-icon" aria-hidden="true" focusable="false" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="11" x="4" y="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"></path></svg>';
+const cloudAccountLogoutIcon = '<svg class="cloud-team-account-icon" aria-hidden="true" focusable="false" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 17l5-5-5-5M15 12H3M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"></path></svg>';
 
 const publicWebFiles = [
   "account-vault.js",
   "accounts.css",
   "accounts.js",
   "app.css",
+  "batch-report-export.js",
   "portal.css",
   "project.js",
   "report.css",
@@ -28,11 +32,17 @@ const publicWebFiles = [
 const protectedHtmlSources = [
   ["workspace.html", "index.html"],
   ["accounts.html", "accounts.html"],
-  ["collect.html", "collect.html"],
   ["report.html", "report.html"],
   ["data.html", "data.html"],
   ["report-view.html", "report-view.html"],
 ];
+const retiredProtectedClientAssets = ["collect.html"];
+
+async function versionedPublicAssetUrl(filename) {
+  const contents = await readFile(resolve(publicRoot, filename));
+  const version = createHash("sha256").update(contents).digest("hex").slice(0, 12);
+  return `/${filename}?v=${version}`;
+}
 
 await Promise.all([
   mkdir(publicRoot, { recursive: true }),
@@ -48,12 +58,6 @@ for (const name of publicWebFiles) {
   await copyFile(resolve(webToolRoot, name), resolve(publicRoot, name));
 }
 
-const legacyPageHtml = {};
-for (const [publicName, sourceName] of protectedHtmlSources) {
-  const html = await readFile(resolve(webToolRoot, sourceName), "utf8");
-  legacyPageHtml[publicName] = prepareHtml(html, publicName);
-}
-
 await Promise.all([
   copyFile(resolve(extensionRoot, "diagnosis-popup.js"), resolve(publicRoot, "diagnosis-popup.js")),
   copyFile(resolve(extensionRoot, "diagnosis-spec.js"), resolve(publicRoot, "diagnosis-spec.js")),
@@ -61,16 +65,33 @@ await Promise.all([
   copyFile(resolve(webToolRoot, "cloud-sync.js"), resolve(publicRoot, "cloud-sync.js")),
 ]);
 
+const versionedWebAssets = new Map(await Promise.all([
+  ...publicWebFiles,
+  "cloud-sync.js",
+  "diagnosis-popup.js",
+  "diagnosis-spec.js",
+  "xlsx.full.min.js",
+].map(async (name) => [name, await versionedPublicAssetUrl(name)])));
+
+const legacyPageHtml = {};
+for (const [publicName, sourceName] of protectedHtmlSources) {
+  const html = await readFile(resolve(webToolRoot, sourceName), "utf8");
+  legacyPageHtml[publicName] = prepareHtml(html, publicName);
+}
+
 function prepareHtml(input, filename) {
-  const normalized = input.replace(/^<!doctype html>/i, "<!DOCTYPE html>");
+  let normalized = input.replace(/^<!doctype html>/i, "<!DOCTYPE html>");
+  for (const [name, url] of versionedWebAssets) {
+    normalized = normalized.replaceAll(`"/${name}"`, `"${url}"`);
+  }
   const rewritten = addCloudTeamNavigation(
     normalized.replaceAll('/index.html', '/workspace.html'),
     filename,
   )
     .replace(/\s*<script src="\/cloud-team-navigation\.js"><\/script>\s*/g, "\n")
-    .replace(/\s*<script src="\/cloud-sync\.js"><\/script>\s*/g, "\n");
+    .replace(/\s*<script src="\/cloud-sync\.js(?:\?v=[a-f0-9]+)?"><\/script>\s*/g, "\n");
   const cloudScript = `  <script src="${cloudNavigationScript}"></script>\n` +
-    '  <script src="/cloud-sync.js"></script>\n';
+    `  <script src="${versionedWebAssets.get("cloud-sync.js")}"></script>\n`;
   const firstScript = rewritten.indexOf('  <script ');
   if (firstScript >= 0) {
     return rewritten.slice(0, firstScript) + cloudScript + rewritten.slice(firstScript);
@@ -86,15 +107,13 @@ function addCloudTeamNavigation(input, filename) {
     "</head>",
     `  <link rel="stylesheet" href="${cloudNavigationStylesheet}">\n</head>`,
   );
-  const activePage = filename === "collect.html" ? "collect"
-    : filename === "report.html" ? "report"
+  const activePage = filename === "report.html" ? "report"
       : filename === "accounts.html" ? "accounts"
         : "projects";
   const navigation = [
     ["home", "/", "首页"],
     ["projects", "/workspace.html", "项目管理"],
-    ["collect", "/collect.html", "经营取数"],
-    ["report", "/report.html", "诊断报告"],
+    ["report", "/report.html", "一键取数"],
     ["accounts", "/accounts.html", "账号库管理"],
     ["team", "/admin", "团队管理"],
   ].map(([id, href, label]) => {
@@ -102,7 +121,7 @@ function addCloudTeamNavigation(input, filename) {
     return `      <a class="cloud-team-nav-link${active ? " is-active" : ""}" href="${href}"${active ? ' aria-current="page"' : ""}>${label}</a>`;
   }).join("\n");
   const lockVaultButton = filename === "accounts.html"
-    ? '        <button id="lockVaultBtn" class="cloud-team-account-button" type="button" hidden>锁定账号库</button>\n'
+    ? `        <button id="lockVaultBtn" class="cloud-team-account-button" type="button" hidden>${cloudAccountLockIcon}<span class="cloud-team-account-button-label">锁定账号库</span></button>\n`
     : "";
   const header = `<header class="${match[1]} cloud-team-topbar">
     <a class="cloud-team-brand" href="/" aria-label="淘宝经营数据团队工作台首页">
@@ -116,8 +135,8 @@ ${navigation}
       <span id="cloudTeamAvatar" class="cloud-team-avatar" aria-hidden="true">用</span>
       <span class="cloud-team-account-copy"><strong id="cloudTeamAccountName">正在识别…</strong><small id="cloudTeamAccountRole">团队账号</small></span>
       <span class="cloud-team-account-actions">
-${lockVaultButton}        <a class="cloud-team-account-button" href="/change-password">修改密码</a>
-        <button id="cloudTeamLogout" class="cloud-team-account-button" type="button">退出登录</button>
+${lockVaultButton}        <a class="cloud-team-account-button" href="/change-password">${cloudAccountLockIcon}<span class="cloud-team-account-button-label">修改密码</span></a>
+        <button id="cloudTeamLogout" class="cloud-team-account-button" type="button">${cloudAccountLogoutIcon}<span id="cloudTeamLogoutLabel" class="cloud-team-account-button-label">退出登录</span></button>
       </span>
       <span id="connectionState" class="connection-state connecting" hidden>正在连接数据助手</span>
       <span id="extensionVersion" hidden></span>
@@ -129,6 +148,7 @@ ${lockVaultButton}        <a class="cloud-team-account-button" href="/change-pas
 async function removeProtectedClientAssets(root) {
   await Promise.all([
     ...protectedHtmlSources.map(([name]) => rm(resolve(root, name), { force: true })),
+    ...retiredProtectedClientAssets.map((name) => rm(resolve(root, name), { force: true })),
     rm(resolve(root, "downloads"), { recursive: true, force: true }),
   ]);
 }

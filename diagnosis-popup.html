@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>经营攻防一键取数</title>
+  <title>经营数据表格</title>
   <style>
     html {
       width: 780px;
@@ -49,7 +49,8 @@
       flex-wrap: wrap;
       justify-content: flex-end;
     }
-    button {
+    button,
+    .primary-link {
       height: 34px;
       padding: 0 12px;
       border: 1px solid #d0d5dd;
@@ -58,8 +59,15 @@
       color: #344054;
       font-weight: 650;
       cursor: pointer;
+      box-sizing: border-box;
     }
-    button.primary {
+    .primary-link {
+      display: inline-flex;
+      align-items: center;
+      text-decoration: none;
+    }
+    button.primary,
+    .primary-link {
       border-color: #1677ff;
       background: #1677ff;
       color: #fff;
@@ -172,11 +180,11 @@
 <body>
   <header>
     <div>
-      <h1>经营攻防一键取数</h1>
-      <div class="subtitle">按钉钉文档指标口径汇总光合、达摩盘、生意参谋和万相台数据</div>
+      <h1>经营数据表格</h1>
+      <div class="subtitle">只读展示一键取数归档；新任务请从团队网页发起</div>
     </div>
     <div class="actions">
-      <button id="autoCollectBtn" class="primary" type="button">自动取数</button>
+      <a class="primary-link" href="https://tbdata.aizicheng.com/report.html" target="_blank" rel="noreferrer">打开网页一键取数</a>
       <button id="refreshBtn" type="button">刷新</button>
       <button id="copyBtn" type="button">复制表格</button>
       <button id="exportBtn" type="button">导出 Excel</button>

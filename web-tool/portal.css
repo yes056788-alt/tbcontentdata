@@ -762,8 +762,171 @@ select:hover {
 
 .batch-selection-grid {
   display: grid;
-  grid-template-columns: minmax(150px, 0.55fr) minmax(240px, 1.45fr) minmax(150px, 0.7fr);
+  grid-template-columns: minmax(240px, 1fr) minmax(180px, 260px);
+  align-items: end;
   gap: 14px;
+}
+
+.batch-account-picker {
+  min-width: 0;
+  margin: 14px 0 0;
+  padding: 0 14px 14px;
+  border: 1px solid #dce2ea;
+  background: #ffffff;
+}
+
+.batch-account-picker legend {
+  padding: 0 6px;
+  color: #475467;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.batch-account-picker-head {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #eaecf0;
+  color: #667085;
+  font-size: 11px;
+}
+
+.batch-account-picker-head > div {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.batch-account-picker .text-button {
+  min-height: 36px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: #0b67d1;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.batch-account-picker .text-button:hover:not(:disabled) {
+  background: #f3f7ff;
+}
+
+.batch-account-picker .text-button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.batch-account-list {
+  display: grid;
+  max-height: 252px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+  overflow: auto;
+}
+
+.batch-account-option {
+  display: flex;
+  min-width: 0;
+  min-height: 58px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid #dce2ea;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.batch-account-option:has(input:checked) {
+  border-color: #84adff;
+  background: #f3f7ff;
+  box-shadow: inset 3px 0 #0b67d1;
+}
+
+.batch-account-option:has(input:focus-visible) {
+  outline: 2px solid rgba(11, 103, 209, .3);
+  outline-offset: 2px;
+}
+
+.batch-account-option:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.batch-account-option input {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  margin: 0;
+  accent-color: #0b67d1;
+}
+
+.batch-account-option span,
+.batch-account-option strong,
+.batch-account-option small {
+  display: block;
+  min-width: 0;
+}
+
+.batch-account-option span {
+  flex: 1;
+}
+
+.batch-account-option strong {
+  overflow: hidden;
+  color: #344054;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-account-option small {
+  margin-top: 2px;
+  overflow: hidden;
+  color: #667085;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-account-empty {
+  grid-column: 1 / -1;
+  min-height: 74px;
+  padding: 25px 12px;
+  border: 1px dashed #cbd5e1;
+  color: #667085;
+  font-size: 12px;
+  text-align: center;
+}
+
+.batch-account-alert {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 20px;
+}
+
+.batch-account-alert strong,
+.batch-account-alert span {
+  display: block;
+}
+
+.batch-account-alert strong {
+  color: #b42318;
+  font-size: 13px;
+}
+
+.batch-account-alert span {
+  max-width: 620px;
+  color: #667085;
+  line-height: 1.6;
+  text-align: center;
 }
 
 .batch-entry {
@@ -1193,6 +1356,373 @@ select:hover {
   border-top: 0;
 }
 
+.batch-export-dialog {
+  width: min(920px, calc(100vw - 32px));
+  max-width: none;
+  max-height: min(820px, calc(100dvh - 32px));
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #cfd8e6;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #253044;
+  box-shadow: 0 24px 72px rgba(20, 41, 74, .25);
+}
+
+.batch-export-dialog::backdrop {
+  background: rgba(16, 31, 54, .58);
+}
+
+.batch-export-card {
+  display: grid;
+  max-height: min(820px, calc(100dvh - 32px));
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.batch-export-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px 22px 17px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.batch-export-head h2 {
+  margin: 3px 0 4px;
+  color: #182230;
+  font-size: 20px;
+}
+
+.batch-export-head p,
+.batch-export-hint,
+.batch-export-progress p {
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
+}
+
+.batch-export-close {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border: 0;
+  border-radius: 6px;
+  background: #f3f6fa;
+  color: #667085;
+  cursor: pointer;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.batch-export-setup,
+.batch-export-progress {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px;
+}
+
+.batch-export-scope,
+.batch-export-group-options fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.batch-export-scope > legend,
+.batch-export-group-options legend {
+  margin-bottom: 8px;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.batch-export-scope {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.batch-export-scope > legend {
+  grid-column: 1 / -1;
+}
+
+.batch-export-scope > label {
+  display: flex;
+  min-height: 68px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d5deea;
+  border-radius: 7px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.batch-export-scope > label:has(input:checked) {
+  border-color: #75aae5;
+  background: #eff6ff;
+  box-shadow: inset 3px 0 #0b67d1;
+}
+
+.batch-export-scope input,
+.batch-export-group-options input,
+.batch-export-item input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin: 2px 0 0;
+}
+
+.batch-export-scope strong,
+.batch-export-scope small {
+  display: block;
+}
+
+.batch-export-scope strong {
+  color: #253044;
+  font-size: 13px;
+}
+
+.batch-export-scope small {
+  margin-top: 3px;
+  color: #667085;
+  font-size: 11px;
+}
+
+.batch-export-group-options {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(300px, 1.2fr);
+  gap: 18px;
+  margin-top: 15px;
+  padding: 14px;
+  border: 1px solid #dce3ed;
+  background: #f8fafc;
+}
+
+.batch-export-group-options[hidden] {
+  display: none;
+}
+
+.batch-export-group-options > label > span {
+  display: block;
+  margin-bottom: 6px;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.batch-export-group-options select {
+  width: 100%;
+  height: 38px;
+  padding: 0 30px 0 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  background: #fff;
+}
+
+.batch-export-group-options fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: center;
+  gap: 8px 16px;
+}
+
+.batch-export-group-options fieldset legend {
+  width: 100%;
+}
+
+.batch-export-group-options fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #475467;
+  font-size: 12px;
+}
+
+.batch-export-toolbar {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 14px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.batch-export-toolbar > div {
+  display: flex;
+  gap: 14px;
+}
+
+.batch-export-toolbar .text-button {
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #0b67d1;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.batch-export-toolbar strong {
+  color: #344054;
+  font-size: 12px;
+}
+
+.batch-export-list {
+  display: grid;
+  max-height: 330px;
+  gap: 7px;
+  margin-top: 10px;
+  overflow: auto;
+}
+
+.batch-export-item {
+  display: grid;
+  min-height: 58px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid #dde5ef;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.batch-export-item:has(input:checked) {
+  border-color: #9bc2ee;
+  background: #f5f9ff;
+}
+
+.batch-export-item:has(input:focus-visible) {
+  outline: 3px solid rgba(11, 103, 209, .22);
+  outline-offset: 1px;
+}
+
+.batch-export-item.unavailable {
+  cursor: not-allowed;
+  opacity: .72;
+  background: #f8fafc;
+}
+
+.batch-export-placeholder {
+  width: 18px;
+  color: #98a2b3;
+  text-align: center;
+}
+
+.batch-export-item strong,
+.batch-export-item small {
+  display: block;
+}
+
+.batch-export-item strong {
+  overflow: hidden;
+  color: #253044;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-export-item small {
+  margin-top: 3px;
+  color: #667085;
+  font-size: 10px;
+}
+
+.batch-export-item > b {
+  padding: 3px 7px;
+  border-radius: 9px;
+  background: #edf7f2;
+  color: #067647;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.batch-export-item > b.partial {
+  background: #fff3e0;
+  color: #a34b00;
+}
+
+.batch-export-item > b.failed {
+  background: #fef0ef;
+  color: #b42318;
+}
+
+.batch-export-empty {
+  display: grid;
+  min-height: 150px;
+  place-content: center;
+  border: 1px dashed #cbd5e1;
+  color: #667085;
+  text-align: center;
+  font-size: 12px;
+}
+
+.batch-export-hint {
+  margin-top: 9px;
+}
+
+.batch-export-progress {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.batch-export-progress[hidden] {
+  display: none;
+}
+
+.batch-export-progress > strong {
+  color: #253044;
+  font-size: 16px;
+}
+
+.batch-export-progress progress {
+  width: 100%;
+  height: 10px;
+  accent-color: #0b67d1;
+}
+
+.batch-export-progress ul {
+  max-height: 360px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.batch-export-progress li {
+  padding: 7px 0;
+  border-bottom: 1px solid #edf1f5;
+  color: #667085;
+  font-size: 11px;
+}
+
+.batch-export-progress li.success {
+  color: #067647;
+}
+
+.batch-export-progress li.failed {
+  color: #b42318;
+}
+
+.batch-export-progress li.skipped {
+  color: #667085;
+}
+
+.batch-export-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 13px 22px;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
 html.embedded-view .portal-topbar,
 html.embedded-view .command-band {
   display: none;
@@ -1250,6 +1780,17 @@ html.embedded-view .report-shell {
 }
 
 @media (max-width: 760px) {
+  .batch-export-close,
+  .batch-export-actions .button {
+    min-height: 44px;
+  }
+
+  .batch-export-close {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
+  }
+
   .portal-topbar {
     grid-template-columns: 1fr;
     padding: 0;
@@ -1380,6 +1921,10 @@ html.embedded-view .report-shell {
     grid-template-columns: 1fr 1fr;
   }
 
+  .batch-account-list {
+    grid-template-columns: 1fr;
+  }
+
   .batch-unlock-row {
     grid-template-columns: 1fr;
   }
@@ -1405,6 +1950,29 @@ html.embedded-view .report-shell {
   .project-title-band {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .batch-export-dialog,
+  .batch-export-card {
+    width: 100vw;
+    max-height: 100dvh;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .batch-export-scope,
+  .batch-export-group-options {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-export-list {
+    max-height: none;
+  }
+
+  .batch-export-actions {
+    position: sticky;
+    bottom: 0;
   }
 }
 
@@ -1440,5 +2008,50 @@ html.embedded-view .report-shell {
 
   .batch-session-notice {
     align-items: flex-start;
+  }
+
+  .batch-account-picker-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 0;
+  }
+
+  .task-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .task-actions .button {
+    flex: 1 1 130px;
+  }
+
+  .batch-export-head,
+  .batch-export-setup,
+  .batch-export-progress,
+  .batch-export-actions {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .batch-export-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 6px 0 9px;
+  }
+
+  .batch-export-item {
+    grid-template-columns: 18px minmax(0, 1fr);
+  }
+
+  .batch-export-item > b {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .batch-export-actions .button {
+    min-height: 44px;
+    flex: 1;
   }
 }

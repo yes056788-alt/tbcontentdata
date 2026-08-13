@@ -1,4 +1,4 @@
-// 经营攻防一键取数弹窗：汇总插件已采集快照并导出完整指标表。
+// 经营数据表格：只读汇总一键取数归档，并支持手填、复制与导出。
 (function () {
   'use strict';
 
@@ -13,6 +13,7 @@
     'dmpPortraitSnapshotV1',
     'businessDefenseManualInputsV1',
     'businessDefenseAutoCollectStatusV1',
+    'taobaoContentDiagnosisReportStatusV1',
   ];
   const CLEARABLE_STORAGE_KEYS = [
     ...STORAGE_KEYS,
@@ -206,22 +207,6 @@
           return;
         }
         resolve();
-      });
-    });
-  }
-
-  function sendRuntimeMessage(message) {
-    if (!IS_EXTENSION_PAGE) {
-      return requestWebBridge('startAutoCollect', { message }, 20 * 60 * 1000);
-    }
-    return new Promise((resolve) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        const error = chrome.runtime.lastError;
-        if (error) {
-          resolve({ ok: false, message: error.message || '扩展后台未响应。' });
-          return;
-        }
-        resolve(response || { ok: false, message: '扩展后台未返回结果。' });
       });
     });
   }
@@ -546,12 +531,73 @@
     });
   }
 
+  function hasTaskStatus(status) {
+    return Boolean(status && typeof status === 'object' && (
+      status.running || status.finishedAt || status.error ||
+      (Array.isArray(status.results) && status.results.length)
+    ));
+  }
+
+  function dataTableStatusFromReport(status) {
+    if (!hasTaskStatus(status)) return {};
+    const sourceResults = Array.isArray(status.results) ? status.results : [];
+    const sourceActive = new Set(
+      Array.isArray(status.activeSteps)
+        ? status.activeSteps.map(String)
+        : (status.currentStep ? [String(status.currentStep)] : [])
+    );
+    const definitions = [
+      { name: '光合内容指标', keys: ['guanghe'], sourceNames: ['光合渠道与资产诊断'] },
+      { name: '生意参谋流量指标', keys: ['sycm'], sourceNames: ['生意参谋流量诊断'] },
+      { name: '万相台内容投放', keys: ['wxtMarketing', 'wxtShortVideo'], sourceNames: ['万相台营销场景报告', '万相台短视频诊断'] },
+      { name: 'DMP人群资产画像', keys: ['dmp'], sourceNames: ['内容人群画像诊断'] },
+    ];
+    const activeSteps = definitions.filter((definition) => (
+      definition.sourceNames.some((name) => sourceActive.has(name))
+    )).map((definition) => definition.name);
+    const results = definitions.flatMap((definition) => {
+      if (status.running && activeSteps.includes(definition.name)) return [];
+      const matches = sourceResults.filter((result) => (
+        definition.keys.includes(String(result && result.key || '')) ||
+        definition.sourceNames.includes(String(result && result.name || ''))
+      ));
+      if (!matches.length) return [];
+      const skipped = matches.length === definition.keys.length && matches.every((result) => result.skipped);
+      const completed = matches.filter((result) => !result.skipped);
+      const successes = completed.filter((result) => result.ok !== false);
+      const incomplete = !skipped && matches.length < definition.keys.length;
+      const partial = incomplete || completed.some((result) => result.partial || result.ok === false);
+      return [{
+        name: definition.name,
+        ok: skipped || successes.length > 0,
+        skipped,
+        partial: !skipped && partial,
+        message: matches.map((result) => result.message).filter(Boolean).join('；'),
+      }];
+    });
+    return {
+      running: Boolean(status.running),
+      startedAt: status.startedAt,
+      updatedAt: status.updatedAt,
+      finishedAt: status.finishedAt,
+      error: status.error,
+      total: definitions.length,
+      stepIndex: results.length,
+      currentStep: activeSteps.join('、'),
+      activeSteps,
+      results,
+    };
+  }
+
   async function loadRows() {
     try {
       const data = await getStorage(STORAGE_KEYS);
       updateConnectionState(true, webBridgeVersion);
       manualInputs = data.businessDefenseManualInputsV1 || {};
-      autoCollectStatus = data.businessDefenseAutoCollectStatusV1 || {};
+      const businessStatus = data.businessDefenseAutoCollectStatusV1 || {};
+      autoCollectStatus = hasTaskStatus(businessStatus)
+        ? businessStatus
+        : dataTableStatusFromReport(data.taobaoContentDiagnosisReportStatusV1 || {});
       if (autoCollectStatus.running || autoCollectStatus.finishedAt || autoCollectStatus.error) {
         transientNotice = '';
       }
@@ -635,21 +681,16 @@
         ['待填写', manual],
       ].map(item => '<div><span>' + item[0] + '</span><strong>' + item[1] + '</strong></div>').join('');
     }
-    const button = document.getElementById('autoCollectBtn');
     const clearButton = document.getElementById('clearBtn');
     const hint = document.getElementById('hint');
     renderPlatformProgress(autoCollectStatus);
     if (!webBridgeConnected) {
-      button.disabled = true;
       clearButton.disabled = true;
-      button.textContent = '数据助手未连接';
       hint.textContent = transientNotice || '请在 Chrome 扩展页重载“淘宝内容诊断插件”，然后刷新本页。';
       return;
     }
     if (!parallelWebToolSupported()) {
-      button.disabled = true;
       clearButton.disabled = false;
-      button.textContent = '需要重载扩展';
       hint.textContent = '当前扩展仍是旧版，请在 Chrome 扩展管理页重载“淘宝内容诊断插件”，再刷新本页。';
       return;
     }
@@ -659,36 +700,33 @@
       const active = Array.isArray(autoCollectStatus.activeSteps)
         ? autoCollectStatus.activeSteps
         : (autoCollectStatus.currentStep ? [autoCollectStatus.currentStep] : []);
-      button.disabled = true;
       clearButton.disabled = true;
-      button.textContent = '正在取数 ' + index + '/' + total;
-      hint.textContent = '正在并行读取：' + (active.join('、') || '准备平台任务') + '。请保持各平台账号已登录。';
+      hint.textContent = '一键取数进行中（' + index + '/' + total + '）：' +
+        (active.join('、') || '准备平台任务') + '。请保持各平台账号已登录。';
       return;
     }
-    button.disabled = false;
     clearButton.disabled = false;
-    button.textContent = autoCollectStatus.running ? '重新取数' : '一键取数';
     if (transientNotice) {
       hint.textContent = transientNotice;
       return;
     }
     if (autoCollectStatus.running) {
-      hint.textContent = '上次取数已中断，可点击“重新取数”再次执行。';
+      hint.textContent = '上次取数已中断，请返回团队网页的“一键取数”重新执行。';
       return;
     }
     if (autoCollectStatus.error) {
-      hint.textContent = '自动取数失败：' + autoCollectStatus.error;
+      hint.textContent = '一键取数失败：' + autoCollectStatus.error;
       return;
     }
     const statusResults = Array.isArray(autoCollectStatus.results) ? autoCollectStatus.results : [];
     if (autoCollectStatus.finishedAt && statusResults.length) {
-      hint.textContent = '上次自动取数：' + statusResults.map((item) => (
+      hint.textContent = '本次一键取数归档：' + statusResults.map((item) => (
         (item.skipped ? '跳过 ' : (!item.ok ? '失败 ' : (item.partial ? '部分完成 ' : '成功 '))) +
           item.name + (item.message ? '（' + item.message + '）' : '')
       )).join('；');
       return;
     }
-    hint.textContent = '点击“一键取数”后，数据助手会在后台并行读取光合、生意参谋、万相台和DMP。';
+    hint.textContent = '此处只读展示归档数据；新任务请从团队网页的“一键取数”发起。';
   }
 
   function renderPlatformTableSelection() {
@@ -935,65 +973,6 @@
     XLSX.writeFile(workbook, '经营攻防内容诊断取数_' + new Date().toISOString().slice(0, 10) + '.xlsx');
   }
 
-  async function autoCollect() {
-    const previousStatus = autoCollectStatus;
-    const now = Date.now();
-    let shouldReload = false;
-    let backgroundRunning = false;
-    transientNotice = '';
-    autoCollectStatus = {
-      running: true,
-      startedAt: now,
-      updatedAt: now,
-      total: 4,
-      stepIndex: 0,
-      currentStep: '跨平台并行启动',
-      activeSteps: ['光合内容指标', '生意参谋流量指标', '万相台内容投放', 'DMP人群资产画像'],
-      results: [],
-    };
-    render(currentRows);
-    try {
-      const response = await sendRuntimeMessage({ type: 'BUSINESS_DEFENSE_AUTO_COLLECT' });
-      if (response.ok) {
-        shouldReload = true;
-        if (response.running) {
-          backgroundRunning = true;
-          transientNotice = response.started === false
-            ? '取数任务已在后台运行，正在恢复并行进度。'
-            : '四个平台已并行启动，数据会按完成顺序更新。';
-        } else {
-          const summary = (response.results || []).map((item) => (
-            item.skipped
-              ? '跳过 ' + item.name
-              : (!item.ok
-                ? '失败 ' + item.name + '：' + (item.message || '失败')
-                : (item.partial
-                  ? '部分完成 ' + item.name + (item.message ? '：' + item.message : '')
-                  : '成功 ' + item.name + (item.message ? '：' + item.message : '')))
-          )).join('；');
-          transientNotice = '自动取数完成：' + (summary || '未返回明细');
-        }
-      } else {
-        autoCollectStatus = previousStatus;
-        transientNotice = '自动取数失败：' + (response.message || '未知错误');
-      }
-    } catch (error) {
-      autoCollectStatus = previousStatus;
-      transientNotice = '自动取数异常：' + (error && error.message ? error.message : String(error));
-    } finally {
-      if (shouldReload) {
-        if (backgroundRunning) {
-          render(currentRows);
-          window.setTimeout(loadRows, 350);
-        } else {
-          await loadRows();
-        }
-      } else {
-        render(currentRows);
-      }
-    }
-  }
-
   async function clearData() {
     if (autoCollectIsActive(autoCollectStatus)) return;
     if (!window.confirm('确认清空一键取数快照、手填数据和上次运行状态？各平台线上数据不会被删除。')) {
@@ -1006,7 +985,7 @@
       await removeStorage(CLEARABLE_STORAGE_KEYS);
       manualInputs = {};
       autoCollectStatus = {};
-      transientNotice = '已清空本地汇总数据。可重新点击“自动取数”生成一份全新快照。';
+      transientNotice = '已清空本地汇总数据。请从团队网页的“一键取数”生成新归档。';
       await loadRows();
     } catch (error) {
       transientNotice = '清空失败：' + (error && error.message ? error.message : String(error));
@@ -1017,7 +996,6 @@
     }
   }
 
-  document.getElementById('autoCollectBtn').addEventListener('click', autoCollect);
   document.getElementById('refreshBtn').addEventListener('click', loadRows);
   document.getElementById('copyBtn').addEventListener('click', copyTable);
   document.getElementById('exportBtn').addEventListener('click', exportExcel);

@@ -10,6 +10,9 @@
   const REPORT_KEY = 'taobaoContentDiagnosisReportV1';
   const WXT_KEY = 'taobaoContentDiagnosisWxtReportV1';
   const STORAGE_KEYS = [STATUS_KEY, REPORT_KEY, WXT_KEY];
+  const SEARCH_PARAMS = new URLSearchParams(location.search);
+  const ARCHIVE_RUN_ID = SEARCH_PARAMS.get('archive') || '';
+  const BUILDER_MODE = SEARCH_PARAMS.get('builder') === '1';
   const STEPS = [
     { key: 'sycm', name: '生意参谋流量诊断' },
     { key: 'guanghe', name: '光合渠道与资产诊断' },
@@ -39,13 +42,13 @@
 
   let bridgeConnected = false;
   let bridgeVersion = '';
-  let bridgeCapabilities = new Set();
   let requestSequence = 0;
   let scheduledLoad = null;
   let transientNotice = '';
   let reportStatus = {};
   let reportData = null;
   let wxtReport = null;
+  let archiveRun = null;
   let activeSection = 'flow';
   let guangheView = 'channel';
   const pendingRequests = new Map();
@@ -114,20 +117,12 @@
     return Number.isFinite(time) && time > 0 ? new Date(time).toLocaleString('zh-CN') : '';
   }
 
-  function reportGenerationSupported() {
-    return bridgeCapabilities.has('contentDiagnosisReport');
-  }
-
-  function updateConnection(connected, version, message, capabilities) {
+  function updateConnection(connected, version, message) {
     bridgeConnected = Boolean(connected);
     if (version) bridgeVersion = String(version);
-    if (Array.isArray(capabilities)) bridgeCapabilities = new Set(capabilities.map(String));
-    const outdated = bridgeConnected && !reportGenerationSupported();
     const state = document.getElementById('connectionState');
-    state.className = 'connection-state ' + (bridgeConnected && !outdated ? 'connected' : 'disconnected');
-    state.textContent = outdated
-      ? '数据助手需重载'
-      : (bridgeConnected ? '数据助手已连接' : (message || '数据助手未连接'));
+    state.className = 'connection-state ' + (bridgeConnected ? 'connected' : 'disconnected');
+    state.textContent = bridgeConnected ? '数据助手已连接' : (message || '数据助手未连接');
     document.getElementById('extensionVersion').textContent = bridgeVersion ? 'v' + bridgeVersion : '';
     updateButtons();
   }
@@ -156,12 +151,12 @@
     if (!message || message.channel !== CHANNEL) return;
     if (message.type === 'ready') {
       updateConnection(true, message.version || '', '', message.capabilities);
-      scheduleLoad();
+      if (!BUILDER_MODE) scheduleLoad();
       return;
     }
     if (message.type === 'storageChanged') {
       updateConnection(true, message.version || '', '', message.capabilities);
-      if ((message.keys || []).some((key) => STORAGE_KEYS.includes(key))) scheduleLoad();
+      if (!BUILDER_MODE && (message.keys || []).some((key) => STORAGE_KEYS.includes(key))) scheduleLoad();
       return;
     }
     if (message.type !== 'response' || !message.requestId) return;
@@ -187,16 +182,35 @@
 
   async function loadReport() {
     try {
-      const stored = await requestBridge('getStorage', { keys: STORAGE_KEYS }, 30000);
-      reportStatus = stored && stored[STATUS_KEY] || {};
-      reportData = stored && stored[REPORT_KEY] || null;
-      wxtReport = stored && stored[WXT_KEY] || null;
+      if (ARCHIVE_RUN_ID) {
+        const response = await requestBridge('getStoreRun', { runId: ARCHIVE_RUN_ID }, 45000);
+        const run = response && response.run;
+        if (!run || typeof run !== 'object' || run.runId !== ARCHIVE_RUN_ID) {
+          throw new Error('未找到这条店铺历史归档。');
+        }
+        applyArchiveRun(run);
+      } else {
+        const stored = await requestBridge('getStorage', { keys: STORAGE_KEYS }, 30000);
+        reportStatus = stored && stored[STATUS_KEY] || {};
+        reportData = stored && stored[REPORT_KEY] || null;
+        wxtReport = stored && stored[WXT_KEY] || null;
+        archiveRun = null;
+      }
       if (reportStatus.running || reportStatus.finishedAt || reportStatus.error) transientNotice = '';
       render();
     } catch (error) {
       updateConnection(false, '', error.message);
       document.getElementById('reportNotice').textContent = error.message;
     }
+  }
+
+  function applyArchiveRun(run) {
+    if (!run || typeof run !== 'object' || !run.runId) throw new Error('店铺历史归档无效。');
+    const snapshots = run.snapshots && typeof run.snapshots === 'object' ? run.snapshots : {};
+    reportStatus = snapshots[STATUS_KEY] || {};
+    reportData = snapshots[REPORT_KEY] || null;
+    wxtReport = snapshots[WXT_KEY] || null;
+    archiveRun = run;
   }
 
   function reportIsRunning() {
@@ -206,14 +220,8 @@
   }
 
   function updateButtons() {
-    const running = reportIsRunning();
     const hasData = Boolean(reportData) || sectionHasData('flow') || sectionHasData('guanghe') ||
       sectionHasData('wxt') || sectionHasData('shortVideo') || sectionHasData('dmp');
-    const generate = document.getElementById('generateReportBtn');
-    if (generate) {
-      generate.disabled = !bridgeConnected || !reportGenerationSupported() || running;
-      generate.textContent = running ? '正在生成…' : '一键生成报告';
-    }
     const refresh = document.getElementById('refreshReportBtn');
     const exportButton = document.getElementById('exportReportBtn');
     const clear = document.getElementById('clearReportBtn');
@@ -305,10 +313,6 @@
 
   function renderNotice() {
     const notice = document.getElementById('reportNotice');
-    if (bridgeConnected && !reportGenerationSupported()) {
-      notice.textContent = '当前扩展版本不支持报告任务，请在 Chrome 扩展管理页重载“淘宝内容诊断插件”，再刷新本页。';
-      return;
-    }
     if (transientNotice) {
       notice.textContent = transientNotice;
       return;
@@ -945,92 +949,215 @@
     updateButtons();
   }
 
-  function exportReport() {
+  function exportFilenamePart(value, fallback) {
+    const cleaned = String(value || '').normalize('NFKC')
+      .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '')
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .replace(/\s+/g, ' ')
+      .replace(/^[.\s]+|[.\s]+$/g, '')
+      .slice(0, 60);
+    return cleaned || fallback;
+  }
+
+  function sanitizeExportMarkup(markup) {
+    const template = document.createElement('template');
+    template.innerHTML = String(markup || '');
+    template.content.querySelectorAll('script,iframe,object,embed,base,meta,link').forEach((node) => node.remove());
+    template.content.querySelectorAll('*').forEach((node) => {
+      Array.from(node.attributes || []).forEach((attribute) => {
+        const name = attribute.name.toLowerCase();
+        const value = String(attribute.value || '').trim();
+        if (name.startsWith('on') || name === 'srcdoc') {
+          node.removeAttribute(attribute.name);
+          return;
+        }
+        if (['href', 'src', 'action', 'formaction', 'xlink:href'].includes(name) &&
+            /^(?:javascript|vbscript|data\s*:\s*text\/html)/i.test(value.replace(/[\u0000-\u0020]+/g, ''))) {
+          node.removeAttribute(attribute.name);
+        }
+      });
+    });
+    return template.innerHTML;
+  }
+
+  function sanitizeExportStyles(styles) {
+    return String(styles || '').replace(/<\/style/gi, '<\\/style');
+  }
+
+  function buildExportReportDocument(metadata) {
+    const meta = metadata && typeof metadata === 'object' ? metadata : {};
     const embeddedBody = (markup) => {
       const template = document.createElement('template');
-      template.innerHTML = String(markup || '');
+      template.innerHTML = sanitizeExportMarkup(markup);
       const duplicateHeader = template.content.querySelector('.wxt-report-head');
       if (duplicateHeader) duplicateHeader.remove();
       return template.innerHTML;
     };
-    const missingChapter = (section) => '<div class="export-missing"><strong>本章节未生成</strong><p>' +
+    const missingSection = (section) => '<div class="export-missing"><strong>本模块未生成</strong><p>' +
       escapeHtml(sectionError(section) || '本次任务未选择该平台，或平台未返回可用数据。') + '</p></div>';
-    const chapter = (index, title, subtitle, content) => '<section class="export-chapter">' +
-      '<header class="export-chapter-head"><span>' + String(index).padStart(2, '0') + ' / 05</span><h1>' + title +
-      '</h1><p>' + subtitle + '</p></header><div class="export-chapter-body">' + content + '</div></section>';
-    const flow = chapter(1, '生意参谋流量诊断', '最近30个完整自然日 · 内容指标来自光合资产总览',
-      sectionHasData('flow') ? buildFlowMarkup() : missingChapter('flow'));
-    const guanghe = chapter(2, '光合渠道诊断', '渠道视角与资产视角', sectionHasData('guanghe')
-      ? '<h2>渠道视角</h2>' + buildGuangheMarkup('channel', true) + '<h2>资产视角</h2>' + buildGuangheMarkup('asset', true)
-      : missingChapter('guanghe'));
-    const marketing = chapter(3, '万相台营销报告', '营销场景、花费结构与投放效果', sectionHasData('wxt')
-      ? embeddedBody(normalizeWxtMarketingMarkup(wxtReport.marketing.markup)) : missingChapter('wxt'));
-    const shortVideo = chapter(4, '短视频诊断', '免费内容与付费投放综合诊断', sectionHasData('shortVideo')
-      ? embeddedBody(normalizeWxtShortVideoMarkup(wxtReport.shortVideo.markup)) : missingChapter('shortVideo'));
-    const dmp = chapter(5, '内容人群画像诊断', '达摩盘 · 年龄与消费能力等级', sectionHasData('dmp')
-      ? buildDmpMarkup() : missingChapter('dmp'));
-    const css = 'body{margin:0;background:#eef1f5;color:#182230;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;letter-spacing:0}' +
-      '.export-cover{max-width:1120px;margin:24px auto 0;padding:28px;background:#fff;border-top:4px solid #0b67d1}.export-cover span{color:#0b67d1;font-size:12px;font-weight:750}.export-cover h1{margin:8px 0 5px;font-size:30px}.export-cover p{margin:0;color:#667085}' +
-      '.export-chapter{max-width:1120px;margin:18px auto 28px;background:#f4f6f8}.export-chapter-head{padding:22px 24px;background:#243b72;color:#fff}.export-chapter-head span{color:#9ec5ff;font-size:11px;font-weight:750}.export-chapter-head h1{margin:5px 0 4px;font-size:24px}.export-chapter-head p{margin:0;color:#dbe7ff;font-size:12px}.export-chapter-body{padding:18px 0}.export-chapter-body>h2{margin:18px 18px 10px;font-size:17px}.export-missing{display:grid;min-height:260px;place-content:center;padding:24px;text-align:center}.export-missing strong{font-size:18px}.export-missing p{max-width:580px;margin:6px 0 0;color:#667085}' +
+    const initialGuangheView = guangheView === 'asset' ? 'asset' : 'channel';
+    const guangheViews = sectionHasData('guanghe')
+      ? '<div class="export-subnav" role="tablist" aria-label="光合诊断视角">' +
+        '<button id="export-guanghe-tab-channel" class="' + (initialGuangheView === 'channel' ? 'active' : '') +
+        '" type="button" role="tab" aria-selected="' + (initialGuangheView === 'channel' ? 'true' : 'false') +
+        '" aria-controls="export-guanghe-panel-channel" tabindex="' + (initialGuangheView === 'channel' ? '0' : '-1') +
+        '" data-export-guanghe-view="channel">渠道视角</button>' +
+        '<button id="export-guanghe-tab-asset" class="' + (initialGuangheView === 'asset' ? 'active' : '') +
+        '" type="button" role="tab" aria-selected="' + (initialGuangheView === 'asset' ? 'true' : 'false') +
+        '" aria-controls="export-guanghe-panel-asset" tabindex="' + (initialGuangheView === 'asset' ? '0' : '-1') +
+        '" data-export-guanghe-view="asset">资产视角</button></div>' +
+        '<div id="export-guanghe-panel-channel" role="tabpanel" aria-labelledby="export-guanghe-tab-channel"' +
+        ' data-export-guanghe-panel="channel"' + (initialGuangheView === 'channel' ? '' : ' hidden') + '>' +
+        buildGuangheMarkup('channel', true) + '</div>' +
+        '<div id="export-guanghe-panel-asset" role="tabpanel" aria-labelledby="export-guanghe-tab-asset"' +
+        ' data-export-guanghe-panel="asset"' + (initialGuangheView === 'asset' ? '' : ' hidden') + '>' +
+        buildGuangheMarkup('asset', true) + '</div>'
+      : missingSection('guanghe');
+    const sections = [
+      {
+        key: 'flow', index: 1, label: '流量诊断', title: '生意参谋流量诊断',
+        subtitle: '最近30个完整自然日 · 内容指标来自光合资产总览',
+        hasData: sectionHasData('flow'),
+        content: sectionHasData('flow') ? buildFlowMarkup() : missingSection('flow'),
+      },
+      {
+        key: 'guanghe', index: 2, label: '光合渠道诊断', title: '光合渠道诊断',
+        subtitle: '渠道视角与资产视角', hasData: sectionHasData('guanghe'), content: guangheViews,
+      },
+      {
+        key: 'wxt', index: 3, label: '万相台报告', title: '万相台营销报告',
+        subtitle: '营销场景、花费结构与投放效果', hasData: sectionHasData('wxt'),
+        content: sectionHasData('wxt')
+          ? embeddedBody(normalizeWxtMarketingMarkup(wxtReport.marketing.markup))
+          : missingSection('wxt'),
+      },
+      {
+        key: 'shortVideo', index: 4, label: '短视频诊断', title: '短视频诊断',
+        subtitle: '免费内容与付费投放综合诊断', hasData: sectionHasData('shortVideo'),
+        content: sectionHasData('shortVideo')
+          ? embeddedBody(normalizeWxtShortVideoMarkup(wxtReport.shortVideo.markup))
+          : missingSection('shortVideo'),
+      },
+      {
+        key: 'dmp', index: 5, label: '内容人群画像', title: '内容人群画像诊断',
+        subtitle: '达摩盘 · 年龄与消费能力等级', hasData: sectionHasData('dmp'),
+        content: sectionHasData('dmp') ? buildDmpMarkup() : missingSection('dmp'),
+      },
+    ];
+    const firstAvailable = sections.find((section) => section.hasData);
+    const initialSection = sectionHasData(activeSection)
+      ? activeSection
+      : (firstAvailable ? firstAvailable.key : sections[0].key);
+    const tabs = sections.map((section) => '<button class="export-tab' +
+      (section.key === initialSection ? ' active' : '') + (section.hasData ? ' has-data' : ' is-missing') +
+      '" id="export-tab-' + section.key + '" type="button" role="tab" aria-selected="' +
+      (section.key === initialSection ? 'true' : 'false') + '" aria-controls="export-panel-' + section.key +
+      '" tabindex="' + (section.key === initialSection ? '0' : '-1') + '" data-export-section="' + section.key + '">' +
+      '<span>' + String(section.index).padStart(2, '0') + '</span><strong>' + section.label + '</strong><small>' +
+      (section.hasData ? '已生成' : '未生成') + '</small></button>').join('');
+    const panels = sections.map((section) => '<section id="export-panel-' + section.key +
+      '" class="export-section" role="tabpanel" aria-labelledby="export-tab-' + section.key +
+      '" tabindex="0" data-export-panel="' + section.key + '"' +
+      (section.key === initialSection ? '' : ' hidden') + '><header class="export-section-head"><div><span>' +
+      String(section.index).padStart(2, '0') + ' / 05</span><h1>' + section.title + '</h1><p>' + section.subtitle +
+      '</p></div></header><div class="export-section-body">' + section.content + '</div></section>').join('');
+    const css = '*{box-sizing:border-box}html{min-width:320px}body{margin:0;background:#eef1f5;color:#182230;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;letter-spacing:0}' +
+      'button,select{font:inherit}button:focus-visible,select:focus-visible{outline:3px solid rgba(11,103,209,.28);outline-offset:2px}' +
+      '[hidden]{display:none!important}.export-cover{display:flex;max-width:1340px;align-items:flex-end;justify-content:space-between;gap:24px;margin:24px auto 0;padding:24px 28px;background:#fff;border-top:4px solid #0b67d1}.export-cover span{color:#0b67d1;font-size:11px;font-weight:750;letter-spacing:.08em}.export-cover h1{margin:7px 0 5px;font-size:28px}.export-cover p{margin:0;color:#667085;font-size:13px}.export-cover time{color:#667085;font-size:12px;white-space:nowrap}' +
+      '.export-shell{display:grid;max-width:1340px;min-height:680px;grid-template-columns:190px minmax(0,1fr);margin:18px auto 28px;overflow:hidden;border:1px solid #dfe4ea;background:#fff}' +
+      '.export-index{padding:10px;border-right:1px solid #dfe4ea;background:#f8fafc}.export-tab{display:grid;width:100%;min-height:54px;grid-template-columns:26px minmax(0,1fr);grid-template-rows:auto auto;align-items:center;gap:1px 8px;margin:0 0 4px;padding:7px 10px;border:0;border-left:3px solid transparent;border-radius:3px;background:transparent;color:#475467;text-align:left;cursor:pointer}.export-tab:hover{background:#eef2f6}.export-tab.active{border-left-color:#0b67d1;background:#eaf2ff;color:#0b67d1}.export-tab>span{grid-row:1/3;color:#98a2b3;font-size:11px;font-weight:750}.export-tab>strong{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.export-tab>small{color:#667085;font-size:10px}.export-tab.has-data>small{color:#067647}.export-tab.is-missing{opacity:.72}' +
+      '.export-stage{min-width:0;background:#f4f6f8}.export-section{min-width:0}.export-section-head{display:flex;min-height:118px;align-items:flex-end;justify-content:space-between;gap:24px;padding:24px 28px;background:#243b72;color:#fff}.export-section-head span{color:#9ec5ff;font-size:11px;font-weight:750}.export-section-head h1{margin:5px 0 6px;font-size:25px}.export-section-head p{margin:0;color:#dbe7ff;font-size:12px}.export-section-body{padding:18px 0}.export-missing{display:grid;min-height:420px;place-content:center;padding:24px;text-align:center}.export-missing strong{font-size:18px}.export-missing p{max-width:580px;margin:6px 0 0;color:#667085}' +
+      '.export-subnav{display:inline-flex;margin:0 18px 18px;overflow:hidden;border:1px solid #b7c7df;border-radius:5px;background:#fff}.export-subnav button{height:34px;padding:0 14px;border:0;border-right:1px solid #b7c7df;background:#fff;color:#475467;cursor:pointer}.export-subnav button:last-child{border-right:0}.export-subnav button.active{background:#0b67d1;color:#fff;font-weight:700}' +
       '.diagnosis-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));margin:0 18px;border:1px solid #dfe4ea;background:#fff}' +
       '.diagnosis-kpis>div{padding:14px;border-right:1px solid #dfe4ea}.diagnosis-kpis span{display:block;color:#667085;font-size:11px}.diagnosis-kpis strong{display:block;margin-top:5px;font-size:20px}' +
-      '.report-table-block{margin-top:18px;overflow:auto;border:1px solid #dfe4ea;background:#fff}.report-table-block table{width:100%;min-width:820px;border-collapse:collapse}' +
+      '.report-table-block{margin:18px;overflow:auto;border:1px solid #dfe4ea;background:#fff}.report-table-block table{width:100%;min-width:820px;border-collapse:collapse}' +
       '.report-table-block th,.report-table-block td{padding:9px 10px;border-bottom:1px solid #edf0f3;text-align:left;white-space:nowrap}.report-table-block th{background:#eef2f6}' +
       '.dimension-button{display:none}.dimension-child td:first-child{padding-left:30px}.metric-result.good{color:#067647}.metric-result.watch{color:#a34b00}' +
       GUANGHE_EXPORT_STYLES +
       dmpExportStyles() +
-      String(wxtReport && wxtReport.styles || '') +
+      sanitizeExportStyles(wxtReport && wxtReport.styles || '') +
       WXT_KPI_LAYOUT_OVERRIDES +
       WXT_CHART_LAYOUT_OVERRIDES +
       WXT_TABLE_LAYOUT_OVERRIDES +
       '.wxt-report{max-width:1084px!important;margin:0 auto!important}.wxt-report-head{display:none!important}' +
-      '@media print{.export-cover,.export-chapter{break-after:page}.export-chapter:last-child{break-after:auto}}' +
-      '@media(max-width:720px){.diagnosis-kpis{grid-template-columns:1fr}.export-cover,.export-chapter{margin:0}.export-chapter-body{padding:10px 0}}';
-    const script = '<script>document.addEventListener("change",function(e){var s=e.target.closest&&e.target.closest("[data-attribution-select]");if(!s)return;document.querySelectorAll("[data-attribution-report]").forEach(function(n){n.hidden=n.getAttribute("data-attribution-report")!==s.value;});});<\/script>';
+      '@media print{body{background:#fff}.export-cover{margin:0}.export-index{display:none}.export-shell{display:block;margin:0;border:0}.export-section-head{-webkit-print-color-adjust:exact;print-color-adjust:exact}}' +
+      '@media(max-width:900px){.export-cover,.export-shell{margin-left:12px;margin-right:12px}.export-shell{grid-template-columns:1fr}.export-index{display:flex;overflow-x:auto;border-right:0;border-bottom:1px solid #dfe4ea}.export-tab{min-width:160px;margin:0 4px 0 0}}' +
+      '@media(max-width:620px){.export-cover{align-items:flex-start;flex-direction:column;margin:0;padding:20px 16px}.export-cover h1{font-size:24px}.export-shell{min-height:560px;margin:0;border-right:0;border-left:0}.export-section-head{min-height:0;padding:20px 16px}.export-section-head h1{font-size:21px}.diagnosis-kpis{grid-template-columns:1fr;margin:12px}.report-table-block{margin:12px}.export-subnav{display:flex;margin:0 12px 12px}.export-subnav button{flex:1}}';
+    const exportScriptNonce = 'taobao-report-export-v1';
+    const script = '<script nonce="' + exportScriptNonce + '">(function(){var tabs=Array.from(document.querySelectorAll("[data-export-section]"));var panels=Array.from(document.querySelectorAll("[data-export-panel]"));function activate(key,focus){tabs.forEach(function(tab){var active=tab.dataset.exportSection===key;tab.classList.toggle("active",active);tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;if(active&&focus){tab.focus();tab.scrollIntoView({block:"nearest",inline:"nearest"});}});panels.forEach(function(panel){panel.hidden=panel.dataset.exportPanel!==key;});}function moveTab(event,index,items,activateItem){var next=index;if(event.key==="ArrowDown"||event.key==="ArrowRight")next=(index+1)%items.length;else if(event.key==="ArrowUp"||event.key==="ArrowLeft")next=(index+items.length-1)%items.length;else if(event.key==="Home")next=0;else if(event.key==="End")next=items.length-1;else return;event.preventDefault();activateItem(items[next],true);}tabs.forEach(function(tab,index){tab.addEventListener("click",function(){activate(tab.dataset.exportSection,false);});tab.addEventListener("keydown",function(event){moveTab(event,index,tabs,function(next,focus){activate(next.dataset.exportSection,focus);});});});var views=Array.from(document.querySelectorAll("[data-export-guanghe-view]"));var viewPanels=Array.from(document.querySelectorAll("[data-export-guanghe-panel]"));function activateView(view,focus){views.forEach(function(button){var active=button===view;button.classList.toggle("active",active);button.setAttribute("aria-selected",String(active));button.tabIndex=active?0:-1;if(active&&focus)button.focus();});viewPanels.forEach(function(panel){panel.hidden=panel.dataset.exportGuanghePanel!==view.dataset.exportGuangheView;});}views.forEach(function(view,index){view.addEventListener("click",function(){activateView(view,false);});view.addEventListener("keydown",function(event){moveTab(event,index,views,activateView);});});document.addEventListener("change",function(event){var select=event.target.closest&&event.target.closest("[data-attribution-select]");if(!select)return;var root=select.closest("[data-export-panel]")||document;root.querySelectorAll("[data-attribution-report]").forEach(function(node){node.hidden=node.getAttribute("data-attribution-report")!==select.value;});});})();<\/script>';
+    const storeName = String(meta.storeName || archiveRun && archiveRun.account && archiveRun.account.storeName || '');
+    const accountName = String(meta.accountName || archiveRun && archiveRun.account && (
+      archiveRun.account.name || archiveRun.account.usernameMasked
+    ) || '');
+    const finishedAt = Number(meta.finishedAt || archiveRun && archiveRun.finishedAt || reportData && reportData.finishedAt) || Date.now();
+    const generatedAt = formatDateTime(finishedAt);
+    const documentTitle = storeName ? storeName + ' - 淘宝内容诊断报告' : '淘宝内容诊断报告';
+    const contextCopy = [accountName, generatedAt].filter(Boolean).join(' · ');
+    const contentSecurityPolicy = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-" +
+      exportScriptNonce + "'; base-uri 'none'; form-action 'none'";
     const html = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-      '<title>淘宝内容诊断报告</title><style>' + css + '</style></head><body><header class="export-cover"><span>TAOBAO CONTENT DIAGNOSIS</span><h1>淘宝内容诊断报告</h1><p>流量、光合、万相台、短视频与内容人群画像 · 五章节合并导出</p></header>' +
-      flow + guanghe + marketing + shortVideo + dmp + script + '</body></html>';
-    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      '<meta http-equiv="Content-Security-Policy" content="' + contentSecurityPolicy + '">' +
+      '<title>' + escapeHtml(documentTitle) + '</title><style>' + css + '</style></head><body><header class="export-cover"><div><span>TAOBAO CONTENT DIAGNOSIS</span><h1>' +
+      escapeHtml(storeName ? storeName + ' · 内容诊断报告' : '淘宝内容诊断报告') +
+      '</h1><p>交互式单页报告 · 点击模块查看对应内容</p></div><time>' +
+      escapeHtml(contextCopy || '生成于 ' + generatedAt) + '</time></header>' +
+      '<main class="export-shell"><nav class="export-index" role="tablist" aria-label="报告模块">' + tabs +
+      '</nav><div class="export-stage">' + panels + '</div></main>' + script + '</body></html>';
+    const datePart = new Date(finishedAt).toISOString().slice(0, 10);
+    return {
+      html,
+      filename: exportFilenamePart(storeName, '淘宝内容诊断报告') + '_' + datePart + '.html',
+      hasData: sections.filter((section) => section.hasData).map((section) => section.key),
+      runId: String(meta.runId || archiveRun && archiveRun.runId || ''),
+    };
+  }
+
+  function buildExportFromArchive(run, metadata) {
+    const previous = { reportStatus, reportData, wxtReport, archiveRun, activeSection, guangheView };
+    try {
+      applyArchiveRun(run);
+      activeSection = String(metadata && metadata.activeSection || 'flow');
+      guangheView = metadata && metadata.guangheView === 'asset' ? 'asset' : 'channel';
+      return buildExportReportDocument(Object.assign({}, metadata, {
+        runId: run.runId,
+        storeName: metadata && metadata.storeName || run.account && run.account.storeName || '',
+        accountName: metadata && metadata.accountName || run.account && (
+          run.account.name || run.account.usernameMasked
+        ) || '',
+        finishedAt: metadata && metadata.finishedAt || run.finishedAt,
+      }));
+    } finally {
+      reportStatus = previous.reportStatus;
+      reportData = previous.reportData;
+      wxtReport = previous.wxtReport;
+      archiveRun = previous.archiveRun;
+      activeSection = previous.activeSection;
+      guangheView = previous.guangheView;
+    }
+  }
+
+  function downloadExportDocument(result) {
+    const blob = new Blob([result.html], { type: 'text/html;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = '淘宝内容诊断报告_' + new Date().toISOString().slice(0, 10) + '.html';
+    anchor.download = result.filename;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
 
-  document.getElementById('generateReportBtn').addEventListener('click', async () => {
-    if (!bridgeConnected || !reportGenerationSupported() || reportIsRunning()) return;
-    const previousStatus = reportStatus;
-    const now = Date.now();
-    transientNotice = '任务已提交，正在并行启动生意参谋、光合、万相台和达摩盘…';
-    reportStatus = {
-      running: true,
-      startedAt: now,
-      updatedAt: now,
-      total: STEPS.length,
-      stepIndex: 0,
-      currentStep: '跨平台并行启动',
-      activeSteps: ['生意参谋流量诊断', '光合渠道与资产诊断', '万相台营销场景报告', '内容人群画像诊断'],
-      results: [],
-    };
-    render();
-    try {
-      const response = await requestBridge('startContentDiagnosisReport', {}, 15000);
-      if (!response || response.ok === false) {
-        throw new Error(response && response.message ? response.message : '报告任务未成功启动。');
-      }
-      transientNotice = response.started === false
-        ? '报告任务已在后台运行，正在恢复进度…'
-        : '报告任务已启动，四个平台正在并行读取…';
-      window.setTimeout(loadReport, 350);
-    } catch (error) {
-      reportStatus = previousStatus;
-      transientNotice = '启动失败：' + error.message;
-      render();
-    }
+  function exportReport() {
+    downloadExportDocument(buildExportReportDocument({
+      activeSection,
+      guangheView,
+    }));
+  }
+
+  window.TaobaoReportExport = Object.freeze({
+    version: 1,
+    buildFromArchive: buildExportFromArchive,
   });
 
   document.getElementById('refreshReportBtn').addEventListener('click', loadReport);
@@ -1077,19 +1204,21 @@
   });
 
   render();
-  Promise.resolve(window.TaobaoCloudSync && window.TaobaoCloudSync.ready)
-    .catch(() => null)
-    .then(() => requestBridge('ping', {}, 2500))
-    .then((response) => {
-      updateConnection(
-        Boolean(response && response.connected),
-        response && response.version || '',
-        '',
-        response && response.capabilities
-      );
-      return loadReport();
-    }).catch((error) => {
-      updateConnection(false, '', error.message);
-      document.getElementById('reportNotice').textContent = '请在 Chrome 扩展管理页重载“淘宝内容诊断插件”，再刷新本页。';
-    });
+  if (!BUILDER_MODE) {
+    Promise.resolve(window.TaobaoCloudSync && window.TaobaoCloudSync.ready)
+      .catch(() => null)
+      .then(() => requestBridge('ping', {}, 2500))
+      .then((response) => {
+        updateConnection(
+          Boolean(response && response.connected),
+          response && response.version || '',
+          '',
+          response && response.capabilities
+        );
+        return loadReport();
+      }).catch((error) => {
+        updateConnection(false, '', error.message);
+        document.getElementById('reportNotice').textContent = '请在 Chrome 扩展管理页重载“淘宝内容诊断插件”，再刷新本页。';
+      });
+  }
 })();

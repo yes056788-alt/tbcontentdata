@@ -169,26 +169,33 @@
   justify-content: center;
   gap: 5px;
   padding: 0 10px;
-  border: 1px solid var(--cloud-nav-line);
+  border: 1px solid #b7d8f8;
   border-radius: 8px;
-  background: #fff;
+  background: #f4f9ff;
   color: var(--cloud-nav-blue);
   cursor: pointer;
   font: inherit;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 720;
+  line-height: normal;
   text-decoration: none;
   white-space: nowrap;
+  transition: transform .18s ease, box-shadow .18s ease, background .18s ease;
+}
+
+.cloud-team-account-button svg {
+  width: 1.2em;
+  height: 1.2em;
+  flex: none;
 }
 
 .cloud-team-account-button:hover:not(:disabled) {
-  border-color: #bdd8f7;
-  background: #f4f9ff;
+  transform: translateY(-1px);
 }
 
 .cloud-team-account-button:disabled {
-  cursor: wait;
-  opacity: .55;
+  cursor: not-allowed;
+  opacity: .6;
 }
 
 .project-shell {
@@ -273,21 +280,6 @@ html.embedded-view .cloud-team-topbar {
     gap: 24px;
   }
 
-  .cloud-team-account {
-    gap: 6px;
-  }
-
-  .cloud-team-account-actions {
-    margin-left: 0;
-    padding-left: 0;
-    border-left: 0;
-  }
-
-  .cloud-team-account-button {
-    min-height: 31px;
-    padding: 0 8px;
-  }
-
 }
 
 @media (max-width: 760px) {
@@ -304,5 +296,15 @@ html.embedded-view .cloud-team-topbar {
   .cloud-team-brand > span:last-child,
   .cloud-team-avatar {
     display: none;
+  }
+
+  .cloud-team-account-actions {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .cloud-team-account-button {
+    padding: 0 8px;
   }
 }

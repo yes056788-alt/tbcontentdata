@@ -16,10 +16,9 @@ assert.match(background, /activeKeys\.add\('wxtShortVideo'\)/);
 assert.match(background, /executeStep\(steps\.find\(\(step\) => step\.key === 'sycm'\)\)/);
 assert.match(background, /executeStep\(steps\.find\(\(step\) => step\.key === 'guanghe'\)\)/);
 assert.match(background, /activeSteps:/);
-assert.match(background, /waitForCompletion === false/);
 assert.match(bridge, /parallelPlatformRuns/);
-assert.match(bridge, /waitForCompletion: false/);
-assert.match(dashboard, /正在并行读取/);
+assert.doesNotMatch(bridge, /waitForCompletion: false|startAutoCollect|startContentDiagnosisReport/);
+assert.match(dashboard, /一键取数进行中/);
 assert.match(report, /正在并行生成/);
 
 function extractFunction(startMarker, endMarker) {

@@ -1,14 +1,17 @@
 import { requireSession } from "@/app/server/authz";
-import {
-  legacyHtmlResponse,
-  protectedAssetErrorResponse,
-} from "@/app/server/protected-assets";
+import { protectedAssetErrorResponse } from "@/app/server/protected-assets";
 
 async function respond(request: Request) {
   try {
     await requireSession(request);
-    return legacyHtmlResponse("collect.html", {
-      head: request.method === "HEAD",
+    return new Response(null, {
+      status: 307,
+      headers: {
+        "Cache-Control": "no-store",
+        Location: `/report.html${new URL(request.url).search}`,
+        "Referrer-Policy": "same-origin",
+        "X-Content-Type-Options": "nosniff",
+      },
     });
   } catch (error) {
     return protectedAssetErrorResponse(error, request);

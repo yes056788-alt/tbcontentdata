@@ -17,7 +17,7 @@ const reportHtml = fs.readFileSync(path.join(root, 'web-tool', 'report.html'), '
 const vaultSource = fs.readFileSync(path.join(root, 'web-tool', 'account-vault.js'), 'utf8');
 const server = fs.readFileSync(path.join(root, 'web-tool', 'server.mjs'), 'utf8');
 
-assert.equal(manifest.version, '2.37.3');
+assert.equal(manifest.version, '2.37.4');
 assert.ok(manifest.host_permissions.includes('https://oapi.dingtalk.com/*'));
 assert.ok(manifest.content_scripts.some((entry) => (
   entry.matches.includes('*://adstar.alimama.com/*') && entry.js.includes('xinghe-content-script.js')
@@ -33,13 +33,17 @@ for (const id of [
 ]) {
   assert.match(html, new RegExp('id="' + id + '"'));
 }
-for (const taskHtml of [collectHtml, reportHtml]) {
+for (const taskHtml of [reportHtml]) {
   for (const id of [
-    'batchSessionNotice', 'batchSetupPanel', 'batchScopeType', 'batchScopeSelect',
-    'batchAccountSummary', 'startBatchTaskBtn', 'resumeBatchTaskBtn', 'cancelBatchTaskBtn',
+    'batchSessionNotice', 'batchSetupPanel', 'batchGroupSelect', 'batchAccountList',
+    'batchAccountSummary', 'batchSelectAllBtn', 'batchClearSelectionBtn',
+    'startBatchTaskBtn', 'resumeBatchTaskBtn', 'cancelBatchTaskBtn',
   ]) assert.match(taskHtml, new RegExp('id="' + id + '"'));
+  assert.doesNotMatch(taskHtml, /batchScopeType|batchScopeSelect|单个店铺/);
   assert.doesNotMatch(taskHtml, /batchMasterPassword|unlockBatchVaultBtn|src="\/account-vault\.js"/);
 }
+assert.match(collectHtml, /http-equiv="refresh" content="0; url=\/report\.html"/);
+assert.doesNotMatch(collectHtml, /startCurrentTaskBtn|startBatchTaskBtn|data-task-type="collect"/);
 assert.match(server, /'\/accounts\.html'/);
 assert.match(server, /'\/account-vault\.js'/);
 assert.match(taskPage, /request\('startAccountBatchFromSession'/);
@@ -101,7 +105,7 @@ assert.match(background, /taskType/);
 assert.match(background, /runMode/);
 assert.match(background, /storeId: safeAccount\.storeId/);
 assert.match(background, /noPermission: Boolean/);
-assert.match(background, /await ensureBusinessDefenseAutoCollectTask\(\{ platforms \}\)\.promise/);
+assert.doesNotMatch(background, /await ensureBusinessDefenseAutoCollectTask\(\{ platforms \}\)\.promise/);
 assert.match(background, /await ensureContentDiagnosisReportTask\(\{ platforms \}\)\.promise/);
 assert.match(background, /const hasNextAccount = index \+ 1 < accounts\.length/);
 assert.match(xinghe, /kind: 'rolePicker'/);
@@ -365,10 +369,6 @@ async function verifyAccountBatchContinuesAfterXingheRestriction() {
       runtime.events.push('login:' + account.id);
       return { tabId: 41, state: 'noPermission', noPermission: true };
     },
-    ensureBusinessDefenseAutoCollectTask(options) {
-      runtime.events.push('collect:' + Array.from(options.platforms).join(','));
-      return { promise: Promise.resolve({ ok: true, results: [] }) };
-    },
     ensureContentDiagnosisReportTask(options) {
       runtime.events.push('report:' + Array.from(options.platforms).join(','));
       return { promise: Promise.resolve({ ok: true, results: [] }) };
@@ -405,7 +405,7 @@ async function verifyAccountBatchContinuesAfterXingheRestriction() {
     filename: 'account-batch-flow.js',
   });
   const result = await context.runBatch({
-    taskType: 'both',
+    taskType: 'collect',
     platforms: ['sycm', 'wxt'],
     accounts: [
       { id: 'account-1', platform: 'taobao', storeName: '店铺一', username: 'one' },
@@ -416,12 +416,10 @@ async function verifyAccountBatchContinuesAfterXingheRestriction() {
   assert.equal(result.results.length, 2);
   assert.deepEqual(runtime.events.filter((event) => /^(login|collect|report|archive|logout)/.test(event)), [
     'login:account-1',
-    'collect:sycm,wxt',
     'report:sycm,wxt',
     'archive:account-1',
     'logout',
     'login:account-2',
-    'collect:sycm,wxt',
     'report:sycm,wxt',
     'archive:account-2',
   ]);
@@ -429,7 +427,7 @@ async function verifyAccountBatchContinuesAfterXingheRestriction() {
   runtime.archives.forEach((archive) => {
     assert.equal(archive.loginResult.noPermission, true);
     assert.equal(archive.failureMessage, '');
-    assert.equal(archive.options.taskType, 'both');
+    assert.equal(archive.options.taskType, 'report');
   });
 }
 
@@ -509,10 +507,12 @@ function verifyAccountSessionSelection() {
     storeGroups: [{ id: 'sg-1', name: '华东店铺' }],
     stores: [
       { id: 'store-1', name: '一号店', groupId: 'sg-1' },
+      { id: 'store-3', name: '三号店', groupId: 'sg-1' },
       { id: 'store-2', name: '二号店', groupId: '' },
     ],
     accounts: [
       { id: 'account-1', name: '一号店账号', storeId: 'store-1', username: 'user-1', password: 'pass-1', enabled: true },
+      { id: 'account-5', name: '三号店账号', storeId: 'store-3', username: 'user-5', password: 'pass-5', enabled: true },
       { id: 'account-2', name: '二号店账号', storeId: 'store-2', username: 'user-2', password: 'pass-2', enabled: true },
       { id: 'account-3', name: '停用账号', storeId: 'store-1', username: 'user-3', password: 'pass-3', enabled: false },
       { id: 'account-4', platform: 'xiaohongshu', storeId: 'store-1', username: 'xhs-user', password: 'xhs-pass', enabled: true },
@@ -520,11 +520,14 @@ function verifyAccountSessionSelection() {
     notification: {},
   });
   const summary = JSON.parse(JSON.stringify(context.summarizeSession(vault)));
+  assert.equal(summary.schema, 2);
   assert.equal(summary.unlocked, true);
-  assert.equal(summary.totalEnabledAccounts, 2);
-  assert.equal(summary.storeGroups[0].enabledAccountCount, 1);
+  assert.equal(summary.totalEnabledAccounts, 3);
+  assert.equal(summary.storeGroups[0].enabledAccountCount, 2);
   assert.equal(summary.ungroupedAccountCount, 1);
-  assert.doesNotMatch(JSON.stringify(summary), /user-1|pass-1/);
+  assert.deepEqual(summary.accounts.map((account) => account.id), ['account-1', 'account-5', 'account-2']);
+  assert.deepEqual(summary.accounts.map((account) => account.usernameMasked), ['us****1', 'us****5', 'us****2']);
+  assert.doesNotMatch(JSON.stringify(summary), /user-1|pass-1|pass-5/);
 
   const managementRecord = context.sanitizeManagementSession({
     vault,
@@ -533,31 +536,42 @@ function verifyAccountSessionSelection() {
   const restoredManagement = context.managementSession(managementRecord);
   assert.equal(restoredManagement.masterPassword, 'master-password-123');
   assert.equal(restoredManagement.vault.accounts[0].username, 'user-1');
-  assert.equal(restoredManagement.vault.accounts[3].platform, 'xiaohongshu');
-  assert.equal(context.summarizeSession(managementRecord).totalEnabledAccounts, 2);
+  assert.equal(restoredManagement.vault.accounts[4].platform, 'xiaohongshu');
+  assert.equal(context.summarizeSession(managementRecord).totalEnabledAccounts, 3);
   assert.doesNotMatch(JSON.stringify(context.summarizeSession(managementRecord)), /master-password|user-1|pass-1/);
-  assert.equal(context.vaultFromSession(managementRecord).stores.length, 2);
+  assert.equal(context.vaultFromSession(managementRecord).stores.length, 3);
 
   const groupBatch = context.prepareBatch(vault, {
     taskType: 'collect',
-    selection: { type: 'storeGroup', id: 'sg-1' },
+    selection: { type: 'storeGroup', id: 'sg-1', accountIds: ['account-5', 'account-1', 'account-5'] },
   });
-  assert.deepEqual(Array.from(groupBatch.accounts, (item) => item.id), ['account-1']);
-  assert.equal(groupBatch.accounts[0].password, 'pass-1');
+  assert.deepEqual(Array.from(groupBatch.accounts, (item) => item.id), ['account-5', 'account-1']);
+  assert.equal(groupBatch.accounts[1].password, 'pass-1');
   assert.equal(groupBatch.selection.name, '华东店铺');
+  assert.deepEqual(Array.from(groupBatch.selection.accountIds), ['account-5', 'account-1']);
+  assert.equal(groupBatch.taskType, 'report');
   assert.deepEqual(Array.from(groupBatch.platforms), ['sycm', 'guanghe', 'wxt', 'dmp']);
 
-  const storeBatch = context.prepareBatch(vault, {
-    taskType: 'report',
-    selection: { type: 'store', id: 'store-2' },
-  });
-  assert.deepEqual(Array.from(storeBatch.accounts, (item) => item.id), ['account-2']);
-  assert.equal(storeBatch.taskType, 'report');
-  assert.deepEqual(Array.from(storeBatch.platforms), ['sycm', 'guanghe', 'wxt', 'dmp']);
+  assert.throws(() => context.prepareBatch(vault, {
+    selection: { type: 'storeGroup', id: 'sg-1', accountIds: [] },
+  }), /至少选择一个组内账号/);
+  assert.throws(() => context.prepareBatch(vault, {
+    selection: { type: 'storeGroup', id: 'sg-1', accountIds: ['account-2'] },
+  }), /不属于当前店铺分组/);
+  assert.throws(() => context.prepareBatch(vault, {
+    selection: { type: 'storeGroup', id: 'sg-1', accountIds: ['account-3'] },
+  }), /被停用/);
+  assert.throws(() => context.prepareBatch(vault, {
+    selection: {
+      type: 'storeGroup',
+      id: 'sg-1',
+      accountIds: Array.from({ length: 101 }, (_, index) => 'account-' + index),
+    },
+  }), /最多选择 100/);
 
   const resumed = context.prepareBatch(vault, { taskType: 'collect', resume: true }, {
     paused: true,
-    taskType: 'collect',
+    taskType: 'report',
     accountIds: ['account-1'],
     resumeIndex: 0,
     batchId: 'batch-1',
@@ -569,6 +583,32 @@ function verifyAccountSessionSelection() {
   assert.equal(resumed.batchId, 'batch-1');
   assert.deepEqual(Array.from(resumed.accounts, (item) => item.id), ['account-1']);
   assert.deepEqual(Array.from(resumed.platforms), ['sycm', 'wxt']);
+
+  const pausedStatus = {
+    paused: true,
+    taskType: 'report',
+    accountIds: ['account-1'],
+    resumeIndex: 0,
+    batchId: 'batch-1',
+    startedAt: 123,
+    selection: { type: 'storeGroup', id: 'sg-1', name: '华东店铺' },
+    platforms: ['sycm'],
+  };
+  vault.accounts[0].enabled = false;
+  assert.throws(() => context.prepareBatch(vault, { resume: true }, pausedStatus), /账号库发生变化/);
+  vault.accounts[0].enabled = true;
+  vault.stores[0].groupId = '';
+  assert.throws(() => context.prepareBatch(vault, { resume: true }, pausedStatus), /账号库发生变化/);
+  vault.stores[0].groupId = 'sg-1';
+  const legacyStoreResume = context.prepareBatch(vault, { resume: true }, {
+    ...pausedStatus,
+    selection: { type: 'store', id: 'store-1', name: '一号店' },
+  });
+  assert.deepEqual(Array.from(legacyStoreResume.accounts, (item) => item.id), ['account-1']);
+  assert.throws(() => context.prepareBatch(vault, { resume: true }, {
+    ...pausedStatus,
+    accountIds: Array.from({ length: 101 }, (_, index) => 'account-' + index),
+  }), /超过 100/);
 }
 
 Promise.all([

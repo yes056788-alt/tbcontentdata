@@ -13,13 +13,12 @@
 
   const CHANNEL = 'taobao-full-chain-tool-v1';
   const CAPABILITIES = [
-    'autoCollect',
-    'contentDiagnosisReport',
     'parallelPlatformRuns',
     'accountVault',
     'accountSessionUnlock',
     'accountSessionManagement',
     'accountBatch',
+    'accountBatchMultiSelect',
     'storeRunArchive',
     'storeRunManualInputs',
     'cloudSync',
@@ -57,7 +56,6 @@
     '/',
     '/workspace.html',
     '/accounts.html',
-    '/collect.html',
     '/report.html',
     '/data.html',
     '/report-view.html',
@@ -308,26 +306,31 @@
   function sanitizeSessionBatchRequest(value) {
     const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     const rawSelection = source.selection && typeof source.selection === 'object' ? source.selection : {};
+    const accountIds = Array.from(new Set((Array.isArray(rawSelection.accountIds)
+      ? rawSelection.accountIds
+      : []).slice(0, 500).map((item) => cleanText(item, 100)).filter(Boolean)));
+    if (!source.resume && !accountIds.length) throw new Error('请至少选择一个组内账号。');
+    if (accountIds.length > 100) throw new Error('每次最多选择 100 个账号。');
     return {
       selection: {
-        type: rawSelection.type === 'store' ? 'store' : 'storeGroup',
-        id: cleanText(rawSelection.id, 100) || '__all__',
+        type: 'storeGroup',
+        id: cleanText(rawSelection.id, 100),
+        accountIds,
       },
       resume: source.resume === true,
-      taskType: source.taskType === 'report' ? 'report' : 'collect',
+      taskType: 'report',
       platforms: sanitizePlatformTasks(source.platforms),
     };
   }
 
   function sanitizeProjectTask(value) {
     const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-    const taskType = source.taskType === 'report' ? 'report' : 'collect';
     const store = source.store && typeof source.store === 'object' ? source.store : {};
     const storeId = cleanText(store.id, 100);
     const storeName = cleanText(store.name, 120);
     if (!storeId || !storeName) throw new Error('请先选择本次任务归属的店铺。');
     return {
-      taskType,
+      taskType: 'report',
       platforms: sanitizePlatformTasks(source.platforms),
       store: {
         id: storeId,
@@ -336,6 +339,12 @@
         groupName: cleanText(store.groupName, 100),
       },
     };
+  }
+
+  function requireOneClickTaskPage() {
+    if (location.pathname !== '/report.html') {
+      throw new Error('请从“一键取数”页面发起任务。');
+    }
   }
 
   function sanitizeRunId(value) {
@@ -653,6 +662,7 @@
       return { cleared: true };
     }
     if (action === 'startAccountBatchFromSession') {
+      requireOneClickTaskPage();
       return runtimeMessage({
         type: 'ACCOUNT_BATCH_START_FROM_SESSION',
         source: 'business-defense-web-tool',
@@ -660,6 +670,7 @@
       });
     }
     if (action === 'startProjectTask') {
+      requireOneClickTaskPage();
       return runtimeMessage({
         type: 'PROJECT_TASK_START',
         source: 'business-defense-web-tool',
@@ -755,20 +766,6 @@
       await chrome.storage.local.remove(Array.from(ARCHIVE_SNAPSHOT_KEYS));
       if (Object.keys(restored).length) await chrome.storage.local.set(restored);
       return { restored: true, runId, storeName: run.account && run.account.storeName || '' };
-    }
-    if (action === 'startAutoCollect') {
-      return runtimeMessage({
-        type: 'BUSINESS_DEFENSE_AUTO_COLLECT',
-        source: 'business-defense-web-tool',
-        waitForCompletion: false,
-      });
-    }
-    if (action === 'startContentDiagnosisReport') {
-      return runtimeMessage({
-        type: 'BUSINESS_DEFENSE_GENERATE_CONTENT_REPORT',
-        source: 'business-defense-web-tool',
-        waitForCompletion: false,
-      });
     }
     throw new Error('网页工具请求不在允许范围内。');
   }
