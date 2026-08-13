@@ -337,9 +337,9 @@
     });
   }
 
-  function saveBusinessDefenseWxtSnapshot(data, reportKind) {
+  async function saveBusinessDefenseWxtSnapshot(data, reportKind) {
     try {
-      chrome.storage.local.set({
+      await chrome.storage.local.set({
         [BUSINESS_DEFENSE_WXT_KEY]: {
           savedAt: Date.now(),
           reportKind: reportKind || 'marketingScene',
@@ -349,6 +349,7 @@
       });
     } catch (error) {
       console.warn('[万相台报告]', '经营攻防快照保存失败:', error);
+      throw new Error('万相台数据表快照保存失败。');
     }
   }
 
@@ -4164,7 +4165,7 @@
         false
       );
       const data = await requestReportData(dateRange);
-      saveBusinessDefenseWxtSnapshot(data, 'marketingScene');
+      await saveBusinessDefenseWxtSnapshot(data, 'marketingScene');
       showDialog('数据读取完成，正在生成可视化报告…', false);
       downloadVisualReport(data);
       renderReportPreview(data);
@@ -4221,7 +4222,7 @@
         false
       );
       await enrichShortVideoWithGuanghe(data, guangheSync);
-      saveBusinessDefenseWxtSnapshot(data, 'shortVideoDetail');
+      await saveBusinessDefenseWxtSnapshot(data, 'shortVideoDetail');
       showDialog('关联完成，正在生成诊断报告…', false);
       renderShortVideoDiagnosis(data);
     } catch (error) {
@@ -4272,7 +4273,7 @@
     const dateRange = lastThirtyFullDays();
     try {
       const data = await requestReportData(dateRange, 'marketingScene', { silent: true });
-      saveBusinessDefenseWxtSnapshot(data, 'marketingScene');
+      await saveBusinessDefenseWxtSnapshot(data, 'marketingScene');
       const section = {
         ok: true,
         savedAt: Date.now(),
@@ -4375,7 +4376,7 @@
     ].includes(message.type)) return;
     const dateRange = lastThirtyFullDays();
     requestReportData(dateRange, 'marketingScene', { silent: true })
-      .then((data) => {
+      .then(async (data) => {
         const rows = Array.isArray(data.marketingRows) ? data.marketingRows : [];
         const scene = rows.find((row) => String(row && (row.scene1Name || row.sceneName) || '').includes('超级短视频')) ||
           rows.find((row) => String(row && (row.scene1Name || row.sceneName) || '').includes('短视频')) || {};
@@ -4443,7 +4444,7 @@
         ];
         const capturedMetrics = metrics.filter((item) => item.value !== undefined).map((item) => item.name);
         const missingMetrics = metrics.filter((item) => item.value === undefined).map((item) => item.name);
-        saveBusinessDefenseWxtSnapshot(data, 'marketingScene');
+        await saveBusinessDefenseWxtSnapshot(data, 'marketingScene');
         if (!capturedMetrics.length) {
           throw new Error('万相台导出报告取数链路未返回任何所需指标。');
         }

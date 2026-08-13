@@ -88,10 +88,12 @@ async function run() {
   assert.ok(posted.some((message) => (
     message.type === 'ready' &&
       message.version === '9.9.9' &&
-      message.capabilities.includes('contentDiagnosisReport') &&
       message.capabilities.includes('accountSessionUnlock') &&
+      message.capabilities.includes('accountBatchMultiSelect') &&
       message.capabilities.includes('storeRunManualInputs') &&
-      message.capabilities.includes('cloudSync')
+      message.capabilities.includes('cloudSync') &&
+      !message.capabilities.includes('autoCollect') &&
+      !message.capabilities.includes('contentDiagnosisReport')
   )));
 
   send('getStorage', {
@@ -165,20 +167,46 @@ async function run() {
   await settle();
   assert.deepEqual(Array.from(storageRemovals[0]), ['businessDefenseAutoCollectStatusV1']);
 
+  const runtimeCountBeforeRetiredActions = runtimeMessages.length;
   send('startAutoCollect', { message: { type: 'UNSAFE_COMMAND' } }, 'start');
   await settle();
-  const autoMessage = runtimeMessages.find((message) => message.type === 'BUSINESS_DEFENSE_AUTO_COLLECT');
-  assert.equal(autoMessage.source, 'business-defense-web-tool');
-  assert.equal(autoMessage.waitForCompletion, false);
-  assert.deepEqual(Object.keys(autoMessage).sort(), ['source', 'type', 'waitForCompletion']);
+  assert.ok(posted.some((message) => (
+    message.requestId === 'start' && message.ok === false && /不在允许范围/.test(message.message)
+  )));
+  assert.equal(runtimeMessages.some((message) => message.type === 'BUSINESS_DEFENSE_AUTO_COLLECT'), false);
 
   send('startContentDiagnosisReport', { message: { type: 'UNSAFE_COMMAND' } }, 'report');
   await settle();
-  const reportMessage = runtimeMessages.find((message) => message.type === 'BUSINESS_DEFENSE_GENERATE_CONTENT_REPORT');
-  assert.equal(reportMessage.source, 'business-defense-web-tool');
-  assert.equal(reportMessage.waitForCompletion, false);
-  assert.deepEqual(Object.keys(reportMessage).sort(), ['source', 'type', 'waitForCompletion']);
+  assert.ok(posted.some((message) => (
+    message.requestId === 'report' && message.ok === false && /不在允许范围/.test(message.message)
+  )));
+  assert.equal(runtimeMessages.some((message) => message.type === 'BUSINESS_DEFENSE_GENERATE_CONTENT_REPORT'), false);
+  assert.equal(runtimeMessages.length, runtimeCountBeforeRetiredActions);
 
+  send('startProjectTask', {
+    taskType: 'report',
+    store: { id: 'store-1', name: '一号店' },
+  }, 'project-task-wrong-page');
+  await settle();
+  assert.equal(runtimeMessages.length, runtimeCountBeforeRetiredActions);
+  assert.ok(posted.some((message) => (
+    message.requestId === 'project-task-wrong-page' && message.ok === false && /一键取数/.test(message.message)
+  )));
+
+  context.location.pathname = '/report.html';
+  send('startProjectTask', {
+    taskType: 'collect',
+    platforms: ['sycm', 'wxt'],
+    store: { id: 'store-1', name: '一号店', groupId: 'group-1', groupName: '第一组' },
+  }, 'project-task');
+  await settle();
+  const projectTaskMessage = runtimeMessages.find((message) => message.type === 'PROJECT_TASK_START');
+  assert.equal(projectTaskMessage.payload.taskType, 'report');
+  assert.deepEqual(Array.from(projectTaskMessage.payload.platforms), ['sycm', 'wxt']);
+  assert.equal(projectTaskMessage.payload.store.id, 'store-1');
+  assert.ok(posted.some((message) => message.requestId === 'project-task' && message.ok === true));
+
+  context.location.pathname = '/accounts.html';
   send('setAccountSession', {
     masterPassword: 'master-password-123',
     vault: {
@@ -204,18 +232,48 @@ async function run() {
 
   send('getAccountSessionSummary', {}, 'session-summary');
   send('getAccountManagementSession', {}, 'session-management');
-  send('startAccountBatchFromSession', {
-    taskType: 'report',
-    selection: { type: 'store', id: 'store-1', name: 'untrusted-name' },
-    accounts: [{ username: 'must-not-pass' }],
-  }, 'session-start');
   await settle();
   assert.ok(runtimeMessages.some((message) => message.type === 'ACCOUNT_SESSION_GET_SUMMARY'));
   assert.ok(runtimeMessages.some((message) => message.type === 'ACCOUNT_SESSION_GET_MANAGEMENT'));
+
+  context.location.pathname = '/report.html';
+  send('startAccountBatchFromSession', {
+    taskType: 'report',
+    selection: {
+      type: 'storeGroup', id: 'group-1', name: 'untrusted-name',
+      accountIds: ['account-2', 'account-1', 'account-2', '', null],
+    },
+    accounts: [{ username: 'must-not-pass' }],
+  }, 'session-start');
+  await settle();
   const sessionStartMessage = runtimeMessages.find((message) => message.type === 'ACCOUNT_BATCH_START_FROM_SESSION');
-  assert.deepEqual(Object.assign({}, sessionStartMessage.payload.selection), { type: 'store', id: 'store-1' });
+  assert.deepEqual(JSON.parse(JSON.stringify(sessionStartMessage.payload.selection)), {
+    type: 'storeGroup', id: 'group-1', accountIds: ['account-2', 'account-1'],
+  });
   assert.equal(sessionStartMessage.payload.taskType, 'report');
   assert.equal(sessionStartMessage.payload.accounts, undefined);
+
+  const runtimeCountBeforeInvalidSelections = runtimeMessages.length;
+  send('startAccountBatchFromSession', {
+    selection: { type: 'storeGroup', id: 'group-1', accountIds: [] },
+  }, 'session-start-empty');
+  await settle();
+  assert.ok(posted.some((message) => (
+    message.requestId === 'session-start-empty' && message.ok === false && /至少选择一个/.test(message.message)
+  )));
+  assert.equal(runtimeMessages.length, runtimeCountBeforeInvalidSelections);
+
+  send('startAccountBatchFromSession', {
+    selection: {
+      type: 'storeGroup', id: 'group-1',
+      accountIds: Array.from({ length: 101 }, (_, index) => 'account-' + index),
+    },
+  }, 'session-start-too-many');
+  await settle();
+  assert.ok(posted.some((message) => (
+    message.requestId === 'session-start-too-many' && message.ok === false && /最多选择 100/.test(message.message)
+  )));
+  assert.equal(runtimeMessages.length, runtimeCountBeforeInvalidSelections);
 
   const importedAt = Date.now();
   send('importStoreRun', {
@@ -294,8 +352,8 @@ async function run() {
     message.requestId === 'import-oversized-run' && message.ok === false && /安全限制/.test(message.message)
   )));
 
-  assert.ok(posted.some((message) => message.requestId === 'start' && message.ok === true));
-  assert.ok(posted.some((message) => message.requestId === 'report' && message.ok === true));
+  assert.ok(posted.some((message) => message.requestId === 'start' && message.ok === false));
+  assert.ok(posted.some((message) => message.requestId === 'report' && message.ok === false));
   console.log('web tool bridge guards passed');
 }
 

@@ -11,7 +11,6 @@ const port = 3400;
 const routes = new Map([
   ['/', { path: join(here, 'index.html'), type: 'text/html; charset=utf-8' }],
   ['/index.html', { path: join(here, 'index.html'), type: 'text/html; charset=utf-8' }],
-  ['/collect.html', { path: join(here, 'collect.html'), type: 'text/html; charset=utf-8' }],
   ['/report.html', { path: join(here, 'report.html'), type: 'text/html; charset=utf-8' }],
   ['/report-view.html', { path: join(here, 'report-view.html'), type: 'text/html; charset=utf-8' }],
   ['/data.html', { path: join(here, 'data.html'), type: 'text/html; charset=utf-8' }],
@@ -20,6 +19,7 @@ const routes = new Map([
   ['/portal.css', { path: join(here, 'portal.css'), type: 'text/css; charset=utf-8' }],
   ['/report.css', { path: join(here, 'report.css'), type: 'text/css; charset=utf-8' }],
   ['/accounts.css', { path: join(here, 'accounts.css'), type: 'text/css; charset=utf-8' }],
+  ['/batch-report-export.js', { path: join(here, 'batch-report-export.js'), type: 'text/javascript; charset=utf-8' }],
   ['/project.js', { path: join(here, 'project.js'), type: 'text/javascript; charset=utf-8' }],
   ['/task.js', { path: join(here, 'task.js'), type: 'text/javascript; charset=utf-8' }],
   ['/report.js', { path: join(here, 'report.js'), type: 'text/javascript; charset=utf-8' }],
@@ -38,6 +38,16 @@ const server = createServer(async (request, response) => {
       'Cache-Control': 'no-store',
     });
     response.end(JSON.stringify({ ok: true, service: 'taobao-full-chain-tool' }));
+    return;
+  }
+
+  if (url.pathname === '/collect.html' && ['GET', 'HEAD'].includes(request.method || 'GET')) {
+    response.writeHead(307, {
+      'Location': '/report.html' + url.search,
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    response.end();
     return;
   }
 

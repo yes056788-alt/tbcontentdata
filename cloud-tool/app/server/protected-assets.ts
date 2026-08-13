@@ -11,7 +11,6 @@ import { configuredPublicOrigin } from "./runtime-config";
 export const LEGACY_PAGE_FILENAMES = [
   "workspace.html",
   "accounts.html",
-  "collect.html",
   "report.html",
   "data.html",
   "report-view.html",

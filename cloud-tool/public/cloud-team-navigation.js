@@ -47,11 +47,12 @@
 
   function bindLogout() {
     const button = document.getElementById('cloudTeamLogout');
+    const label = document.getElementById('cloudTeamLogoutLabel');
     if (!button) return;
     button.addEventListener('click', async () => {
       if (button.disabled) return;
       button.disabled = true;
-      button.textContent = '正在退出…';
+      if (label) label.textContent = '正在退出…';
       try {
         await fetch('/api/auth/logout', {
           method: 'POST',

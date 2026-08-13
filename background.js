@@ -1418,15 +1418,23 @@ function isAccountManagementWebToolSender(sender) {
   }
 }
 
-async function syncActionAvailability(tabId, url) {
-  if (!Number.isFinite(tabId)) return;
-  const enabled = isSycmTrafficPageUrl(url);
+function isOneClickWebToolSender(message, sender) {
+  if (!isBusinessDefenseWebToolSender(message, sender)) return false;
   try {
-    if (enabled) await chrome.action.enable(tabId);
-    else await chrome.action.disable(tabId);
+    const url = new URL(String(sender && (sender.url || sender.tab && sender.tab.url) || ''));
+    return url.pathname === '/report.html';
+  } catch (error) {
+    return false;
+  }
+}
+
+async function syncActionAvailability(tabId) {
+  if (!Number.isFinite(tabId)) return;
+  try {
+    await chrome.action.enable(tabId);
     await chrome.action.setTitle({
       tabId,
-      title: enabled ? '经营攻防一键取数' : '请在生意参谋流量页使用',
+      title: '淘宝经营数据助手 · 请从团队网页“一键取数”发起任务',
     });
   } catch (error) {}
 }
@@ -3911,7 +3919,23 @@ function summarizeAccountSession(session) {
   stores.forEach((store) => {
     groupCounts.set(store.groupId || '', (groupCounts.get(store.groupId || '') || 0) + store.enabledAccountCount);
   });
+  const storesById = new Map(stores.map((store) => [store.id, store]));
+  const accounts = (Array.isArray(vault.accounts) ? vault.accounts : []).filter((account) => (
+    account && account.enabled !== false && normalizeBatchAccountPlatform(account.platform) === 'taobao' &&
+      storesById.has(account.storeId)
+  )).map((account) => {
+    const store = storesById.get(account.storeId);
+    return {
+      id: account.id,
+      storeId: store.id,
+      storeName: store.name,
+      groupId: store.groupId || '',
+      usernameMasked: maskedAccountName(account.username),
+      roleKeyword: batchText(account.roleKeyword, 80) || '\u54c1\u724c',
+    };
+  });
   return {
+    schema: 2,
     unlocked: true,
     unlockedAt: Number(session && session.unlockedAt) || Number(vault.unlockedAt) || Date.now(),
     totalEnabledAccounts: stores.reduce((total, store) => total + store.enabledAccountCount, 0),
@@ -3922,6 +3946,7 @@ function summarizeAccountSession(session) {
     })),
     ungroupedAccountCount: groupCounts.get('') || 0,
     stores,
+    accounts,
   };
 }
 
@@ -3959,7 +3984,7 @@ function accountSessionBatchAccount(vault, account) {
 function prepareAccountBatchFromSession(vault, request, previousStatus) {
   if (!vault || typeof vault !== 'object') throw new Error('\u8d26\u53f7\u5e93\u5c1a\u672a\u5728\u672c\u6b21 Chrome \u4f1a\u8bdd\u89e3\u9501。');
   const source = request && typeof request === 'object' ? request : {};
-  const taskType = source.taskType === 'report' ? 'report' : 'collect';
+  const taskType = 'report';
   const resume = source.resume === true;
   let accounts = [];
   let selection = {};
@@ -3971,12 +3996,28 @@ function prepareAccountBatchFromSession(vault, request, previousStatus) {
   if (resume) {
     const status = previousStatus && typeof previousStatus === 'object' ? previousStatus : {};
     if (!status.paused || status.taskType !== taskType) throw new Error('\u5f53\u524d\u6ca1\u6709\u53ef\u7ee7\u7eed\u7684\u672c\u7c7b\u4efb\u52a1。');
+    const statusAccountIds = Array.isArray(status.accountIds) ? status.accountIds : [];
+    if (statusAccountIds.length > 100) throw new Error('暂停任务的账号数量超过 100 个，无法继续。');
     const byId = new Map(vault.accounts.map((account) => [account.id, account]));
-    accounts = (Array.isArray(status.accountIds) ? status.accountIds : []).map((id) => byId.get(id));
+    const storesById = new Map(vault.stores.map((store) => [store.id, store]));
+    const frozenSelection = status.selection && typeof status.selection === 'object' ? status.selection : {};
+    const frozenSelectionType = frozenSelection.type === 'store' ? 'store' : 'storeGroup';
+    const frozenSelectionId = batchText(frozenSelection.id, 100);
+    const matchesFrozenSelection = (account) => {
+      const store = account && storesById.get(account.storeId);
+      if (!store) return false;
+      if (!frozenSelectionId || frozenSelectionId === '__all__') return true;
+      if (frozenSelectionType === 'store') return store.id === frozenSelectionId;
+      return frozenSelectionId === '__ungrouped__'
+        ? !store.groupId
+        : store.groupId === frozenSelectionId;
+    };
+    accounts = statusAccountIds.map((id) => byId.get(id));
     if (!accounts.length || accounts.some((account) => (
-      !account || normalizeBatchAccountPlatform(account.platform) !== 'taobao'
+      !account || account.enabled === false || normalizeBatchAccountPlatform(account.platform) !== 'taobao' ||
+        !matchesFrozenSelection(account)
     ))) {
-      throw new Error('\u6682\u505c\u540e\u8d26\u53f7\u5e93\u53d1\u751f\u53d8\u5316，\u7f3a\u5c11\u539f\u4efb\u52a1\u8d26\u53f7。');
+      throw new Error('暂停后账号库发生变化，原任务账号已缺失、被停用或移出所选分组。');
     }
     selection = status.selection || {};
     platforms = normalizePlatformTaskIds(status.platforms);
@@ -3985,36 +4026,36 @@ function prepareAccountBatchFromSession(vault, request, previousStatus) {
     startedAt = Number(status.startedAt) || 0;
   } else {
     const rawSelection = source.selection && typeof source.selection === 'object' ? source.selection : {};
-    const type = rawSelection.type === 'store' ? 'store' : 'storeGroup';
-    const id = batchText(rawSelection.id, 100) || '__all__';
-    let name = '';
-    if (type === 'store') {
-      const selectedStore = vault.stores.find((store) => store.id === id);
-      if (!selectedStore) throw new Error('\u672a\u627e\u5230\u9009\u4e2d\u7684\u5e97\u94fa。');
-      name = selectedStore.name;
-      accounts = vault.accounts.filter((account) => (
-        account.enabled !== false && normalizeBatchAccountPlatform(account.platform) === 'taobao' && account.storeId === id
-      ));
-    } else {
-      const selectedGroup = vault.storeGroups.find((group) => group.id === id);
-      if (id !== '__all__' && id !== '__ungrouped__' && !selectedGroup) {
-        throw new Error('\u672a\u627e\u5230\u9009\u4e2d\u7684\u5e97\u94fa\u5206\u7ec4。');
-      }
-      name = id === '__all__' ? '\u5168\u90e8\u542f\u7528\u5e97\u94fa' : id === '__ungrouped__' ? '\u672a\u5206\u7ec4\u5e97\u94fa' : selectedGroup.name;
-      const storeIds = new Set(vault.stores.filter((store) => (
-        id === '__all__' || (id === '__ungrouped__' ? !store.groupId : store.groupId === id)
-      )).map((store) => store.id));
-      accounts = vault.accounts.filter((account) => (
-        account.enabled !== false && normalizeBatchAccountPlatform(account.platform) === 'taobao' && storeIds.has(account.storeId)
-      ));
+    const id = batchText(rawSelection.id, 100);
+    const selectedGroup = vault.storeGroups.find((group) => group.id === id);
+    if (id !== '__ungrouped__' && !selectedGroup) {
+      throw new Error('\u672a\u627e\u5230\u9009\u4e2d\u7684\u5e97\u94fa\u5206\u7ec4。');
+    }
+    const name = id === '__ungrouped__' ? '\u672a\u5206\u7ec4\u5e97\u94fa' : selectedGroup.name;
+    const storeIds = new Set(vault.stores.filter((store) => (
+      id === '__ungrouped__' ? !store.groupId : store.groupId === id
+    )).map((store) => store.id));
+    const eligibleAccounts = vault.accounts.filter((account) => (
+      account.enabled !== false && normalizeBatchAccountPlatform(account.platform) === 'taobao' &&
+        storeIds.has(account.storeId)
+    ));
+    const requestedIds = Array.from(new Set((Array.isArray(rawSelection.accountIds)
+      ? rawSelection.accountIds
+      : []).map((value) => batchText(value, 100)).filter(Boolean)));
+    if (!requestedIds.length) throw new Error('\u8bf7\u81f3\u5c11\u9009\u62e9\u4e00\u4e2a\u7ec4\u5185\u8d26\u53f7。');
+    if (requestedIds.length > 100) throw new Error('\u6bcf\u6b21\u6700\u591a\u9009\u62e9 100 \u4e2a\u8d26\u53f7。');
+    const eligibleById = new Map(eligibleAccounts.map((account) => [account.id, account]));
+    accounts = requestedIds.map((accountId) => eligibleById.get(accountId));
+    if (accounts.some((account) => !account)) {
+      throw new Error('\u6240\u9009\u8d26\u53f7\u5df2\u5931\u6548、\u88ab\u505c\u7528\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u5e97\u94fa\u5206\u7ec4。');
     }
     selection = {
-      type,
+      type: 'storeGroup',
       id,
       name,
-      groupId: type === 'storeGroup' ? id : '',
+      groupId: id,
       groupName: name,
-      storeId: type === 'store' ? id : '',
+      accountIds: requestedIds,
     };
     platforms = normalizePlatformTaskIds(source.platforms);
   }
@@ -4392,9 +4433,7 @@ async function runAccountBatch(payload) {
     .map(sanitizeBatchAccount)
     .filter((account) => account.platform === 'taobao');
   if (!accounts.length) throw new Error('当前分组没有可执行的淘宝账号。');
-  const taskType = ['collect', 'report', 'both'].includes(payload && payload.taskType)
-    ? payload.taskType
-    : 'both';
+  const taskType = 'report';
   const platforms = normalizePlatformTaskIds(payload && payload.platforms);
   const notification = sanitizeNotificationConfig(payload && payload.notification);
   const resume = payload && payload.resume === true;
@@ -4510,34 +4549,19 @@ async function runAccountBatch(payload) {
       continue;
     }
 
-    let autoResult = null;
     let reportResult = null;
     let failureMessage = '';
     try {
       if (accountBatchCancelRequested) throw batchError('BATCH_CANCELLED', '\u6279\u91cf\u4efb\u52a1\u5df2\u53d6\u6d88。');
-      if (taskType === 'collect' || taskType === 'both') {
-        await saveAccountBatchStatus(Object.assign({}, baseStatus, {
-          currentIndex: index,
-          resumeIndex: index,
-          currentAccountId: account.id,
-          currentStoreName: account.storeName,
-          phase: '\u5e76\u884c\u8bfb\u53d6\u56db\u4e2a\u5e73\u53f0',
-          results: completedResults,
-        }));
-        autoResult = await ensureBusinessDefenseAutoCollectTask({ platforms }).promise;
-      }
-      if (accountBatchCancelRequested) throw batchError('BATCH_CANCELLED', '\u6279\u91cf\u4efb\u52a1\u5df2\u53d6\u6d88。');
-      if (taskType === 'report' || taskType === 'both') {
-        await saveAccountBatchStatus(Object.assign({}, baseStatus, {
-          currentIndex: index,
-          resumeIndex: index,
-          currentAccountId: account.id,
-          currentStoreName: account.storeName,
-          phase: '\u751f\u6210\u5185\u5bb9\u8bca\u65ad\u62a5\u544a',
-          results: completedResults,
-        }));
-        reportResult = await ensureContentDiagnosisReportTask({ platforms }).promise;
-      }
+      await saveAccountBatchStatus(Object.assign({}, baseStatus, {
+        currentIndex: index,
+        resumeIndex: index,
+        currentAccountId: account.id,
+        currentStoreName: account.storeName,
+        phase: '\u4e00\u952e\u53d6\u6570\u5e76\u751f\u6210\u62a5\u544a',
+        results: completedResults,
+      }));
+      reportResult = await ensureContentDiagnosisReportTask({ platforms }).promise;
     } catch (error) {
       failureMessage = error && error.message ? error.message : String(error);
     }
@@ -4555,7 +4579,7 @@ async function runAccountBatch(payload) {
       batchId,
       accountStartedAt,
       loginResult,
-      autoResult,
+      null,
       reportResult,
       failureMessage,
       { taskType, runMode: 'batch' }
@@ -4568,9 +4592,7 @@ async function runAccountBatch(payload) {
       runId: archive.runId,
       message: failureMessage || (archive.status === 'partial'
         ? '\u90e8\u5206\u5e73\u53f0\u672a\u8fd4\u56de。'
-        : (taskType === 'collect'
-          ? '\u7ecf\u8425\u53d6\u6570\u5df2\u5f52\u6863。'
-          : taskType === 'report' ? '\u8bca\u65ad\u62a5\u544a\u5df2\u5f52\u6863。' : '\u53d6\u6570\u4e0e\u62a5\u544a\u5df2\u5f52\u6863。')),
+        : '\u4e00\u952e\u53d6\u6570\u7684\u6570\u636e\u8868\u683c\u4e0e\u8bca\u65ad\u62a5\u544a\u5df2\u5f52\u6863。'),
       finishedAt: Date.now(),
     });
 
@@ -4619,7 +4641,7 @@ async function runProjectTask(payload) {
   const storeSource = source.store && typeof source.store === 'object' ? source.store : {};
   const storeId = batchText(storeSource.id, 100);
   const storeName = batchText(storeSource.name, 120);
-  const taskType = source.taskType === 'report' ? 'report' : 'collect';
+  const taskType = 'report';
   const platforms = normalizePlatformTaskIds(source.platforms);
   if (!storeId || !storeName) throw new Error('请先选择本次任务归属的店铺。');
   const startedAt = Date.now();
@@ -4637,23 +4659,17 @@ async function runProjectTask(payload) {
     running: true,
     startedAt,
     finishedAt: null,
-    phase: taskType === 'report' ? '准备生成诊断报告' : '准备经营取数',
+    phase: '准备一键取数',
     error: '',
   };
   await saveProjectTaskStatus(baseStatus);
   await clearAccountRunSnapshots();
 
-  let autoResult = null;
   let reportResult = null;
   let failureMessage = '';
   try {
-    if (taskType === 'report') {
-      await saveProjectTaskStatus(Object.assign({}, baseStatus, { phase: '并行生成诊断报告' }));
-      reportResult = await ensureContentDiagnosisReportTask({ platforms }).promise;
-    } else {
-      await saveProjectTaskStatus(Object.assign({}, baseStatus, { phase: '并行读取四个平台' }));
-      autoResult = await ensureBusinessDefenseAutoCollectTask({ platforms }).promise;
-    }
+    await saveProjectTaskStatus(Object.assign({}, baseStatus, { phase: '一键读取并生成项目结果' }));
+    reportResult = await ensureContentDiagnosisReportTask({ platforms }).promise;
   } catch (error) {
     failureMessage = error && error.message ? error.message : String(error);
   }
@@ -4676,7 +4692,7 @@ async function runProjectTask(payload) {
     taskId,
     startedAt,
     { state: 'currentSession', noPermission: false },
-    autoResult,
+    null,
     reportResult,
     failureMessage,
     { taskType, runMode: 'current' }
@@ -4697,7 +4713,7 @@ async function runProjectTask(payload) {
     taskId,
     runId: archive.runId,
     status: archive.status,
-    message: failureMessage || (taskType === 'report' ? '诊断报告已归档。' : '经营数据已归档。'),
+    message: failureMessage || '一键取数结果已归档。',
   };
 }
 
@@ -4798,8 +4814,8 @@ function ensureProjectTask(payload) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== 'PROJECT_TASK_START') return;
-  if (!isBusinessDefenseWebToolSender(message, sender)) {
-    sendResponse({ ok: false, message: '请从淘宝全链路网页工具发起任务。' });
+  if (!isOneClickWebToolSender(message, sender)) {
+    sendResponse({ ok: false, message: '请从淘宝全链路网页工具的“一键取数”页面发起任务。' });
     return;
   }
   (async () => {
@@ -4824,73 +4840,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== 'BUSINESS_DEFENSE_AUTO_COLLECT') return;
-  (async () => {
-    if (!isBusinessDefenseWebToolSender(message, sender)) {
-      const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const activeTab = activeTabs && activeTabs[0];
-      if (!activeTab || !isSycmTrafficPageUrl(activeTab.url)) {
-        sendResponse({ ok: false, message: '请先打开生意参谋流量页，再点击插件取数。' });
-        return;
-      }
-    }
-    if (contentDiagnosisReportPromise) {
-      sendResponse({ ok: false, message: '内容诊断报告正在生成，请完成后再执行一键取数。' });
-      return;
-    }
-    if (accountBatchPromise) {
-      sendResponse({ ok: false, message: '分组批量任务正在执行，请完成后再单独取数。' });
-      return;
-    }
-    if (projectTaskPromise) {
-      sendResponse({ ok: false, message: '当前登录账号任务正在执行。' });
-      return;
-    }
-    const launch = ensureBusinessDefenseAutoCollectTask();
-    if (message.waitForCompletion === false) {
-      sendResponse({ ok: true, started: launch.started, running: true });
-      return;
-    }
-    try {
-      sendResponse(await launch.promise);
-    } catch (error) {
-      sendResponse({ ok: false, message: error && error.message ? error.message : String(error) });
-    }
-  })();
-  return true;
-});
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== 'BUSINESS_DEFENSE_GENERATE_CONTENT_REPORT') return;
-  if (!isBusinessDefenseWebToolSender(message, sender)) {
-    sendResponse({ ok: false, message: '请从淘宝全链路网页工具生成诊断报告。' });
-    return;
-  }
-  (async () => {
-    if (businessDefenseAutoCollectPromise) {
-      sendResponse({ ok: false, message: '一键取数正在执行，请完成后再生成内容诊断报告。' });
-      return;
-    }
-    if (accountBatchPromise) {
-      sendResponse({ ok: false, message: '分组批量任务正在执行，请完成后再单独生成报告。' });
-      return;
-    }
-    if (projectTaskPromise) {
-      sendResponse({ ok: false, message: '当前登录账号任务正在执行。' });
-      return;
-    }
-    const launch = ensureContentDiagnosisReportTask();
-    if (message.waitForCompletion !== true) {
-      sendResponse({ ok: true, started: launch.started, running: true });
-      return;
-    }
-    try {
-      sendResponse(await launch.promise);
-    } catch (error) {
-      sendResponse({ ok: false, message: error && error.message ? error.message : String(error) });
-    }
-  })();
-  return true;
+  if (!message || ![
+    'BUSINESS_DEFENSE_AUTO_COLLECT',
+    'BUSINESS_DEFENSE_GENERATE_CONTENT_REPORT',
+  ].includes(message.type)) return;
+  sendResponse({
+    ok: false,
+    message: '独立取数入口已停用，请从团队网页的“一键取数”发起任务并自动归档。',
+  });
+  return false;
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -4899,7 +4857,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     'ACCOUNT_SESSION_GET_SUMMARY',
     'ACCOUNT_SESSION_GET_MANAGEMENT',
     'ACCOUNT_SESSION_CLEAR',
-    'ACCOUNT_BATCH_START',
     'ACCOUNT_BATCH_START_FROM_SESSION',
     'ACCOUNT_BATCH_CANCEL',
     'ACCOUNT_BATCH_TEST_DINGTALK',
@@ -4907,6 +4864,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !allowedTypes.includes(message.type)) return;
   if (!isBusinessDefenseWebToolSender(message, sender)) {
     sendResponse({ ok: false, message: '请从淘宝全链路网页工具管理批量任务。' });
+    return;
+  }
+  if (message.type === 'ACCOUNT_BATCH_START_FROM_SESSION' && !isOneClickWebToolSender(message, sender)) {
+    sendResponse({ ok: false, message: '请从淘宝全链路网页工具的“一键取数”页面发起批量任务。' });
     return;
   }
   (async () => {

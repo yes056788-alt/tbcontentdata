@@ -16,8 +16,7 @@
     </a>
     <nav class="portal-nav" aria-label="主要工作区">
       <a class="active" href="/index.html" aria-current="page">项目管理</a>
-      <a href="/collect.html">经营取数</a>
-      <a href="/report.html">诊断报告</a>
+      <a href="/report.html">一键取数</a>
       <a href="/accounts.html">账号库管理</a>
     </nav>
     <div class="portal-status">
@@ -55,8 +54,8 @@
             <p id="selectedStoreCopy">暂无运行记录</p>
           </div>
           <div class="heading-actions">
-            <a id="storeCollectLink" class="button" href="/collect.html">经营取数</a>
-            <a id="storeReportLink" class="button primary" href="/report.html">生成诊断报告</a>
+            <button id="openBatchExportBtn" class="button" type="button">批量导出报告</button>
+            <a id="storeReportLink" class="button primary" href="/report.html">一键取数</a>
           </div>
         </header>
 
@@ -94,6 +93,49 @@
     </main>
   </div>
 
+  <dialog id="batchExportDialog" class="batch-export-dialog" aria-labelledby="batchExportTitle">
+    <section class="batch-export-card">
+      <header class="batch-export-head">
+        <div><span class="section-kicker">BATCH EXPORT</span><h2 id="batchExportTitle">批量导出诊断报告</h2><p>每份报告仍为可点击模块切换的独立 HTML，统一打包为 ZIP。</p></div>
+        <button id="closeBatchExportBtn" class="batch-export-close" type="button" aria-label="关闭批量导出">×</button>
+      </header>
+
+      <div id="batchExportSetup" class="batch-export-setup">
+        <fieldset class="batch-export-scope">
+          <legend>导出范围</legend>
+          <label><input type="radio" name="batchExportScope" value="store" checked><span><strong>当前店铺历史报告</strong><small>勾选当前店铺的多条历史报告</small></span></label>
+          <label><input type="radio" name="batchExportScope" value="group"><span><strong>按店铺分组</strong><small>批量导出组内多个店铺报告</small></span></label>
+        </fieldset>
+
+        <div id="batchExportGroupOptions" class="batch-export-group-options" hidden>
+          <label><span>店铺分组</span><select id="batchExportGroupSelect"></select></label>
+          <fieldset><legend>历史范围</legend><label><input type="radio" name="batchExportHistoryMode" value="latest" checked>每店最新可用报告</label><label><input type="radio" name="batchExportHistoryMode" value="all">组内全部历史（最多 50 份）</label></fieldset>
+        </div>
+
+        <div class="batch-export-toolbar">
+          <div><button id="selectAllBatchReportsBtn" class="text-button" type="button">全选可导出</button><button id="clearBatchReportsBtn" class="text-button" type="button">清空选择</button></div>
+          <strong id="batchExportSelectionCount" role="status" aria-live="polite">已选 0 / 0 份</strong>
+        </div>
+        <div id="batchExportList" class="batch-export-list" role="group" aria-label="可导出的历史报告"></div>
+        <p id="batchExportHint" class="batch-export-hint">每次最多导出 50 份报告。</p>
+      </div>
+
+      <section id="batchExportProgress" class="batch-export-progress" aria-labelledby="batchExportProgressTitle" hidden>
+        <strong id="batchExportProgressTitle" tabindex="-1">正在生成报告包</strong>
+        <progress id="batchExportProgressBar" max="1" value="0" aria-labelledby="batchExportProgressTitle"></progress>
+        <p id="batchExportProgressCopy" role="status" aria-live="polite">准备中…</p>
+        <ul id="batchExportResultList"></ul>
+      </section>
+
+      <footer class="batch-export-actions">
+        <button id="cancelBatchExportBtn" class="button" type="button">取消</button>
+        <button id="startBatchExportBtn" class="button primary" type="button" disabled>导出 0 份报告</button>
+      </footer>
+      <iframe id="batchReportBuilderFrame" title="批量报告生成器" hidden></iframe>
+    </section>
+  </dialog>
+
+  <script src="/batch-report-export.js"></script>
   <script src="/project.js"></script>
 </body>
 </html>

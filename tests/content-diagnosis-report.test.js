@@ -12,13 +12,16 @@ const bridge = fs.readFileSync(path.join(root, 'web-tool-bridge.js'), 'utf8');
 const background = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
 const wxt = fs.readFileSync(path.join(root, 'wxt-report-content.js'), 'utf8');
 
-assert.match(taskHtml, /<h2>报告取数设置<\/h2>/);
+assert.match(taskHtml, /<h1>一键取数<\/h1>/);
+assert.match(taskHtml, /<h2>一键取数设置<\/h2>/);
+assert.match(taskHtml, />开始一键取数<\/button>/);
+assert.match(taskHtml, /自动生成诊断报告和数据表格/);
 assert.match(taskHtml, /data-task-mode="current"/);
 assert.match(taskHtml, /data-task-mode="batch"/);
 assert.doesNotMatch(taskHtml, /id="flowSection"|id="reportSteps"/);
 
 for (const id of [
-  'generateReportBtn', 'refreshReportBtn', 'exportReportBtn', 'clearReportBtn',
+  'refreshReportBtn', 'exportReportBtn', 'clearReportBtn',
   'reportProgressBar', 'reportSteps', 'reportIndex', 'emptyReport', 'flowSection',
   'guangheSection', 'wxtSection', 'shortVideoSection', 'dmpSection', 'dmpReport',
   'flowContext', 'flowReport', 'guangheContext', 'guangheReport',
@@ -27,7 +30,7 @@ for (const id of [
   assert.match(html, new RegExp('id="' + id + '"'));
 }
 
-assert.match(html, /id="generateReportBtn"[^>]*hidden/);
+assert.doesNotMatch(html, /generateReportBtn/);
 assert.match(html, /data-guanghe-view="channel"/);
 assert.match(html, /data-guanghe-view="asset"/);
 assert.match(html, /href="\/report\.html"/);
@@ -40,7 +43,7 @@ assert.match(server, /'\/report\.js'/);
 assert.match(server, /\['\/report-view\.html', '\/data\.html'\]\.includes\(url\.pathname\)/);
 assert.match(server, /style-src 'self' 'unsafe-inline'/);
 
-assert.match(page, /startContentDiagnosisReport/);
+assert.doesNotMatch(page, /startContentDiagnosisReport|BUSINESS_DEFENSE_GENERATE_CONTENT_REPORT/);
 assert.match(page, /taobaoContentDiagnosisReportStatusV1/);
 assert.match(page, /taobaoContentDiagnosisWxtReportV1/);
 assert.match(page, /buildGuangheMarkup\('channel', true\)/);
@@ -56,8 +59,37 @@ assert.match(page, /消费能力等级/);
 assert.match(page, /result\.partial \? 'partial'/);
 assert.match(page, /部分完成/);
 assert.match(page, /部分章节数据不完整/);
-assert.match(page, /五章节合并导出/);
 assert.match(page, /function exportReport\(\)/);
+assert.match(page, /function buildExportReportDocument\(metadata\)/);
+assert.match(page, /function buildExportFromArchive\(run, metadata\)/);
+assert.match(page, /window\.TaobaoReportExport = Object\.freeze/);
+assert.match(page, /function sanitizeExportMarkup\(markup\)/);
+assert.match(page, /querySelectorAll\('script,iframe,object,embed,base,meta,link'\)/);
+assert.match(page, /function sanitizeExportStyles\(styles\)/);
+assert.match(page, /http-equiv="Content-Security-Policy"/);
+assert.match(page, /script-src 'nonce-/);
+assert.match(page, /const ARCHIVE_RUN_ID = SEARCH_PARAMS\.get\('archive'\)/);
+assert.match(page, /requestBridge\('getStoreRun', \{ runId: ARCHIVE_RUN_ID \}/);
+assert.doesNotMatch(page, /restoreStoreRun/);
+assert.doesNotMatch(page, /五章节合并导出|export-chapter/);
+assert.match(page, /交互式单页报告 · 点击模块查看对应内容/);
+for (const key of ['flow', 'guanghe', 'wxt', 'shortVideo', 'dmp']) {
+  assert.match(page, new RegExp("key: '" + key + "'"));
+}
+assert.match(page, /role="tablist" aria-label="报告模块"/);
+assert.match(page, /role="tabpanel" aria-labelledby="export-tab-/);
+assert.match(page, /data-export-section/);
+assert.match(page, /data-export-panel/);
+assert.match(page, /panel\.hidden=panel\.dataset\.exportPanel!==key/);
+assert.match(page, /tab\.setAttribute\("aria-selected",String\(active\)\)/);
+assert.match(page, /tab\.tabIndex=active\?0:-1/);
+assert.match(page, /const initialSection = sectionHasData\(activeSection\)/);
+assert.match(page, /const initialGuangheView = guangheView === 'asset' \? 'asset' : 'channel'/);
+assert.match(page, /data-export-guanghe-view="channel"/);
+assert.match(page, /data-export-guanghe-view="asset"/);
+assert.match(page, /data-export-guanghe-panel="channel"/);
+assert.match(page, /data-export-guanghe-panel="asset"/);
+assert.match(page, /@media print\{[\s\S]*?\.export-index\{display:none\}/);
 assert.match(page, /max-width:1120px/);
 assert.match(page, /function normalizeWxtMarketingMarkup\(markup\)/);
 assert.match(page, /function normalizeWxtShortVideoMarkup\(markup\)/);
@@ -76,8 +108,7 @@ const flowMarkup = page.match(/function buildFlowMarkup\(\) \{([\s\S]*?)\n  \}\n
 assert.ok(flowMarkup, 'expected flow report renderer');
 assert.doesNotMatch(flowMarkup[1], /diagnosis-kpis/);
 
-assert.match(bridge, /startContentDiagnosisReport/);
-assert.match(bridge, /BUSINESS_DEFENSE_GENERATE_CONTENT_REPORT/);
+assert.doesNotMatch(bridge, /startContentDiagnosisReport|BUSINESS_DEFENSE_GENERATE_CONTENT_REPORT/);
 assert.match(bridge, /projectTasks/);
 assert.match(background, /runBusinessDefenseGuanghe\(\{ metricsOnly: false \}\)/);
 assert.match(background, /CONTENT_DIAGNOSIS_WXT_SHORT_URL/);
@@ -91,6 +122,7 @@ const guangheSyncBlock = background.slice(guangheSyncStart);
 assert.match(guangheSyncBlock, /active: false/);
 assert.doesNotMatch(guangheSyncBlock, /active: true/);
 assert.match(wxt, /markup: reportMarkup\(data\)/);
+assert.match(wxt, /await saveBusinessDefenseWxtSnapshot\(data, 'marketingScene'\)/);
 assert.match(wxt, /markup: shortVideoDiagnosisMarkup\(data\)/);
 assert.match(wxt, /function overallDiagnosisMarkup/);
 assert.match(wxt, /光合免费流量 \+ 万相台付费效果/);

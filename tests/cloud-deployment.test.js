@@ -12,7 +12,7 @@ const origins = [
 ];
 const retiredHostedOrigin = ['https://taobao-business-team', 'sunset-camel-1085', 'chatgpt', 'site'].join('.');
 
-assert.equal(manifest.version, '2.37.3');
+assert.equal(manifest.version, '2.37.4');
 const bridgeScript = manifest.content_scripts.find((item) =>
   Array.isArray(item.js) && item.js.includes('web-tool-bridge.js')
 );
@@ -65,6 +65,7 @@ function evaluateBridge(origin, pathname) {
 for (const origin of origins) {
   for (const pathname of [
     '/login', '/setup', '/change-password', '/admin',
+    '/collect.html',
     '/_next/static/chunks/login.js', '/downloads/taobao-data-assistant.zip',
   ]) {
     const evaluated = evaluateBridge(origin, pathname);
@@ -74,7 +75,7 @@ for (const origin of origins) {
   }
 
   for (const pathname of [
-    '/', '/workspace.html', '/accounts.html', '/collect.html',
+    '/', '/workspace.html', '/accounts.html',
     '/report.html', '/data.html', '/report-view.html',
   ]) {
     const evaluated = evaluateBridge(origin, pathname);
@@ -97,6 +98,7 @@ assert.match(generatedAssets, /export const EXTENSION_PACKAGE_BASE64/);
 const generatedVersion = generatedAssets.match(/export const EXTENSION_PACKAGE_VERSION = "(\d+\.\d+\.\d+)"/);
 assert.ok(generatedVersion);
 assert.match(generatedAssets, /"workspace\.html"/);
+assert.doesNotMatch(generatedAssets, /"collect\.html"\s*:/);
 assert.match(generatedAssets, /"taobao-data-assistant\.zip"/);
 assert.ok(generatedAssets.includes(`"taobao-data-assistant-${generatedVersion[1]}.zip"`));
 for (const name of [

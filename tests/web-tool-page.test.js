@@ -20,9 +20,10 @@ const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'u
 
 for (const id of [
   'projectTree', 'projectTreeEmpty', 'projectDashboard', 'projectRunRows',
-  'projectReportFrame', 'projectDataFrame', 'storeCollectLink', 'storeReportLink', 'connectionState',
+  'projectReportFrame', 'projectDataFrame', 'storeReportLink', 'connectionState',
   'projectHistoryPicker', 'projectRunSelect',
-  'projectExportBtn',
+  'projectExportBtn', 'openBatchExportBtn', 'batchExportDialog', 'batchExportList',
+  'batchExportGroupSelect', 'startBatchExportBtn', 'batchReportBuilderFrame',
 ]) {
   assert.match(projectHtml, new RegExp('id="' + id + '"'));
 }
@@ -31,21 +32,29 @@ assert.match(projectHtml, /aria-current="page">项目管理<\/a>/);
 assert.match(projectHtml, /data-project-view="report"/);
 assert.match(projectHtml, /data-project-view="data"/);
 assert.match(projectHtml, /data-project-view="history"/);
+assert.match(projectHtml, />当前店铺历史报告</);
+assert.match(projectHtml, />按店铺分组</);
+assert.match(projectHtml, />每店最新可用报告</);
+assert.match(projectHtml, />组内全部历史（最多 50 份）</);
+assert.match(projectHtml, /src="\/batch-report-export\.js"/);
 
-for (const html of [projectHtml, collectHtml, reportTaskHtml, dataHtml, reportViewHtml, accountsHtml]) {
+for (const html of [projectHtml, reportTaskHtml, dataHtml, reportViewHtml, accountsHtml]) {
   assert.match(html, />项目管理<\/a>/);
-  assert.match(html, />经营取数<\/a>/);
-  assert.match(html, />诊断报告<\/a>/);
+  assert.match(html, />一键取数<\/a>/);
+  assert.doesNotMatch(html, /href="\/collect\.html"/);
   assert.match(html, />账号库管理<\/a>/);
 }
 
-for (const html of [collectHtml, reportTaskHtml]) {
+for (const html of [reportTaskHtml]) {
   for (const id of [
     'taskGroupSelect', 'taskStoreSelect', 'startCurrentTaskBtn', 'taskRunRows',
-    'batchSessionNotice', 'batchScopeType', 'batchScopeSelect', 'batchAccountSummary', 'startBatchTaskBtn',
+    'batchSessionNotice', 'batchGroupSelect', 'batchAccountList', 'batchAccountSummary',
+    'batchSelectAllBtn', 'batchClearSelectionBtn', 'startBatchTaskBtn',
   ]) {
     assert.match(html, new RegExp('id="' + id + '"'));
   }
+  assert.doesNotMatch(html, /batchScopeType|batchScopeSelect|单个店铺/);
+  assert.match(html, /选择组内账号/);
   assert.match(html, /data-task-mode="current"/);
   assert.match(html, /data-task-mode="batch"/);
   assert.match(html, /data-platform-picker="current"/);
@@ -56,18 +65,22 @@ for (const html of [collectHtml, reportTaskHtml]) {
   assert.doesNotMatch(html, />返回项目管理<\/a>/);
   assert.doesNotMatch(html, /id="metricRows"|id="reportShell"|id="flowSection"/);
 }
-assert.match(collectHtml, /data-task-type="collect"/);
+assert.match(collectHtml, /http-equiv="refresh" content="0; url=\/report\.html"/);
+assert.doesNotMatch(collectHtml, /data-task-type="collect"|startCurrentTaskBtn|startBatchTaskBtn/);
 assert.match(reportTaskHtml, /data-task-type="report"/);
+assert.match(reportTaskHtml, /<h1>一键取数<\/h1>/);
+assert.match(reportTaskHtml, />开始一键取数<\/button>/);
+assert.match(reportTaskHtml, />开始批量一键取数<\/button>/);
 
 for (const id of [
-  'autoCollectBtn', 'refreshBtn', 'copyBtn', 'exportBtn', 'clearBtn',
+  'refreshBtn', 'copyBtn', 'exportBtn', 'clearBtn',
   'hint', 'platformProgress', 'runProgressBar', 'taobaoMetricRows', 'xiaohongshuMetricRows',
   'taobaoMetricCount', 'xiaohongshuMetricCount', 'taobaoMetricsPanel', 'xiaohongshuMetricsPanel',
   'taobaoTableTab', 'xiaohongshuTableTab',
 ]) {
   assert.match(dataHtml, new RegExp('id="' + id + '"'));
 }
-assert.match(dataHtml, /id="autoCollectBtn"[^>]*hidden/);
+assert.doesNotMatch(dataHtml, /autoCollectBtn|startAutoCollect/);
 assert.match(dataHtml, /原始数据手动填写并自动保存/);
 assert.doesNotMatch(dataHtml, /data-filter=/);
 assert.doesNotMatch(dataHtml, /id="summary"/);
@@ -78,11 +91,17 @@ assert.match(dataHtml, /data-platform-table="taobao"/);
 assert.match(dataHtml, /data-platform-table="xiaohongshu"/);
 assert.match(portalCss, /@media \(max-width: 760px\)/);
 assert.match(projectPage, /setProjectDirectory/);
-assert.match(projectPage, /restoreStoreRun/);
+assert.doesNotMatch(projectPage, /request\('restoreStoreRun'/);
+assert.match(projectPage, /['"]getStoreRun['"]/);
 assert.match(projectPage, /let activeView = 'report'/);
 assert.match(projectPage, /function runsForView/);
+assert.match(projectPage, /value === 'report'\) return \['一键取数', true, true\]/);
+assert.doesNotMatch(projectPage, /storeCollectLink/);
 assert.match(projectPage, /projectRunSelect/);
 assert.match(projectPage, /function exportActiveView/);
+assert.match(projectPage, /function startBatchExport/);
+assert.match(projectPage, /TaobaoReportExport/);
+assert.match(projectPage, /createStoredZip/);
 assert.match(projectPage, /exportReportBtn/);
 assert.match(projectPage, /exportBtn/);
 assert.match(projectPage, /data-project-group/);
@@ -92,11 +111,28 @@ assert.match(projectPage, /'\?embed=1&archive='/);
 assert.match(taskPage, /startProjectTask/);
 assert.match(taskPage, /startAccountBatchFromSession/);
 assert.match(taskPage, /getAccountSessionSummary/);
+assert.match(taskPage, /let selectedBatchAccountIds = new Set\(\)/);
+assert.match(taskPage, /accountBatchMultiSelect/);
+assert.match(taskPage, /let accountSession = \{[\s\S]*?accounts: \[\]/);
+assert.match(taskPage, /accountSession\.schema < 2/);
+assert.match(taskPage, /当前数据助手版本过旧/);
+assert.match(taskPage, /账号明细同步不完整/);
+assert.match(taskPage, /taobao-data-assistant\.zip/);
+assert.match(taskPage, /accountIds: selectedBatchAccountIdList\(\)/);
+assert.match(taskPage, /batchSelectionLocked/);
+assert.match(taskPage, /input\.disabled = running \|\| paused/);
+assert.doesNotMatch(taskPage, /activeMode === 'batch' \|\|/);
 assert.doesNotMatch(taskPage, /TaobaoAccountVault\.decrypt|batchMasterPassword/);
 assert.match(taskPage, /taobaoProjectTaskStatusV1/);
+assert.match(taskPage, /const taskType = 'report'/);
 assert.match(taskPage, /\/report-view\.html\?archive=/);
-assert.match(taskPage, /\/data\.html\?archive=/);
-assert.match(dashboard, /requestWebBridge\('startAutoCollect'/);
+assert.doesNotMatch(taskPage, /taskType === 'report'\s*\?/);
+assert.match(portalCss, /\.batch-account-list[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+assert.match(portalCss, /\.batch-account-option:has\(input:focus-visible\)/);
+assert.match(portalCss, /@media \(max-width: 460px\)[\s\S]*?\.task-actions \{[\s\S]*?flex-wrap: wrap/);
+assert.doesNotMatch(dashboard, /requestWebBridge\('startAutoCollect'|BUSINESS_DEFENSE_AUTO_COLLECT/);
+assert.match(dashboard, /taobaoContentDiagnosisReportStatusV1/);
+assert.match(dashboard, /dataTableStatusFromReport/);
 assert.match(dashboard, /requestWebBridge\('patchStoreRunManualInput'/);
 assert.match(dashboard, /result\.partial \? 'partial'/);
 assert.match(dashboard, /部分完成/);
@@ -104,9 +140,10 @@ assert.match(appCss, /\.platform-step\.partial/);
 assert.match(background, /async function runProjectTask/);
 assert.match(background, /PROJECT_TASK_START/);
 
-for (const route of ['/collect.html', '/data.html', '/report-view.html', '/portal.css', '/project.js', '/task.js']) {
+for (const route of ['/data.html', '/report-view.html', '/portal.css', '/batch-report-export.js', '/project.js', '/task.js']) {
   assert.ok(server.includes("['" + route + "'"), 'missing server route ' + route);
 }
+assert.match(server, /url\.pathname === '\/collect\.html'[\s\S]*?writeHead\(307[\s\S]*?'Location': '\/report\.html' \+ url\.search/);
 
 const bridgeContentScript = manifest.content_scripts.find((entry) => (
   Array.isArray(entry.js) && entry.js.includes('web-tool-bridge.js')
@@ -115,6 +152,6 @@ assert.ok(bridgeContentScript);
 assert.ok(bridgeContentScript.matches.includes('http://127.0.0.1:3400/*'));
 assert.equal(bridgeContentScript.all_frames, true);
 assert.match(server, /frame-ancestors 'self'/);
-assert.equal(manifest.version, '2.37.3');
+assert.equal(manifest.version, '2.37.4');
 
 console.log('project and task page guards passed');

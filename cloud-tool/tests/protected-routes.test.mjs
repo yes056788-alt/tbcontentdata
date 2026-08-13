@@ -5,7 +5,6 @@ import test from "node:test";
 const LEGACY_ROUTES = [
   "workspace.html",
   "accounts.html",
-  "collect.html",
   "report.html",
   "data.html",
   "report-view.html",
@@ -21,6 +20,19 @@ test("every legacy HTML path is an explicit authenticated route", async () => {
     assert.match(source, /export const GET = respond/);
     assert.match(source, /export const HEAD = respond/);
   }
+});
+
+test("retired collection path authenticates and redirects to one-click collection", async () => {
+  const source = await readFile(
+    new URL("../app/collect.html/route.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /await requireSession\(request\)/);
+  assert.match(source, /status:\s*307/);
+  assert.match(source, /Location:\s*`\/report\.html\$\{new URL\(request\.url\)\.search\}`/);
+  assert.doesNotMatch(source, /legacyHtmlResponse\("collect\.html"/);
+  assert.match(source, /export const GET = respond/);
+  assert.match(source, /export const HEAD = respond/);
 });
 
 test("legacy responses are no-store and carry browser security headers", async () => {
@@ -54,7 +66,6 @@ test("report and data viewers allow their required inline styles only", async ()
   for (const filename of [
     "workspace.html",
     "accounts.html",
-    "collect.html",
     "report.html",
   ]) {
     const policy = legacyContentSecurityPolicy(filename);
