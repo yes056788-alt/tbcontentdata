@@ -5,10 +5,22 @@ importScripts(
   'xhs/quality.js',
   'xhs/local-cache.js',
   'xhs/collector-core.js',
-  'xhs/page-client.js'
+  'xhs/page-client.js',
+  'xhs/adstar-collector.js',
+  'xhs/pgy-collector.js',
+  'xhs/juguang-accounts.js',
+  'xhs/juguang-collector.js'
 );
 
 const TAG = '[光合分析]';
+const xhsPageClient = XhsPageClient.createPageClient({
+  sendMessage: (tabId, envelope) => chrome.tabs.sendMessage(tabId, envelope),
+});
+const xhsLocalCollectionCache = XhsLocalCache.createIndexedDbCache({});
+const xhsAdstarCollector = XhsAdstarCollector.createAdstarCollector({
+  pageClient: xhsPageClient,
+  cache: xhsLocalCollectionCache,
+});
 const SYCM_CONTENT_ANALYSIS_PATH = '/xsite/contentanalysis/overview_new_v2';
 const WXT_TRACE_STORAGE_KEY = 'wxtReportApiTraceV1';
 const WXT_TRACE_MAX_RECORDS = 120;

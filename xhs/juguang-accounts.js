@@ -1,0 +1,67 @@
+(function initXhsJuguangAccounts(root, factory) {
+  const contract = typeof module === 'object' && module.exports
+    ? require('./contract')
+    : root.XhsContract;
+  const api = factory(contract);
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  root.XhsJuguangAccounts = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this, function createXhsJuguangAccountsApi(contract) {
+  'use strict';
+
+  if (!contract) throw new Error('XhsContract must be loaded before XhsJuguangAccounts');
+
+  function normalizeCurrentAccount(value) {
+    const data = contract.sanitizeSensitiveData(value && typeof value === 'object' ? value : {});
+    const subAccount = data.subAccount && typeof data.subAccount === 'object' ? data.subAccount : {};
+    const brand = data.brand && typeof data.brand === 'object' ? data.brand : {};
+    return {
+      vSellerId: subAccount.agentSubAccountId || data.vSellerId || null,
+      name: subAccount.agentSubAccountName || data.name || brand.brandUserName || null,
+      advertiserId: data.advertiserId,
+      accountType: data.accountType,
+      brand,
+      agent: data.agent || null,
+      subAccount: data.subAccount || null,
+    };
+  }
+
+  function normalizeListedAccount(value) {
+    const row = contract.sanitizeSensitiveData(value && typeof value === 'object' ? value : {});
+    return {
+      vSellerId: row.virtualSellerId || row.vSellerId || null,
+      name: row.owner && row.owner.name || row.accountName || row.name || null,
+      advertiserId: row.advertiserId,
+      accountType: row.accountType,
+      brand: row.brand || null,
+      agent: row.agent || null,
+      owner: row.owner || null,
+    };
+  }
+
+  function verifyAccount(actualValue, expectedValue) {
+    const actual = normalizeListedAccount(actualValue);
+    const expected = normalizeListedAccount(expectedValue);
+    if (Number(actual.advertiserId) !== Number(expected.advertiserId)) {
+      throw new Error(`Juguang account advertiserId mismatch: expected ${expected.advertiserId}, got ${actual.advertiserId}`);
+    }
+    if (Number(actual.accountType) !== Number(expected.accountType)) {
+      throw new Error(`Juguang account accountType mismatch: expected ${expected.accountType}, got ${actual.accountType}`);
+    }
+    if (Number(expected.accountType) === 602 && String(actual.vSellerId || '') !== String(expected.vSellerId || '')) {
+      throw new Error(`Juguang account vSellerId mismatch: expected ${expected.vSellerId}, got ${actual.vSellerId}`);
+    }
+    return Object.assign({}, expected, { verified: actual });
+  }
+
+  function accountKey(account) {
+    const normalized = normalizeListedAccount(account);
+    return String(normalized.vSellerId || `advertiser-${normalized.advertiserId}`);
+  }
+
+  return Object.freeze({
+    accountKey,
+    normalizeCurrentAccount,
+    normalizeListedAccount,
+    verifyAccount,
+  });
+});

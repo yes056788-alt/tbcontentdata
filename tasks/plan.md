@@ -1,6 +1,6 @@
 # 小红书三平台取数分析集成计划
 
-状态：已确认，执行中（检查点 A 已通过；当前 T03 星河）  
+状态：已确认，执行中（检查点 A 已通过；T03-T05 fixture 核心已绿，正在接后台运行入口）  
 目标仓库：`/Users/xinjiabo/AItools/光合插件优化/tbcontentdata`  
 基线分支：`agent/unified-data-report-workflow`  
 基线验证：2026-08-14 执行 `node --test tests/*.test.js`，30/30 通过

@@ -94,6 +94,8 @@ test('commits each page and resumes from nextPage without accumulating the commi
 
   const interruptedRun = await collectPaginated(base);
   assert.equal(interruptedRun.status, 'partial');
+  assert.equal(interruptedRun.cacheKey, base.cacheKey);
+  assert.equal(interruptedRun.fingerprint, base.fingerprint);
   assert.equal(interruptedRun.nextPage, 2);
   assert.deepEqual(
     interruptedRun.items.map((item) => item.noteId),

@@ -71,6 +71,8 @@
 
   function resultFromRecord(record, status, extra) {
     return Object.assign({
+      cacheKey: record.cacheKey,
+      fingerprint: record.fingerprint,
       status,
       truncated: Boolean(record.truncated),
       nextPage: record.nextPage == null ? null : record.nextPage,

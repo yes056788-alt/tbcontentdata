@@ -142,10 +142,11 @@
 
   function sanitizeText(value) {
     const text = String(value);
-    if (/^https?:\/\//i.test(text)) return sanitizeUrl(text);
+    if (/^https?:\/\/[^\s]+$/i.test(text)) return sanitizeUrl(text);
     return text
-      .replace(/([?&](?:[^?&#=]*(?:token|cookie|authorization|signature)|sign)=[^&#\s]*)/gi, '')
-      .replace(/\b(?:authorization|cookie|token|signature|password|credential)\s*[:=]\s*[^\s;,]+/gi, '[redacted]');
+      .replace(/https?:\/\/[^\s"'<>]+/gi, (url) => sanitizeUrl(url))
+      .replace(/([?&][^?&#=\s]*(?:token|cookie|authorization|signature|sign)[^?&#=\s]*=[^&#\s]*)/gi, '')
+      .replace(/\b[^\s:=;,]*(?:token|cookie|authorization|signature|password|credential)[^\s:=;,]*\s*[:=]\s*[^\s;,]+/gi, '[redacted]');
   }
 
   function sanitizeSensitiveData(value, seen) {
