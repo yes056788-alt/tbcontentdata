@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "淘宝内容诊断插件",
   "version": "2.37.4",
-  "description": "为淘宝全链路取数网页提供光合、生意参谋、万相台和DMP后台取数能力",
+  "description": "为全链路取数网页提供淘宝经营及星河、蒲公英、聚光后台取数能力",
   "permissions": ["storage", "unlimitedStorage", "webRequest", "downloads", "tabs", "scripting", "webNavigation"],
   "action": {
     "default_title": "淘宝全链路取数数据助手",
@@ -14,6 +14,9 @@
     "*://*.alimama.hk/*",
     "*://*.alicdn.com/*",
     "*://*.aliyuncs.com/*",
+    "https://adstar.alimama.com/*",
+    "https://pgy.xiaohongshu.com/*",
+    "https://ad.xiaohongshu.com/*",
     "https://xstore.insights.1688.com/*",
     "https://oapi.dingtalk.com/*",
     "http://localhost:3400/*",
@@ -24,6 +27,33 @@
     "service_worker": "background.js"
   },
   "content_scripts": [
+    {
+      "matches": ["https://adstar.alimama.com/*"],
+      "js": ["adstar-page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://pgy.xiaohongshu.com/*"],
+      "js": ["pgy-page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://ad.xiaohongshu.com/*"],
+      "js": ["juguang-page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://adstar.alimama.com/*",
+        "https://pgy.xiaohongshu.com/*",
+        "https://ad.xiaohongshu.com/*"
+      ],
+      "js": ["xhs-platform-content.js"],
+      "run_at": "document_start"
+    },
     {
       "matches": [
         "*://adstar.alimama.com/*",

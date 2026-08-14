@@ -1,5 +1,13 @@
 // background.js - 用 webRequest 拦截下载请求，获取文件内容后发给 content-script
 
+importScripts(
+  'xhs/contract.js',
+  'xhs/quality.js',
+  'xhs/local-cache.js',
+  'xhs/collector-core.js',
+  'xhs/page-client.js'
+);
+
 const TAG = '[光合分析]';
 const SYCM_CONTENT_ANALYSIS_PATH = '/xsite/contentanalysis/overview_new_v2';
 const WXT_TRACE_STORAGE_KEY = 'wxtReportApiTraceV1';

@@ -158,6 +158,15 @@ async function buildExtensionPackage() {
   const version = String(manifest.version || "").trim();
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Extension manifest version is invalid.");
   const files = [
+    "adstar-page-hook.js",
+    "pgy-page-hook.js",
+    "juguang-page-hook.js",
+    "xhs-platform-content.js",
+    "xhs/contract.js",
+    "xhs/quality.js",
+    "xhs/collector-core.js",
+    "xhs/local-cache.js",
+    "xhs/page-client.js",
     "xinghe-content-script.js",
     "diagnosis-popup.js",
     "rules.js",
