@@ -71,6 +71,8 @@ async function verifyAutoCollectParallelism() {
       await delay(Math.max(1, Math.round(milliseconds / 200)));
     },
     PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp'],
+    XHS_PLATFORM_TASK_IDS: ['adstar', 'pgy', 'juguang'],
+    REPORT_PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp', 'adstar', 'pgy', 'juguang'],
     PLATFORM_RETRY_ATTEMPTS: 5,
   });
   const source = extractFunction(
@@ -147,6 +149,8 @@ async function verifyReportParallelism() {
       await delay(Math.max(1, Math.round(milliseconds / 200)));
     },
     PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp'],
+    XHS_PLATFORM_TASK_IDS: ['adstar', 'pgy', 'juguang'],
+    REPORT_PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp', 'adstar', 'pgy', 'juguang'],
     PLATFORM_RETRY_ATTEMPTS: 5,
   });
   const source = extractFunction(
@@ -173,7 +177,7 @@ async function verifyReportParallelism() {
   const finalStatus = storageWrites.at(-1)['report-status'];
   assert.equal(finalStatus.running, false);
   assert.deepEqual(Array.from(finalStatus.activeSteps), []);
-  assert.equal(finalStatus.results.length, 5);
+  assert.equal(finalStatus.results.length, 6);
 }
 
 async function verifyTransientRetry() {
@@ -286,6 +290,8 @@ async function verifyReportGateFailureSkipsSecondWait() {
     CONTENT_DIAGNOSIS_REPORT_KEY: 'report-data',
     CONTENT_DIAGNOSIS_WXT_KEY: 'report-wxt',
     PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp'],
+    XHS_PLATFORM_TASK_IDS: ['adstar', 'pgy', 'juguang'],
+    REPORT_PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp', 'adstar', 'pgy', 'juguang'],
     PLATFORM_RETRY_ATTEMPTS: 5,
     contentDiagnosisResultMessage: () => '',
     async runBusinessDefenseSycm() {},
@@ -325,6 +331,8 @@ async function verifyGateCodeSurvivesEarlierTransientRetry() {
     CONTENT_DIAGNOSIS_REPORT_KEY: 'report-data',
     CONTENT_DIAGNOSIS_WXT_KEY: 'report-wxt',
     PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp'],
+    XHS_PLATFORM_TASK_IDS: ['adstar', 'pgy', 'juguang'],
+    REPORT_PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp', 'adstar', 'pgy', 'juguang'],
     PLATFORM_RETRY_ATTEMPTS: 5,
     contentDiagnosisResultMessage: () => '',
     async runBusinessDefenseSycm() {},

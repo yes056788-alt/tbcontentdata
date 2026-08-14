@@ -279,13 +279,63 @@
     return Array.from(duplicates);
   }
 
+  function deriveOrderAccountIdentity(orders) {
+    const values = Array.isArray(orders) ? orders : [];
+    const namesByMemberId = new Map();
+    let missingMemberIdCount = 0;
+    let missingMemberNameCount = 0;
+    for (const order of values) {
+      const memberId = String(order && order.memberId != null ? order.memberId : '').trim();
+      const memberName = String(order && order.memberName != null ? order.memberName : '').trim();
+      if (!memberId) {
+        missingMemberIdCount += 1;
+        continue;
+      }
+      if (!namesByMemberId.has(memberId)) namesByMemberId.set(memberId, new Set());
+      if (memberName) namesByMemberId.get(memberId).add(memberName);
+      else missingMemberNameCount += 1;
+    }
+
+    const candidates = Array.from(namesByMemberId.entries())
+      .map(([memberId, names]) => ({
+        memberId,
+        memberName: Array.from(names).sort()[0] || null,
+      }))
+      .sort((left, right) => left.memberId.localeCompare(right.memberId));
+    const warnings = [];
+    if (!candidates.length || missingMemberIdCount || missingMemberNameCount) {
+      warnings.push({
+        code: 'adstar_account_identity_missing',
+        message: candidates.length
+          ? 'Some Star orders are missing memberId or memberName account identity fields.'
+          : 'Star orders do not expose a memberId account identity.',
+        orderCount: values.length,
+        missingMemberIdCount,
+        missingMemberNameCount,
+      });
+    }
+    if (candidates.length > 1) {
+      warnings.push({
+        code: 'adstar_account_identity_ambiguous',
+        message: 'Star orders contain multiple memberId account identities.',
+        identityCount: candidates.length,
+      });
+    }
+    return {
+      identity: candidates.length === 1 ? candidates[0] : null,
+      ambiguous: candidates.length > 1,
+      warnings,
+    };
+  }
+
   const CONTENT_PROJECTION_FIELDS = Object.freeze([
     'theDate', 'ds', 'projectId', 'orderId', 'listOrderId', 'reportOrderId',
     'settleSeqId', 'noteId', 'contentId', 'orderName', 'kolName', 'media',
     'readUv1d', 'engagementUv1d', 'slrAttrItmSeImpsUv1d', 'slrAttrSlrSeVstUv1d',
-    'slrAttrSlrVstUv1d', 'slrAttrSlrVstUv1dNew', 'slrAttrItmFavUv1d',
+    'slrAttrSlrVstUv1d', 'slrAttrSlrVstUv1dNew', 'slrAttrItmCltUv1d', 'slrAttrItmFavUv1d',
     'slrAttrItmCartUv1d', 'slrAttrItmOrdUv1d', 'slrAttrItmOrdUv1dNew',
-    'slrAttrItmOrdGmv1d', 'slrAttrTaskItmOrdGmv1d', 'slrAttrLinkItmOrdGmv1d',
+    'slrAttrItmOrdGmv1d', 'slrAttrItmOrdGmv1d1bpOrd', 'slrAttrItmOrdGmv1dNot1bpOrd',
+    'slrAttrTaskItmOrdGmv1d', 'slrAttrLinkItmOrdGmv1d',
   ]);
 
   function projectContentRow(row) {
@@ -585,6 +635,7 @@
           orders: { status: 'failed', items: [] },
         },
         storeSummary: null,
+        identity: null,
         nested: [],
         contentRows: [],
         excluded: { projects: [], orders: [] },
@@ -668,12 +719,13 @@
       };
       const selectedProjects = capped(relevantProjects, source.maxProjects);
       const selectedOrders = capped(relevantOrders, source.maxOrders);
+      const accountIdentity = deriveOrderAccountIdentity(ordersList.items);
       const truncation = {
         maxPages: projectsList.truncated || ordersList.truncated,
         maxProjects: selectedProjects.truncated,
         maxOrders: selectedOrders.truncated,
       };
-      const warnings = [];
+      const warnings = accountIdentity.warnings.slice();
       if (selectedProjects.truncated) warnings.push({ code: 'truncated_maxProjects', limit: 'maxProjects', value: selectedProjects.limit });
       if (selectedOrders.truncated) warnings.push({ code: 'truncated_maxOrders', limit: 'maxOrders', value: selectedOrders.limit });
       for (const project of projectsList.items) {
@@ -754,7 +806,8 @@
       const expectedOrders = Number(ordersList.expectedCount);
       const reconciled = Number.isFinite(expectedProjects) && expectedProjects === projectsList.receivedCount &&
         Number.isFinite(expectedOrders) && expectedOrders === ordersList.receivedCount &&
-        duplicateProjects.length === 0 && duplicateOrders.length === 0 && duplicateSettlements.length === 0;
+        duplicateProjects.length === 0 && duplicateOrders.length === 0 && duplicateSettlements.length === 0 &&
+        !accountIdentity.ambiguous;
       const schemaValid = !nested.some((unit) => (unit.errors || []).some((error) => (
         error.code === 'ADSTAR_SCHEMA_INVALID'
       )));
@@ -777,6 +830,7 @@
         runId: context.runId,
         startedAt,
         finishedAt: now(),
+        identity: contract.sanitizeSensitiveData(accountIdentity.identity),
         lists: { projects: projectsList, orders: ordersList },
         storeSummary,
         storeCheckpoint,

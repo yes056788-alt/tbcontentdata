@@ -16,15 +16,16 @@
   </header>
   <main class="portal-main">
     <p id="pageNotice" class="portal-notice" role="status" aria-live="polite"></p>
-    <div class="portal-heading"><div><span class="section-kicker">ONE-CLICK COLLECTION</span><h1>一键取数</h1><p>一次完成生意参谋、光合、万相台和达摩盘取数，自动生成诊断报告与数据表格</p></div></div>
+    <div class="portal-heading"><div><span class="section-kicker">ONE-CLICK COLLECTION</span><h1>一键取数</h1><p>一次完成淘宝与小红书全链路取数，自动生成诊断报告与数据表格</p></div></div>
     <div class="task-layout">
       <section class="task-setup">
         <div class="task-panel-head"><h2>一键取数设置</h2><p>当前登录账号可直接执行；批量账号可在店铺分组内多选</p></div>
         <div class="mode-switch" role="tablist" aria-label="执行方式"><button class="active" type="button" data-task-mode="current">当前登录账号</button><button type="button" data-task-mode="batch">批量账号库</button></div>
         <div id="currentModePanel" class="task-mode-panel">
           <div class="task-fields"><div class="field-block"><label for="taskGroupSelect">店铺分组</label><select id="taskGroupSelect"></select></div><div class="field-block"><label for="taskStoreSelect">本次取数归属店铺</label><select id="taskStoreSelect"></select></div></div>
-          <fieldset class="platform-picker" data-platform-picker="current"><legend>执行平台</legend><div class="platform-picker-grid"><label><input type="checkbox" value="sycm" checked><span><strong>生意参谋</strong><small>流量诊断</small></span></label><label><input type="checkbox" value="guanghe" checked><span><strong>光合</strong><small>渠道与资产</small></span></label><label><input type="checkbox" value="wxt" checked><span><strong>万相台</strong><small>营销与短视频</small></span></label><label><input type="checkbox" value="dmp" checked><span><strong>达摩盘</strong><small>人群画像</small></span></label></div></fieldset>
-          <div class="task-scope">取数完成后会自动生成诊断报告和数据表格，并归档到项目管理。范围包括生意参谋、光合、万相台和达摩盘。</div>
+          <fieldset class="platform-picker" data-platform-picker="current"><legend>执行平台</legend><div class="platform-picker-grid"><label><input type="checkbox" value="sycm" checked><span><strong>生意参谋</strong><small>流量诊断</small></span></label><label><input type="checkbox" value="guanghe" checked><span><strong>光合</strong><small>渠道与资产</small></span></label><label><input type="checkbox" value="wxt" checked><span><strong>万相台</strong><small>营销与短视频</small></span></label><label><input type="checkbox" value="dmp" checked><span><strong>达摩盘</strong><small>人群画像</small></span></label><label><input type="checkbox" value="adstar" checked><span><strong>淘宝星河</strong><small>项目、订单与成交</small></span></label><label><input type="checkbox" value="pgy" checked><span><strong>蒲公英</strong><small>报备笔记与合作成本</small></span></label><label><input type="checkbox" value="juguang" checked><span><strong>聚光</strong><small>多账户投放与归因</small></span></label></div></fieldset>
+          <div class="task-fields xhs-date-fields"><div class="field-block"><label for="xhsDateFrom">小红书开始日期</label><input id="xhsDateFrom" type="date"></div><div class="field-block"><label for="xhsDateTo">小红书结束日期</label><input id="xhsDateTo" type="date"></div></div>
+          <div class="task-scope">小红书按中国标准时间（Asia/Shanghai）取数；蒲公英日期口径为笔记发布时间，星河和聚光按所选经营周期。三源会严格串行并在取数后按 noteId 联表。首次成功运行会将当前三平台真实账号绑定到所选店铺；后续账号不一致时将阻止归档与经营决策。</div>
           <div class="task-actions"><button id="startCurrentTaskBtn" class="button primary" type="button">开始一键取数</button></div>
         </div>
         <div id="batchModePanel" class="task-mode-panel" hidden>

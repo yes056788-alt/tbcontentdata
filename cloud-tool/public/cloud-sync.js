@@ -7,6 +7,18 @@
   const RUN_INDEX_KEY = 'taobaoStoreRunIndexV1';
   const MAX_API_BYTES = 28 * 1024 * 1024;
   const MAX_RUN_BYTES = 24 * 1024 * 1024;
+  const MAX_XHS_SNAPSHOT_BYTES = 8 * 1024 * 1024;
+  const XHS_SNAPSHOT_KEYS = new Set(['xhsAnalysisSnapshotV1', 'xhsCollectionStatusV1']);
+  const SENSITIVE_RUN_KEYS = new Set([
+    'password', 'masterpassword', 'authorization', 'cookie', 'cookies',
+    'token', 'accesstoken', 'refreshtoken', 'signature', 'sign', 'secret',
+    'xsectoken', 'tbtoken', 'apikey', 'secretkey', 'sessionid', 'csrftoken',
+  ]);
+  const FORBIDDEN_XHS_STATE_KEYS = new Set([
+    'raw', 'rawresponse', 'rawresponses', 'rawpayload', 'rawpages',
+    'checkpoint', 'checkpoints', 'pages', 'cache', 'cachekey', 'fingerprint',
+    'indexeddb', 'datasets',
+  ]);
   const SYNC_KEYS = new Set([VAULT_KEY, DIRECTORY_KEY, RUN_INDEX_KEY]);
   const pendingBridgeRequests = new Map();
   const state = {
@@ -158,22 +170,94 @@
     };
   }
 
-  function containsSensitiveRunField(value, seen) {
-    if (!value || typeof value !== 'object') return false;
-    const visited = seen || new Set();
-    if (visited.has(value)) return false;
-    visited.add(value);
-    for (const [key, child] of Object.entries(value)) {
-      const normalized = String(key).toLowerCase().replace(/[_-]/g, '');
-      if (normalized === 'masterpassword' || normalized === 'password') return true;
-      if (containsSensitiveRunField(child, visited)) return true;
+  function normalizedRunKey(value) {
+    return String(value == null ? '' : value).toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  function isSensitiveRunKey(value) {
+    const key = normalizedRunKey(value);
+    if (SENSITIVE_RUN_KEYS.has(key) || key === 'xs' || key === 'xsign' ||
+        key.includes('authorization') || key.includes('credential')) return true;
+    const stems = ['token', 'cookie', 'cookies', 'signature', 'password', 'secret'];
+    const descriptors = ['', 'value', 'header', 'hash', 'data', 'key', 'param', 'parameter'];
+    return stems.some((stem) => descriptors.some((descriptor) => key.endsWith(stem + descriptor)));
+  }
+
+  function isForbiddenXhsStateKey(value) {
+    const key = normalizedRunKey(value);
+    return FORBIDDEN_XHS_STATE_KEYS.has(key) || key.startsWith('raw') ||
+      key.startsWith('checkpoint');
+  }
+
+  function containsSignedCredentialUrl(value) {
+    if (typeof value !== 'string') return false;
+    let candidate = value;
+    for (let depth = 0; depth < 3; depth += 1) {
+      if (/https?:\/\/[^\s/@]+(?::[^\s/@]*)?@/i.test(candidate)) return true;
+      const assignment = /(?:[?&#]|\b)([a-z0-9_.%-]{1,160})["']?\s*[:=]/gi;
+      let match;
+      while ((match = assignment.exec(candidate))) {
+        let key = match[1];
+        try { key = decodeURIComponent(key); } catch (error) {}
+        if (isSensitiveRunKey(key)) return true;
+      }
+      let decoded = candidate;
+      try { decoded = decodeURIComponent(candidate); } catch (error) {}
+      if (decoded === candidate) break;
+      candidate = decoded;
     }
     return false;
   }
 
+  function containsSensitiveRunField(value, seen, depth) {
+    if (containsSignedCredentialUrl(value)) return true;
+    if (!value || typeof value !== 'object') return false;
+    if (Number(depth) > 64) return true;
+    const visited = seen || new Set();
+    if (visited.has(value)) return false;
+    visited.add(value);
+    for (const [key, child] of Object.entries(value)) {
+      if (isSensitiveRunKey(key)) return true;
+      if (containsSensitiveRunField(child, visited, Number(depth || 0) + 1)) return true;
+    }
+    return false;
+  }
+
+  function containsForbiddenXhsState(value, seen, depth) {
+    if (!value || typeof value !== 'object') return false;
+    if (Number(depth) > 64) return true;
+    const visited = seen || new Set();
+    if (visited.has(value)) return false;
+    visited.add(value);
+    for (const [key, child] of Object.entries(value)) {
+      if (isForbiddenXhsStateKey(key)) return true;
+      if (containsForbiddenXhsState(child, visited, Number(depth || 0) + 1)) return true;
+    }
+    return false;
+  }
+
+  function assertXhsSnapshotsSafe(snapshots) {
+    for (const key of XHS_SNAPSHOT_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(snapshots, key)) continue;
+      const snapshot = snapshots[key];
+      let serialized = '';
+      try {
+        serialized = JSON.stringify(snapshot);
+      } catch (error) {
+        throw new Error('小红书快照不是可同步的 JSON 数据。');
+      }
+      if (!serialized || utf8ByteLength(serialized, MAX_XHS_SNAPSHOT_BYTES) >= MAX_XHS_SNAPSHOT_BYTES) {
+        throw new Error('小红书快照超过 8MB 安全限制。');
+      }
+      if (containsForbiddenXhsState(snapshot)) {
+        throw new Error('小红书快照包含不应上传的 raw/checkpoint 原始分页状态。');
+      }
+    }
+  }
+
   function sanitizeUploadRun(value, expectedRunId) {
     if (!isPlainObject(value) || containsSensitiveRunField(value)) {
-      throw new Error('本地历史归档无效或包含不应上传的密码字段。');
+      throw new Error('本地历史归档无效或包含不应上传的敏感凭据或签名链接。');
     }
     const cloned = safeJson(value, MAX_RUN_BYTES, '本地历史归档').value;
     const runId = sanitizeRunId(cloned.runId);
@@ -181,6 +265,7 @@
     if (!isPlainObject(cloned.snapshots) || !isPlainObject(cloned.account)) {
       throw new Error('本地历史归档结构无效。');
     }
+    assertXhsSnapshotsSafe(cloned.snapshots);
     return cloned;
   }
 

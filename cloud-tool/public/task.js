@@ -39,6 +39,23 @@
       .map((input) => input.value) : [];
   }
 
+  function dateInputValue(value) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return year + '-' + month + '-' + day;
+  }
+
+  function initializeXhsDateRange() {
+    const end = new Date();
+    end.setHours(0, 0, 0, 0);
+    end.setDate(end.getDate() - 1);
+    const start = new Date(end);
+    start.setDate(start.getDate() - 29);
+    if ($('#xhsDateFrom') && !$('#xhsDateFrom').value) $('#xhsDateFrom').value = dateInputValue(start);
+    if ($('#xhsDateTo') && !$('#xhsDateTo').value) $('#xhsDateTo').value = dateInputValue(end);
+  }
+
   function escapeHtml(value) {
     return String(value == null ? '' : value)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -502,6 +519,15 @@
     if (!connected) throw new Error('数据助手未连接。');
     const platforms = selectedPlatforms('current');
     if (!platforms.length) throw new Error('请至少选择一个平台任务。');
+    const hasXhs = platforms.some((platform) => ['adstar', 'pgy', 'juguang'].includes(platform));
+    const dateRange = {
+      from: $('#xhsDateFrom').value,
+      to: $('#xhsDateTo').value,
+      timezone: 'Asia/Shanghai',
+    };
+    if (hasXhs && (!dateRange.from || !dateRange.to || dateRange.from > dateRange.to)) {
+      throw new Error('请选择有效的小红书开始和结束日期。');
+    }
     if (!window.confirm('使用当前 Chrome 已登录账号为“' + store.name + '”执行一键取数？')) return;
     taskStatus = {
       taskType,
@@ -518,6 +544,7 @@
     const response = await request('startProjectTask', {
       taskType,
       platforms,
+      dateRange,
       store: { id: store.id, name: store.name, groupId: store.groupId || '', groupName: groupName(store.groupId) },
     }, 30000);
     if (!response || response.ok === false) throw new Error(response && response.message || '任务启动失败。');
@@ -628,6 +655,7 @@
     if (button) handleRunAction(button).catch((error) => setNotice(error.message, 'error'));
   });
 
+  initializeXhsDateRange();
   Promise.resolve(window.TaobaoCloudSync && window.TaobaoCloudSync.ready)
     .catch(() => null)
     .then(() => request('ping', {}, 5000))

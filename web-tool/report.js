@@ -9,7 +9,9 @@
   const STATUS_KEY = 'taobaoContentDiagnosisReportStatusV1';
   const REPORT_KEY = 'taobaoContentDiagnosisReportV1';
   const WXT_KEY = 'taobaoContentDiagnosisWxtReportV1';
-  const STORAGE_KEYS = [STATUS_KEY, REPORT_KEY, WXT_KEY];
+  const XHS_STATUS_KEY = 'xhsCollectionStatusV1';
+  const XHS_ANALYSIS_KEY = 'xhsAnalysisSnapshotV1';
+  const STORAGE_KEYS = [STATUS_KEY, REPORT_KEY, WXT_KEY, XHS_STATUS_KEY, XHS_ANALYSIS_KEY];
   const SEARCH_PARAMS = new URLSearchParams(location.search);
   const ARCHIVE_RUN_ID = SEARCH_PARAMS.get('archive') || '';
   const BUILDER_MODE = SEARCH_PARAMS.get('builder') === '1';
@@ -19,6 +21,7 @@
     { key: 'wxtMarketing', name: '万相台营销场景报告' },
     { key: 'wxtShortVideo', name: '万相台短视频诊断' },
     { key: 'dmp', name: '内容人群画像诊断' },
+    { key: 'xiaohongshu', name: '小红书三平台全链路' },
   ];
   const GH_CHANNELS = ['全部', '首猜', '逛逛', '搜索', '其他'];
   const GH_ASSETS = [
@@ -39,6 +42,11 @@
     { role: 'xhs', name: '小红书内容人群资产', color: '#07947d' },
     { role: 'xhsVisit', name: '小红书进店人群', color: '#d13c5a' },
   ];
+  const XHS_PLATFORMS = [
+    { key: 'adstar', name: '淘宝星河' },
+    { key: 'pgy', name: '蒲公英' },
+    { key: 'juguang', name: '聚光' },
+  ];
 
   let bridgeConnected = false;
   let bridgeVersion = '';
@@ -48,6 +56,8 @@
   let reportStatus = {};
   let reportData = null;
   let wxtReport = null;
+  let xhsStatus = {};
+  let xhsAnalysis = null;
   let archiveRun = null;
   let activeSection = 'flow';
   let guangheView = 'channel';
@@ -194,6 +204,8 @@
         reportStatus = stored && stored[STATUS_KEY] || {};
         reportData = stored && stored[REPORT_KEY] || null;
         wxtReport = stored && stored[WXT_KEY] || null;
+        xhsStatus = stored && stored[XHS_STATUS_KEY] || {};
+        xhsAnalysis = stored && stored[XHS_ANALYSIS_KEY] || null;
         archiveRun = null;
       }
       if (reportStatus.running || reportStatus.finishedAt || reportStatus.error) transientNotice = '';
@@ -210,6 +222,8 @@
     reportStatus = snapshots[STATUS_KEY] || {};
     reportData = snapshots[REPORT_KEY] || null;
     wxtReport = snapshots[WXT_KEY] || null;
+    xhsStatus = snapshots[XHS_STATUS_KEY] || {};
+    xhsAnalysis = snapshots[XHS_ANALYSIS_KEY] || null;
     archiveRun = run;
   }
 
@@ -221,13 +235,17 @@
 
   function updateButtons() {
     const hasData = Boolean(reportData) || sectionHasData('flow') || sectionHasData('guanghe') ||
-      sectionHasData('wxt') || sectionHasData('shortVideo') || sectionHasData('dmp');
+      sectionHasData('wxt') || sectionHasData('shortVideo') || sectionHasData('dmp') ||
+      sectionHasData('xiaohongshu');
     const refresh = document.getElementById('refreshReportBtn');
     const exportButton = document.getElementById('exportReportBtn');
     const clear = document.getElementById('clearReportBtn');
     if (refresh) refresh.disabled = !bridgeConnected;
     if (exportButton) exportButton.disabled = !hasData;
-    if (clear) clear.disabled = !bridgeConnected || (!reportData && !wxtReport && !Object.keys(reportStatus || {}).length);
+    if (clear) clear.disabled = !bridgeConnected || (
+      !reportData && !wxtReport && !xhsAnalysis &&
+      !Object.keys(reportStatus || {}).length && !Object.keys(xhsStatus || {}).length
+    );
   }
 
   function resultByKey(key) {
@@ -279,6 +297,7 @@
     if (section === 'guanghe') return 'guanghe';
     if (section === 'wxt') return 'wxtMarketing';
     if (section === 'shortVideo') return 'wxtShortVideo';
+    if (section === 'xiaohongshu') return 'xiaohongshu';
     return 'dmp';
   }
 
@@ -287,6 +306,9 @@
   }
 
   function sectionHasData(section) {
+    if (section === 'xiaohongshu') return Boolean(
+      xhsAnalysis || xhsStatus && Object.keys(xhsStatus).length
+    );
     if (section === 'flow') return Boolean(reportData && reportData.sycm && reportData.guanghe);
     if (section === 'guanghe') return Boolean(reportData && reportData.guanghe);
     if (section === 'wxt') return Boolean(validWxtSnapshot() && wxtReport.marketing && wxtReport.marketing.ok);
@@ -298,6 +320,19 @@
   }
 
   function sectionError(section) {
+    if (section === 'xiaohongshu') {
+      const result = resultByKey('xiaohongshu');
+      if (!xhsAnalysis && result && result.ok === false) {
+        return result.message || '小红书三平台取数未生成可用的分析快照。';
+      }
+      if (!xhsAnalysis && xhsStatus && xhsStatus.status === 'failed') {
+        return '小红书三平台取数失败，请修复失败来源后重试。';
+      }
+      if (!xhsAnalysis && xhsStatus && xhsStatus.status === 'partial') {
+        return '小红书三平台仅部分完成，分析快照未生成，请补齐失败来源后重试。';
+      }
+      return '';
+    }
     const result = resultByKey(sectionResultKey(section));
     if (result && result.ok === false) return result.message || '本章节生成失败。';
     if (section === 'flow') {
@@ -733,6 +768,138 @@
     target.innerHTML = buildDmpMarkup();
   }
 
+  function formatXhsTime(value) {
+    const timestamp = typeof value === 'number' ? value : Date.parse(String(value || ''));
+    return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('zh-CN') : '—';
+  }
+
+  function xhsStatusLabel(value) {
+    return {
+      running: '采集中',
+      complete: '完整',
+      partial: '部分完成',
+      failed: '失败',
+      cancelled: '已取消',
+      verified_no_spend: '已验证无消耗',
+    }[String(value || '')] || '未采集';
+  }
+
+  function buildXhsMarkup() {
+    const analysis = xhsAnalysis && typeof xhsAnalysis === 'object' ? xhsAnalysis : {};
+    const management = analysis.management && typeof analysis.management === 'object'
+      ? analysis.management : {};
+    const costs = management.costs && typeof management.costs === 'object' ? management.costs : {};
+    const taskResult = management.starTaskResult && typeof management.starTaskResult === 'object'
+      ? management.starTaskResult : {};
+    const outsideResult = management.outsideDirectResult && typeof management.outsideDirectResult === 'object'
+      ? management.outsideDirectResult : {};
+    const quality = analysis.quality && typeof analysis.quality === 'object'
+      ? analysis.quality : { decisionReady: false, issues: [] };
+    const platformStates = xhsStatus && xhsStatus.platforms && typeof xhsStatus.platforms === 'object'
+      ? xhsStatus.platforms : {};
+    const accountMeta = analysis.accounts && typeof analysis.accounts === 'object' ? analysis.accounts : {};
+    const sourceCards = XHS_PLATFORMS.map((platform) => {
+      const state = platformStates[platform.key] && typeof platformStates[platform.key] === 'object'
+        ? platformStates[platform.key] : {};
+      const meta = accountMeta[platform.key] && typeof accountMeta[platform.key] === 'object'
+        ? accountMeta[platform.key] : {};
+      const collectedAt = state.collectedAt || state.finishedAt || state.updatedAt || meta.collectedAt;
+      const accountKeys = Array.isArray(meta.accountKeys) ? meta.accountKeys : [];
+      return '<article class="xhs-source-card" data-xhs-platform="' + platform.key + '"><span>' +
+        escapeHtml(platform.key.toUpperCase()) + '</span><h3>' + escapeHtml(platform.name) + '</h3><strong>' +
+        escapeHtml(xhsStatusLabel(state.status)) + '</strong><p>来源时间 / 采集时间：' +
+        escapeHtml(formatXhsTime(collectedAt)) + '</p><small>' +
+        escapeHtml(accountKeys.length ? accountKeys.join('、') : '账号待识别') + '</small></article>';
+    }).join('');
+    const metrics = taskResult.metrics && typeof taskResult.metrics === 'object' ? taskResult.metrics : {};
+    const kpis = [
+      ['总投入', formatMoney(costs.total)],
+      ['达人合作', formatMoney(costs.partnership)],
+      ['聚光消耗', formatMoney(costs.juguang == null ? costs.spotlight : costs.juguang)],
+      ['星河任务 GMV', formatMoney(metrics.gmv == null ? taskResult.gmv : metrics.gmv)],
+      ['星河任务 ROI', formatDecimal(taskResult.roi, 2)],
+      ['任务外直达 ROI', formatDecimal(outsideResult.roi, 2)],
+    ].map((item) => '<div><span>' + item[0] + '</span><strong>' + escapeHtml(item[1]) + '</strong></div>').join('');
+    const issues = Array.isArray(quality.issues) ? quality.issues : [];
+    const issueMarkup = issues.length
+      ? '<ul class="xhs-quality-list">' + issues.map((issue) => '<li><b>' +
+        escapeHtml(issue.severity === 'critical' ? '关键' : '提示') + '</b><span>' +
+        escapeHtml(issue.message || issue.code || '数据口径待核验') + '</span></li>').join('') + '</ul>'
+      : '<p class="xhs-quality-empty">' + (quality.decisionReady
+        ? '三平台账号、日期、分页和对账均已通过。'
+        : '质量证据不足，尚未达到经营决策门槛，请补齐数据后重试。') + '</p>';
+    const notes = Array.isArray(analysis.notes) ? analysis.notes : [];
+    const spotlight = analysis.spotlight && typeof analysis.spotlight === 'object'
+      ? analysis.spotlight : {};
+    const objectiveRows = Array.isArray(spotlight.byMarketingObjective)
+      ? spotlight.byMarketingObjective : [];
+    const objectiveMarkup = objectiveRows.length ? objectiveRows.map((row) => (
+      '<tr><td>' + escapeHtml(row.key || 'unknown') + '</td><td>' + formatMoney(row.spend) +
+      '</td><td>' + formatInteger(row.impressions) + '</td><td>' + formatInteger(row.clicks) +
+      '</td><td>' + formatInteger(row.interactions) + '</td><td>' + formatMoney(row.gmv) +
+      '</td><td>' + formatDecimal(row.roi, 2) + '</td></tr>'
+    )).join('') : '<tr><td colspan="7">当前日期范围暂无聚光营销诉求明细</td></tr>';
+    const star = analysis.star && typeof analysis.star === 'object' ? analysis.star : {};
+    const starLayers = [];
+    for (const [layer, units] of [['项目', star.projects], ['订单', star.orders]]) {
+      (Array.isArray(units) ? units : []).forEach((unit) => starLayers.push({ layer, unit }));
+    }
+    const starLayerMarkup = starLayers.length ? starLayers.map(({ layer, unit }) => (
+      '<tr><td>' + layer + '</td><td>' + escapeHtml(unit.id || '—') + '</td><td>' +
+      escapeHtml(unit.name || '—') + '</td><td>' + escapeHtml(xhsStatusLabel(unit.status)) +
+      '</td><td>' + formatMoney(unit.allocatedCost) + '</td><td>' +
+      formatMoney(unit.metrics && unit.metrics.gmv) + '</td><td>' + formatDecimal(unit.roi, 2) +
+      '</td></tr>'
+    )).join('') : '<tr><td colspan="7">当前日期范围暂无星河项目 / 订单明细</td></tr>';
+    const noteRows = notes.length ? notes.map((note) => {
+      const results = note.results && typeof note.results === 'object' ? note.results : {};
+      const noteCosts = note.costs && typeof note.costs === 'object' ? note.costs : {};
+      const action = Array.isArray(analysis.actions)
+        ? analysis.actions.find((item) => item && item.noteId === note.noteId) : null;
+      return '<tr><td>' + escapeHtml(note.noteId || '—') + '</td><td>' +
+        escapeHtml(note.title || '未命名笔记') + '</td><td>' + formatMoney(noteCosts.total) + '</td><td>' +
+        formatMoney(results.starTaskGmv) + '</td><td>' + formatDecimal(results.starTaskRoi, 2) + '</td><td>' +
+        escapeHtml(action && action.action || 'observe') + '</td></tr>';
+    }).join('') : '<tr><td colspan="6">当前日期范围暂无可联表笔记</td></tr>';
+    return '<div class="xhs-report-body"><section class="xhs-source-grid">' + sourceCards +
+      '</section><section class="xhs-quality-panel"><div><span>数据质量</span><h3>' +
+      (quality.decisionReady ? '可用于经营决策' : '需补数后再决策') + '</h3></div><b>' +
+      (quality.decisionReady ? 'decisionReady = true' : 'decisionReady = false') + '</b>' + issueMarkup +
+      '</section><section class="diagnosis-kpis xhs-kpis">' + kpis +
+      '</section><section class="report-table-block"><div class="xhs-table-heading"><h3>聚光营销诉求</h3><span>' +
+      objectiveRows.length + ' 类</span></div><table><thead><tr><th>营销诉求</th><th>消耗</th><th>曝光</th>' +
+      '<th>点击</th><th>互动</th><th>GMV</th><th>ROI</th></tr></thead><tbody>' + objectiveMarkup +
+      '</tbody></table></section><section class="report-table-block"><div class="xhs-table-heading"><h3>星河项目 / 订单</h3><span>' +
+      starLayers.length + ' 条</span></div><table><thead><tr><th>层级</th><th>ID</th><th>名称</th><th>状态</th>' +
+      '<th>分摊成本</th><th>GMV</th><th>ROI</th></tr></thead><tbody>' + starLayerMarkup +
+      '</tbody></table></section><section class="report-table-block"><div class="xhs-table-heading"><h3>笔记全链路联表</h3><span>' +
+      notes.length + ' 条</span></div><table><thead><tr><th>笔记 ID</th><th>笔记</th><th>总成本</th>' +
+      '<th>星河任务 GMV</th><th>任务 ROI</th><th>行动</th></tr></thead><tbody>' + noteRows +
+      '</tbody></table></section></div>';
+  }
+
+  function renderXhs() {
+    const target = document.getElementById('xhsReport');
+    if (!target) return;
+    const error = sectionError('xiaohongshu');
+    if (!xhsAnalysis && error) {
+      const partial = xhsStatus && xhsStatus.status === 'partial';
+      target.innerHTML = '<div class="section-error"><strong>' +
+        (partial ? '小红书全链路取数不完整' : '小红书全链路取数失败') +
+        '</strong><p>' + escapeHtml(error) + '</p></div>';
+      return;
+    }
+    if (!sectionHasData('xiaohongshu')) {
+      target.innerHTML = '<div class="section-error"><strong>等待小红书全链路取数</strong>' +
+        '<p>完成淘宝星河、蒲公英和聚光采集后，本章节会自动显示。</p></div>';
+      return;
+    }
+    const range = xhsAnalysis && xhsAnalysis.dateRange || {};
+    const context = document.getElementById('xhsContext');
+    if (context) context.textContent = [range.from, range.to].filter(Boolean).join(' 至 ') || '自定义日期范围';
+    target.innerHTML = buildXhsMarkup();
+  }
+
   function dmpExportStyles() {
     return [
       '.dmp-export-section{max-width:1500px;margin:24px auto;background:#f4f6f8}.dmp-export-section>h1{margin:0;padding:24px 28px 4px;background:#243b72;color:#fff}.dmp-export-section>p{margin:0;padding:0 28px 24px;background:#243b72;color:#dbe7ff}',
@@ -936,15 +1103,18 @@
   function render() {
     renderProgress();
     renderNotice();
-    const hasReportState = Boolean(reportData || Object.keys(reportStatus || {}).length);
+    const hasReportState = Boolean(reportData || Object.keys(reportStatus || {}).length ||
+      xhsAnalysis || Object.keys(xhsStatus || {}).length);
     document.getElementById('emptyReport').hidden = hasReportState;
-    document.getElementById('generatedAt').textContent = reportData && reportData.finishedAt
-      ? '生成于 ' + formatDateTime(reportData.finishedAt)
+    const generatedValue = reportData && reportData.finishedAt || xhsAnalysis && xhsAnalysis.generatedAt;
+    document.getElementById('generatedAt').textContent = generatedValue
+      ? '生成于 ' + (typeof generatedValue === 'number' ? formatDateTime(generatedValue) : formatXhsTime(generatedValue))
       : (reportIsRunning() ? '正在生成' : '尚未生成');
     renderFlow();
     renderGuanghe();
     renderEmbeddedReports();
     renderDmp();
+    renderXhs();
     showActiveSection(hasReportState);
     updateButtons();
   }
@@ -1043,6 +1213,11 @@
         subtitle: '达摩盘 · 年龄与消费能力等级', hasData: sectionHasData('dmp'),
         content: sectionHasData('dmp') ? buildDmpMarkup() : missingSection('dmp'),
       },
+      {
+        key: 'xiaohongshu', index: 6, label: '小红书全链路', title: '小红书全链路分析',
+        subtitle: '淘宝星河 · 蒲公英 · 聚光 · noteId 联表', hasData: sectionHasData('xiaohongshu'),
+        content: sectionHasData('xiaohongshu') ? buildXhsMarkup() : missingSection('xiaohongshu'),
+      },
     ];
     const firstAvailable = sections.find((section) => section.hasData);
     const initialSection = sectionHasData(activeSection)
@@ -1059,7 +1234,7 @@
       '" class="export-section" role="tabpanel" aria-labelledby="export-tab-' + section.key +
       '" tabindex="0" data-export-panel="' + section.key + '"' +
       (section.key === initialSection ? '' : ' hidden') + '><header class="export-section-head"><div><span>' +
-      String(section.index).padStart(2, '0') + ' / 05</span><h1>' + section.title + '</h1><p>' + section.subtitle +
+      String(section.index).padStart(2, '0') + ' / 06</span><h1>' + section.title + '</h1><p>' + section.subtitle +
       '</p></div></header><div class="export-section-body">' + section.content + '</div></section>').join('');
     const css = '*{box-sizing:border-box}html{min-width:320px}body{margin:0;background:#eef1f5;color:#182230;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;letter-spacing:0}' +
       'button,select{font:inherit}button:focus-visible,select:focus-visible{outline:3px solid rgba(11,103,209,.28);outline-offset:2px}' +
@@ -1073,6 +1248,7 @@
       '.report-table-block{margin:18px;overflow:auto;border:1px solid #dfe4ea;background:#fff}.report-table-block table{width:100%;min-width:820px;border-collapse:collapse}' +
       '.report-table-block th,.report-table-block td{padding:9px 10px;border-bottom:1px solid #edf0f3;text-align:left;white-space:nowrap}.report-table-block th{background:#eef2f6}' +
       '.dimension-button{display:none}.dimension-child td:first-child{padding-left:30px}.metric-result.good{color:#067647}.metric-result.watch{color:#a34b00}' +
+      '.xhs-source-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 18px 18px}.xhs-source-card,.xhs-quality-panel{padding:16px;border:1px solid #dfe4ea;background:#fff}.xhs-source-card h3{margin:4px 0 10px}.xhs-source-card p,.xhs-source-card small{display:block;margin:5px 0;color:#667085;font-size:11px}.xhs-quality-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;margin:0 18px 18px}.xhs-quality-panel h3{margin:4px 0}.xhs-quality-list{grid-column:1/-1;padding:0;list-style:none}.xhs-quality-list li{display:flex;gap:10px;padding:6px 0;border-top:1px solid #edf0f3}.xhs-quality-empty,.xhs-quality-list span{color:#667085;font-size:11px}.xhs-table-heading{display:flex;justify-content:space-between;padding:13px 15px}.xhs-table-heading h3{margin:0}' +
       GUANGHE_EXPORT_STYLES +
       dmpExportStyles() +
       sanitizeExportStyles(wxtReport && wxtReport.styles || '') +
@@ -1113,7 +1289,9 @@
   }
 
   function buildExportFromArchive(run, metadata) {
-    const previous = { reportStatus, reportData, wxtReport, archiveRun, activeSection, guangheView };
+    const previous = {
+      reportStatus, reportData, wxtReport, xhsStatus, xhsAnalysis, archiveRun, activeSection, guangheView,
+    };
     try {
       applyArchiveRun(run);
       activeSection = String(metadata && metadata.activeSection || 'flow');
@@ -1130,6 +1308,8 @@
       reportStatus = previous.reportStatus;
       reportData = previous.reportData;
       wxtReport = previous.wxtReport;
+      xhsStatus = previous.xhsStatus;
+      xhsAnalysis = previous.xhsAnalysis;
       archiveRun = previous.archiveRun;
       activeSection = previous.activeSection;
       guangheView = previous.guangheView;
@@ -1169,6 +1349,8 @@
       reportStatus = {};
       reportData = null;
       wxtReport = null;
+      xhsStatus = {};
+      xhsAnalysis = null;
       activeSection = 'flow';
       transientNotice = '当前内容诊断报告已清空。';
       render();

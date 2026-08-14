@@ -14,6 +14,8 @@
     'businessDefenseManualInputsV1',
     'businessDefenseAutoCollectStatusV1',
     'taobaoContentDiagnosisReportStatusV1',
+    'xhsAnalysisSnapshotV1',
+    'xhsCollectionStatusV1',
   ];
   const CLEARABLE_STORAGE_KEYS = [
     ...STORAGE_KEYS,
@@ -38,6 +40,7 @@
     'xhs_xingheVisitors',
     'xhs_dmpVisitors',
     'xhs_noteCount',
+    'xhs_unreportedNoteCount',
     'xhs_storeGmv',
     'xhs_taskGmv',
     'xhs_contentAudienceAsset',
@@ -57,9 +60,25 @@
     'xhs_noteCount',
     'xhs_contentAudienceAsset',
     'xhs_storeAudienceAsset',
+    'xhs_unreportedNoteCount',
   ]);
+  const XHS_DMP_KEYS = new Set([
+    'xhs_dmpVisitors',
+    'xhs_contentAudienceAsset',
+    'xhs_storeAudienceAsset',
+    'xhs_l12Penetration',
+    'xhs_l45Penetration',
+  ]);
+  const XHS_MODE_LABELS = Object.freeze({
+    automatic: '自动取数',
+    formula: '公式计算',
+    manual_fallback: '手填兜底',
+    manual_override: '手填覆盖',
+    preserved: '现有值保留',
+  });
 
   let currentRows = [];
+  let currentXhsAnalysis = null;
   let manualInputs = {};
   let autoCollectStatus = {};
   let transientNotice = '';
@@ -462,8 +481,24 @@
     Object.keys(manual || {}).forEach((key) => {
       if (!MANUAL_KEYS.has(key)) return;
       try {
-        const value = normalizeManualInput(key, manual[key]);
-        if (value) put(values, key, value, '手填项');
+        const record = manual[key];
+        const structured = Boolean(record) && typeof record === 'object' && !Array.isArray(record);
+        const explicitOverride = structured && record.manualOverride === true;
+        if (values[key] && !explicitOverride) return;
+        if (values[key] && values[key].mode === 'manual_override') return;
+        const value = normalizeManualInput(key, structured ? record.value : record);
+        if (!value) return;
+        if (!structured) {
+          put(values, key, value, '手填项');
+          return;
+        }
+        put(values, key, value, explicitOverride ? '手填覆盖' : '手填兜底');
+        values[key].mode = explicitOverride ? 'manual_override' : 'manual_fallback';
+        values[key].updatedAt = String(record.updatedAt || values[key].updatedAt || '');
+        values[key].accountKeys = Array.isArray(record.accountKeys) ? record.accountKeys.slice() : [];
+        values[key].dateRange = record.dateRange && typeof record.dateRange === 'object'
+          ? Object.assign({}, record.dateRange)
+          : null;
       } catch (error) {}
     });
   }
@@ -480,16 +515,16 @@
     put(values, 'tt_selfApprovalRate', divide(values.tt_selfPublicContents && values.tt_selfPublicContents.value, values.tt_selfPublishedContents && values.tt_selfPublishedContents.value), '公式计算');
     put(values, 'tt_superShortVideoSpendShare', divide(values.tt_superShortVideoSpend && values.tt_superShortVideoSpend.value, values.tt_wujieSpend && values.tt_wujieSpend.value), '公式计算');
 
-    put(values, 'xhs_totalSpend', add(values.xhs_kolSpend && values.xhs_kolSpend.value, values.xhs_juguangSpend && values.xhs_juguangSpend.value), '公式计算');
-    if (values.xhs_kolSpend && values.xhs_juguangSpend) {
+    if (!values.xhs_totalSpend) put(values, 'xhs_totalSpend', add(values.xhs_kolSpend && values.xhs_kolSpend.value, values.xhs_juguangSpend && values.xhs_juguangSpend.value), '公式计算');
+    if (!values.xhs_kfsRatio && values.xhs_kolSpend && values.xhs_juguangSpend) {
       values.xhs_kfsRatio = { value: values.xhs_kolSpend.value + ':' + values.xhs_juguangSpend.value, source: '公式计算', updatedAt: '', raw: '' };
     }
-    put(values, 'xhs_visitFrequency', divide(values.xhs_xingheVisitors && values.xhs_xingheVisitors.value, values.xhs_dmpVisitors && values.xhs_dmpVisitors.value), '公式计算');
-    put(values, 'xhs_visitCost', divide(values.xhs_totalSpend && values.xhs_totalSpend.value, values.xhs_xingheVisitors && values.xhs_xingheVisitors.value), '公式计算');
-    put(values, 'xhs_storeRoi', divide(values.xhs_storeGmv && values.xhs_storeGmv.value, values.xhs_totalSpend && values.xhs_totalSpend.value), '公式计算');
-    put(values, 'xhs_taskRoi', divide(values.xhs_taskGmv && values.xhs_taskGmv.value, values.xhs_totalSpend && values.xhs_totalSpend.value), '公式计算');
-    put(values, 'xhs_contentAudienceShare', divide(values.xhs_contentAudienceAsset && values.xhs_contentAudienceAsset.value, values.xhs_storeAudienceAsset && values.xhs_storeAudienceAsset.value), '公式计算');
-    put(values, 'xhs_l45OverL12', divide(values.xhs_l45Penetration && values.xhs_l45Penetration.value, values.xhs_l12Penetration && values.xhs_l12Penetration.value), '公式计算');
+    if (!values.xhs_visitFrequency) put(values, 'xhs_visitFrequency', divide(values.xhs_xingheVisitors && values.xhs_xingheVisitors.value, values.xhs_dmpVisitors && values.xhs_dmpVisitors.value), '公式计算');
+    if (!values.xhs_visitCost) put(values, 'xhs_visitCost', divide(values.xhs_totalSpend && values.xhs_totalSpend.value, values.xhs_xingheVisitors && values.xhs_xingheVisitors.value), '公式计算');
+    if (!values.xhs_storeRoi) put(values, 'xhs_storeRoi', divide(values.xhs_storeGmv && values.xhs_storeGmv.value, values.xhs_totalSpend && values.xhs_totalSpend.value), '公式计算');
+    if (!values.xhs_taskRoi) put(values, 'xhs_taskRoi', divide(values.xhs_taskGmv && values.xhs_taskGmv.value, values.xhs_totalSpend && values.xhs_totalSpend.value), '公式计算');
+    if (!values.xhs_contentAudienceShare) put(values, 'xhs_contentAudienceShare', divide(values.xhs_contentAudienceAsset && values.xhs_contentAudienceAsset.value, values.xhs_storeAudienceAsset && values.xhs_storeAudienceAsset.value), '公式计算');
+    if (!values.xhs_l45OverL12) put(values, 'xhs_l45OverL12', divide(values.xhs_l45Penetration && values.xhs_l45Penetration.value, values.xhs_l12Penetration && values.xhs_l12Penetration.value), '公式计算');
   }
 
   function formatValue(row) {
@@ -510,10 +545,32 @@
   }
 
   function statusFor(metric, item) {
-    if (item) return { text: isManualMetric(metric) ? '已填写' : '已取到', cls: 'ok' };
+    if (item) {
+      if (item.mode === 'preserved') return { text: '已保留', cls: 'ok' };
+      if (item.mode === 'manual_fallback' || item.mode === 'manual_override') {
+        return { text: '已填写', cls: 'ok' };
+      }
+      return { text: '已取到', cls: 'ok' };
+    }
     if (isManualMetric(metric)) return { text: '待填写', cls: 'pending' };
     if (metric.collect === 'formula') return { text: '待计算', cls: 'pending' };
     return { text: '待采集', cls: 'missing' };
+  }
+
+  function formatAccountKeys(item) {
+    return item && Array.isArray(item.accountKeys) && item.accountKeys.length
+      ? item.accountKeys.join('、')
+      : '-';
+  }
+
+  function formatDateRange(item) {
+    const range = item && item.dateRange;
+    if (!range || typeof range !== 'object') return '-';
+    const from = String(range.from || '');
+    const to = String(range.to || '');
+    const timezone = String(range.timezone || '');
+    if (!from && !to) return '-';
+    return from + (to ? ' 至 ' + to : '') + (timezone ? ' (' + timezone + ')' : '');
   }
 
   function buildRows(values) {
@@ -525,8 +582,11 @@
         valueText: item ? formatValue({ key: metric.key, name: metric.name, item }) : '',
         statusText: status.text,
         statusClass: status.cls,
-        sourceText: metric.formula || metric.source || metric.note || '',
+        sourceText: item && item.source || metric.formula || metric.source || metric.note || '',
         updatedAt: item && item.updatedAt || '',
+        accountText: formatAccountKeys(item),
+        dateRangeText: formatDateRange(item),
+        modeText: item && (XHS_MODE_LABELS[item.mode] || item.mode) || '-',
       });
     });
   }
@@ -589,6 +649,42 @@
     };
   }
 
+  function xhsAnalysisWithStatus(snapshot, status) {
+    const analysis = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const collectionStatus = status && typeof status === 'object' ? status : {};
+    const platformStates = collectionStatus.platforms && typeof collectionStatus.platforms === 'object'
+      ? collectionStatus.platforms
+      : {};
+    const accounts = Object.assign({}, analysis.accounts && typeof analysis.accounts === 'object'
+      ? analysis.accounts
+      : {});
+    ['adstar', 'pgy', 'juguang'].forEach((platform) => {
+      const platformStatus = platformStates[platform] && typeof platformStates[platform] === 'object'
+        ? platformStates[platform]
+        : {};
+      const existing = accounts[platform] && typeof accounts[platform] === 'object'
+        ? accounts[platform]
+        : {};
+      accounts[platform] = Object.assign({}, platformStatus, existing, {
+        collectedAt: existing.collectedAt || platformStatus.collectedAt || collectionStatus.updatedAt ||
+          analysis.generatedAt || '',
+        dateRange: existing.dateRange || platformStatus.dateRange || analysis.dateRange || null,
+      });
+    });
+    return Object.assign({}, analysis, { accounts });
+  }
+
+  function xhsDmpExistingValues(manual) {
+    const output = {};
+    XHS_DMP_KEYS.forEach((key) => {
+      if (!Object.prototype.hasOwnProperty.call(manual || {}, key)) return;
+      const item = manual[key];
+      if (item === null || item === undefined || item === '') return;
+      output[key] = item;
+    });
+    return output;
+  }
+
   async function loadRows() {
     try {
       const data = await getStorage(STORAGE_KEYS);
@@ -606,6 +702,19 @@
       collectSycm(values, data.businessDefenseSycmTrafficSnapshotV1);
       collectGuanghe(values, data.gh_channel_snapshot);
       collectWxt(values, data.wxtBusinessDefenseReportV1);
+      const analysisSnapshot = xhsAnalysisWithStatus(
+        data.xhsAnalysisSnapshotV1,
+        data.xhsCollectionStatusV1
+      );
+      currentXhsAnalysis = analysisSnapshot;
+      const xhsMapping = window.XhsMetrics && typeof window.XhsMetrics.mapAnalysisSnapshot === 'function'
+        ? window.XhsMetrics.mapAnalysisSnapshot({
+          analysisSnapshot: analysisSnapshot,
+          existingValues: xhsDmpExistingValues(data.businessDefenseManualInputsV1),
+          manualInputs: data.businessDefenseManualInputsV1 || {},
+        })
+        : { values: {} };
+      Object.assign(values, xhsMapping.values || {});
       collectManual(values, data.businessDefenseManualInputsV1);
       computeFormulas(values);
       currentRows = buildRows(values);
@@ -615,6 +724,7 @@
     } catch (error) {
       updateConnectionState(false, '', '数据助手未连接');
       manualInputs = {};
+      currentXhsAnalysis = null;
       autoCollectStatus = {};
       currentRows = buildRows({});
       transientNotice = error && error.message ? error.message : '数据助手未连接。';
@@ -761,6 +871,9 @@
       '<td class="value">' + valueCell(row) + '</td>' +
       '<td><span class="status ' + row.statusClass + '">' + escapeHtml(row.statusText) + '</span></td>' +
       '<td class="muted">' + escapeHtml(row.sourceText || row.collect || '') + '</td>' +
+      '<td class="muted">' + escapeHtml(row.accountText || '-') + '</td>' +
+      '<td class="muted">' + escapeHtml(row.dateRangeText || '-') + '</td>' +
+      '<td class="muted">' + escapeHtml(row.modeText || '-') + '</td>' +
       '<td class="muted">' + escapeHtml(row.updatedAt || '-') + '</td>' +
       '</tr>'
     );
@@ -807,9 +920,13 @@
         taobaoCount.textContent = taobaoRows.length + ' 项 · 已取到 ' + taobaoRows.filter(row => row.item).length + ' 项';
       }
       if (xiaohongshuCount) {
-        const manualRows = xiaohongshuRows.filter(isManualMetric);
-        xiaohongshuCount.textContent = xiaohongshuRows.length + ' 项 · 已填写 ' +
-          manualRows.filter(row => row.item).length + ' / ' + manualRows.length + ' 项';
+        const populatedRows = xiaohongshuRows.filter((row) => row.item);
+        const manualRows = populatedRows.filter((row) => (
+          row.item.mode === 'manual_fallback' || row.item.mode === 'manual_override' ||
+          row.item.mode === 'preserved'
+        ));
+        xiaohongshuCount.textContent = xiaohongshuRows.length + ' 项 · 已取到 ' +
+          populatedRows.length + ' 项 · 手填/保留 ' + manualRows.length + ' 项';
       }
       renderPlatformTableSelection();
     } else {
@@ -831,15 +948,43 @@
     restoreManualInputFocus(focusSnapshot);
   }
 
+  function manualRecordValue(record) {
+    return record && typeof record === 'object' && !Array.isArray(record)
+      ? record.value
+      : record;
+  }
+
+  function manualInputMarkup(key, name, saved, percentage, placeholder) {
+    return '<input class="manual-input" data-key="' + escapeHtml(key) + '" value="' + escapeHtml(saved) +
+      '" inputmode="decimal" aria-label="手动填写' + escapeHtml(name) + '" placeholder="' +
+      (placeholder || (percentage ? '例如 30%' : '输入数值')) + '"' + (archiveManualInputsSupported()
+        ? ''
+        : ' disabled title="请重载数据助手后再填写"') + '>';
+  }
+
   function valueCell(row) {
+    const automatic = row.item && ['automatic', 'formula'].includes(row.item.mode);
+    if (row.key === 'xhs_noteCount') {
+      const underwaterValue = manualRecordValue(manualInputs.xhs_unreportedNoteCount);
+      const total = row.valueText
+        ? '<span class="note-count-total">总计 ' + escapeHtml(row.valueText) + '</span>'
+        : '';
+      return '<div class="note-count-editor">' + total +
+        manualInputMarkup(
+          'xhs_unreportedNoteCount',
+          '水下笔记数',
+          underwaterValue == null ? '' : underwaterValue,
+          false,
+          '水下笔记数'
+        ) + '</div>';
+    }
     if (isManualMetric(row)) {
-      const saved = manualInputs[row.key] == null ? '' : manualInputs[row.key];
+      if (automatic) return row.valueText ? escapeHtml(row.valueText) : '-';
+      const record = manualInputs[row.key];
+      const savedValue = manualRecordValue(record);
+      const saved = savedValue == null ? '' : savedValue;
       const percentage = PERCENT_MANUAL_KEYS.has(row.key);
-      return '<input class="manual-input" data-key="' + escapeHtml(row.key) + '" value="' + escapeHtml(saved) +
-        '" inputmode="decimal" aria-label="手动填写' + escapeHtml(row.name) + '" placeholder="' +
-        (percentage ? '例如 30%' : '输入数值') + '"' + (archiveManualInputsSupported()
-          ? ''
-          : ' disabled title="请重载数据助手后再填写"') + '>';
+      return manualInputMarkup(row.key, row.name, saved, percentage);
     }
     if (row.valueText) return escapeHtml(row.valueText);
     return '-';
@@ -893,16 +1038,23 @@
           return;
         }
         const next = Object.assign({}, manualInputs);
-        if (value) next[key] = value;
+        const previousRecord = manualInputs[key];
+        const structuredOverride = previousRecord && typeof previousRecord === 'object' &&
+          !Array.isArray(previousRecord) && previousRecord.manualOverride === true;
+        const savedValue = structuredOverride && value
+          ? Object.assign({}, previousRecord, { value, updatedAt: new Date().toISOString() })
+          : value;
+        if (value) next[key] = savedValue;
         else delete next[key];
-        if (String(manualInputs[key] == null ? '' : manualInputs[key]) === value) return;
+        const currentValue = manualRecordValue(previousRecord);
+        if (String(currentValue == null ? '' : currentValue) === value) return;
         const previous = manualInputs;
         manualInputs = next;
         input.disabled = true;
         const operation = manualSaveQueue.catch(() => {}).then(async () => {
           await setStorage(
             { businessDefenseManualInputsV1: next },
-            { key, value }
+            { key, value: savedValue }
           );
           await loadRows();
         });
@@ -943,6 +1095,9 @@
       row.valueText || '',
       row.statusText,
       row.sourceText || '',
+      row.accountText || '',
+      row.dateRangeText || '',
+      row.modeText || '',
       row.updatedAt || '',
     ].join('\t')).join('\n');
     await navigator.clipboard.writeText(text);
@@ -956,6 +1111,9 @@
       数值: row.valueText || '',
       状态: row.statusText,
       来源或公式: row.sourceText || '',
+      采集账号: row.accountText || '',
+      数据日期: row.dateRangeText || '',
+      取值模式: row.modeText || '',
       更新时间: row.updatedAt || '',
       备注: row.note || '',
     }));
@@ -964,12 +1122,177 @@
       const sheet = XLSX.utils.json_to_sheet(exportRows(platform));
       sheet['!cols'] = [
         { wch: 16 }, { wch: 22 }, { wch: 16 }, { wch: 10 },
-        { wch: 52 }, { wch: 22 }, { wch: 28 },
+        { wch: 52 }, { wch: 30 }, { wch: 32 }, { wch: 16 }, { wch: 22 }, { wch: 28 },
       ];
       XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
     };
     appendSheet('淘天', '淘宝经营数据');
-    appendSheet('小红书', '小红书手填数据');
+    appendSheet('小红书', '小红书经营数据');
+
+    const analysis = currentXhsAnalysis && typeof currentXhsAnalysis === 'object'
+      ? currentXhsAnalysis
+      : {};
+    const management = analysis.management && typeof analysis.management === 'object'
+      ? analysis.management
+      : {};
+    const costs = management.costs && typeof management.costs === 'object' ? management.costs : {};
+    const starTask = management.starTaskResult && typeof management.starTaskResult === 'object'
+      ? management.starTaskResult
+      : {};
+    const outsideDirect = management.outsideDirectResult && typeof management.outsideDirectResult === 'object'
+      ? management.outsideDirectResult
+      : {};
+    const star = analysis.star && typeof analysis.star === 'object' ? analysis.star : {};
+    const spotlight = analysis.spotlight && typeof analysis.spotlight === 'object' ? analysis.spotlight : {};
+    const safeRows = (value) => Array.isArray(value) ? value : [];
+    const cellNumber = (value) => {
+      if (value === null || value === undefined || value === '') return '';
+      return Number.isFinite(Number(value)) ? Number(value) : '';
+    };
+    const metric = (value, key) => value && value.metrics && value.metrics[key];
+    const appendDataSheet = (sheetName, rows, widths) => {
+      const data = rows.length ? rows : [{ 说明: '本次归档暂无该类数据' }];
+      const sheet = XLSX.utils.json_to_sheet(data);
+      sheet['!cols'] = (widths || []).map((wch) => ({ wch }));
+      XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
+    };
+
+    appendDataSheet('小红书管理汇总', [{
+      运行ID: analysis.runId || '',
+      店铺ID: analysis.storeId || '',
+      数据开始: analysis.dateRange && analysis.dateRange.from || '',
+      数据结束: analysis.dateRange && analysis.dateRange.to || '',
+      时区: analysis.dateRange && analysis.dateRange.timezone || '',
+      决策可用: analysis.quality && analysis.quality.decisionReady === true ? '是' : '否',
+      笔记数: cellNumber(management.noteCount),
+      合作实付: cellNumber(costs.cooperation),
+      平台服务费: cellNumber(costs.platformFee),
+      达人合作总成本: cellNumber(costs.partnership),
+      聚光消耗: cellNumber(costs.juguang),
+      总成本: cellNumber(costs.total),
+      星河任务成本: cellNumber(costs.starTaskAligned),
+      星河任务GMV: cellNumber(starTask.gmv),
+      星河任务ROI: cellNumber(starTask.roi),
+      任务外直达消耗: cellNumber(outsideDirect.spend),
+      任务外直达GMV: cellNumber(outsideDirect.gmv),
+      任务外直达ROI: cellNumber(outsideDirect.roi),
+      生成时间: analysis.generatedAt || '',
+    }], [24, 24, 14, 14, 18, 12, 12, 14, 14, 16, 14, 14, 16, 16, 16, 18, 18, 18, 24]);
+
+    appendDataSheet('小红书笔记联表', safeRows(analysis.notes).map((note) => ({
+      笔记ID: note.noteId || '',
+      标题: note.title || '',
+      达人: note.author && note.author.name || '',
+      发布时间: note.publishDate || '',
+      成熟度: note.maturity || '',
+      任务区间: safeRows(note.task && note.task.intervals).map((item) => (
+        String(item.start || '') + ' 至 ' + String(item.end || '')
+      )).join('；'),
+      星河项目ID: safeRows(note.task && note.task.projectIds).join('；'),
+      星河订单ID: safeRows(note.task && note.task.orderIds).join('；'),
+      合作实付: cellNumber(note.costs && note.costs.cooperation),
+      平台服务费: cellNumber(note.costs && note.costs.platformFee),
+      聚光消耗: cellNumber(note.costs && note.costs.juguang),
+      总成本: cellNumber(note.costs && note.costs.total),
+      任务成本: cellNumber(note.costs && note.costs.starTaskAligned),
+      任务外直达消耗: cellNumber(note.costs && note.costs.outsideDirect),
+      蒲公英曝光: cellNumber(note.pgy && metric(note.pgy, 'impressions')),
+      蒲公英阅读: cellNumber(note.pgy && metric(note.pgy, 'reads')),
+      蒲公英互动: cellNumber(note.pgy && metric(note.pgy, 'interactions')),
+      星河GMV: cellNumber(note.results && note.results.starTaskGmv),
+      星河ROI: cellNumber(note.results && note.results.starTaskRoi),
+      任务外直达GMV: cellNumber(note.results && note.results.outsideDirectGmv),
+      任务外直达ROI: cellNumber(note.results && note.results.outsideDirectRoi),
+    })), [24, 34, 18, 14, 12, 30, 28, 28, 14, 14, 14, 14, 14, 18, 14, 14, 14, 14, 14, 18, 18]);
+
+    const layerRows = [];
+    for (const [layer, units] of [['项目', star.projects], ['订单', star.orders]]) {
+      safeRows(units).forEach((unit) => layerRows.push({
+        层级: layer,
+        ID: unit.id || '',
+        名称: unit.name || '',
+        项目ID: unit.projectId || '',
+        状态: unit.status || '',
+        分摊成本: cellNumber(unit.allocatedCost),
+        GMV: cellNumber(metric(unit, 'gmv')),
+        ROI: cellNumber(unit.roi),
+        阅读UV: cellNumber(metric(unit, 'readUv')),
+        互动UV: cellNumber(metric(unit, 'engagementUv')),
+        进店UV: cellNumber(metric(unit, 'storeVisitUv')),
+        成交UV: cellNumber(metric(unit, 'orderUv')),
+      }));
+    }
+    appendDataSheet('小红书项目订单', layerRows, [10, 28, 32, 28, 14, 14, 14, 14, 14, 14, 14, 14]);
+
+    appendDataSheet('小红书聚光日报', safeRows(spotlight.daily).map((row) => ({
+      日期: row.date || '',
+      笔记ID: row.noteId || '',
+      广告账户ID: row.accountId || '',
+      广告账户: row.accountName || '',
+      账户类型: row.accountType == null ? '' : row.accountType,
+      营销诉求: row.marketingObjective || '',
+      投放模式: row.deliveryMode == null ? '' : row.deliveryMode,
+      任务状态: row.taskStatus || '',
+      消耗: cellNumber(row.spend),
+      曝光: cellNumber(row.impressions),
+      点击: cellNumber(row.clicks),
+      互动: cellNumber(row.interactions),
+      种草人数: cellNumber(row.seedUsers),
+      深度种草人数: cellNumber(row.deepSeedUsers),
+      进店: cellNumber(row.conversion && row.conversion.storeVisits),
+      成交: cellNumber(row.conversion && row.conversion.orders),
+      GMV: cellNumber(row.conversion && row.conversion.gmv),
+    })), [14, 24, 24, 24, 12, 16, 14, 14, 14, 14, 14, 14, 14, 16, 14, 14, 14]);
+
+    appendDataSheet('小红书星河明细', safeRows(star.daily).map((row) => ({
+      日期: row.date || '',
+      笔记ID: row.noteId || '',
+      任务状态: row.taskStatus || '',
+      项目ID: safeRows(row.projectIds).join('；'),
+      订单ID: safeRows(row.orderIds).join('；'),
+      来源行数: cellNumber(row.rowCount),
+      阅读UV: cellNumber(metric(row, 'readUv')),
+      互动UV: cellNumber(metric(row, 'engagementUv')),
+      搜索曝光UV: cellNumber(metric(row, 'searchImpressionUv')),
+      搜索进店UV: cellNumber(metric(row, 'searchVisitUv')),
+      店铺进店UV: cellNumber(metric(row, 'storeVisitUv')),
+      新客进店UV: cellNumber(metric(row, 'newStoreVisitUv')),
+      收藏UV: cellNumber(metric(row, 'favoriteUv')),
+      加购UV: cellNumber(metric(row, 'cartUv')),
+      成交UV: cellNumber(metric(row, 'orderUv')),
+      新客成交UV: cellNumber(metric(row, 'newOrderUv')),
+      GMV: cellNumber(metric(row, 'gmv')),
+      任务商品GMV: cellNumber(metric(row, 'seededProductGmv')),
+      连带GMV: cellNumber(metric(row, 'linkedProductGmv')),
+    })), [14, 24, 14, 28, 28, 12, 14, 14, 16, 16, 16, 16, 14, 14, 14, 16, 14, 18, 14]);
+
+    const qualityRows = [{
+      记录类型: '质量汇总',
+      严重级别: analysis.quality && analysis.quality.decisionReady === true ? 'ready' : 'critical',
+      代码: 'decision_ready',
+      平台: '',
+      笔记ID: '',
+      内容: analysis.quality && analysis.quality.decisionReady === true
+        ? '三平台数据达到经营决策门槛'
+        : '三平台数据未达到经营决策门槛',
+    }];
+    safeRows(analysis.quality && analysis.quality.issues).forEach((issue) => qualityRows.push({
+      记录类型: '质量问题',
+      严重级别: issue.severity || '',
+      代码: issue.code || '',
+      平台: issue.platform || '',
+      笔记ID: issue.noteId || '',
+      内容: issue.message || '',
+    }));
+    safeRows(analysis.actions).forEach((action) => qualityRows.push({
+      记录类型: '行动建议',
+      严重级别: action.confidence || '',
+      代码: action.action || '',
+      平台: '',
+      笔记ID: action.noteId || '',
+      内容: safeRows(action.evidence).join('；'),
+    }));
+    appendDataSheet('小红书质量说明', qualityRows, [14, 14, 24, 14, 24, 72]);
     XLSX.writeFile(workbook, '经营攻防内容诊断取数_' + new Date().toISOString().slice(0, 10) + '.xlsx');
   }
 
@@ -984,6 +1307,7 @@
     try {
       await removeStorage(CLEARABLE_STORAGE_KEYS);
       manualInputs = {};
+      currentXhsAnalysis = null;
       autoCollectStatus = {};
       transientNotice = '已清空本地汇总数据。请从团队网页的“一键取数”生成新归档。';
       await loadRows();
@@ -1032,6 +1356,7 @@
       } catch (error) {
         updateConnectionState(false, '', '数据助手未连接');
         manualInputs = {};
+        currentXhsAnalysis = null;
         autoCollectStatus = {};
         currentRows = buildRows({});
         transientNotice = error && error.message ? error.message : '数据助手未连接。';

@@ -22,10 +22,30 @@ const protectedPageAssets = {
   "workspace.html": ["portal.css", "batch-report-export.js", "project.js"],
   "accounts.html": ["app.css", "accounts.css", "account-vault.js", "accounts.js"],
   "report.html": ["portal.css", "task.js"],
-  "data.html": ["app.css", "portal.css", "xlsx.full.min.js", "diagnosis-spec.js", "diagnosis-popup.js"],
+  "data.html": [
+    "app.css", "portal.css", "xlsx.full.min.js", "diagnosis-spec.js",
+    "xhs-contract.js", "xhs-metrics.js", "diagnosis-popup.js",
+  ],
   "report-view.html": ["app.css", "report.css", "portal.css", "report.js"],
 };
 const extensionFilenames = [
+  "adstar-page-hook.js",
+  "pgy-page-hook.js",
+  "juguang-page-hook.js",
+  "xhs-platform-content.js",
+  "xhs/contract.js",
+  "xhs/quality.js",
+  "xhs/bindings.js",
+  "xhs/collector-core.js",
+  "xhs/local-cache.js",
+  "xhs/page-client.js",
+  "xhs/adstar-collector.js",
+  "xhs/pgy-collector.js",
+  "xhs/juguang-accounts.js",
+  "xhs/juguang-collector.js",
+  "xhs/runtime.js",
+  "xhs/analysis.js",
+  "xhs/metrics.js",
   "xinghe-content-script.js",
   "diagnosis-popup.js",
   "rules.js",
@@ -93,6 +113,8 @@ test("keeps protected HTML and extension packages out of static client roots", a
     "portal.css",
     "project.js",
     "cloud-sync.js",
+    "xhs-contract.js",
+    "xhs-metrics.js",
   ]) {
     await access(new URL(`public/${filename}`, siteRoot));
   }

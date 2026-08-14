@@ -177,7 +177,10 @@ test('parsePgyPage accepts a real paginated shape and rejects missing data.list'
 });
 
 test('normalizes note identity, publish date, cooperation cost, service fee, and sanitized fields', () => {
-  const normalized = normalizePgyNote(clone(FICTIONAL_NOTES[0]));
+  const input = clone(FICTIONAL_NOTES[0]);
+  input.rawBusinessPayload = { marker: 'fictional-raw-business-payload' };
+  input.unusedDecoration = 'fictional-unused-decoration';
+  const normalized = normalizePgyNote(input);
 
   assert.equal(normalized.noteId, 'fictional-note-001');
   assert.equal(normalized.sourceKey, 'fictional-cooperation-001');
@@ -197,11 +200,14 @@ test('normalizes note identity, publish date, cooperation cost, service fee, and
     reads: 200,
     interactions: 30,
   });
+  assert.deepEqual(Object.keys(normalized).sort(), [
+    'author', 'costs', 'metrics', 'noteId', 'publishDate', 'sourceKey', 'title',
+  ]);
 
   const serialized = JSON.stringify(normalized);
   assert.doesNotMatch(
     serialized,
-    /fictional-xsec|fictional-signature|fictional-row-token|xsec_token|sign=/
+    /fictional-xsec|fictional-signature|fictional-row-token|xsec_token|sign=|fictional-raw-business-payload|fictional-unused-decoration/
   );
 });
 

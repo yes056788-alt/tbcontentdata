@@ -7,6 +7,7 @@ import {
   withApiErrors,
 } from "@/app/server/http";
 import {
+  assertRunPayloadSafe,
   serializeRunMetadata,
   sha256Hex,
   validateRunId,
@@ -61,6 +62,7 @@ export async function GET(request: Request, context: RouteContext) {
         "历史归档正文已损坏，请联系管理员。",
       );
     }
+    assertRunPayloadSafe(run);
     return jsonResponse({ run, metadata: serializeRunMetadata(row) });
   });
 }

@@ -43,7 +43,7 @@ test('recursively removes token, cookie, authorization, and signature fields', (
 
 test('removes sensitive parameters from signed URLs while preserving safe parameters', () => {
   const input = {
-    reportUrl: 'https://api.example/report?noteId=fictional-note-002&xsec_token=fictional-xsec&sign=fictional-signature&pageNum=2',
+    reportUrl: 'https://api.example/report?noteId=fictional-note-002&xsec_token=fictional-xsec&x-s=fictional-xs&xsign=fictional-xsign&sign=fictional-signature&pageNum=2',
     nested: [
       'https://ads.example/data?advertiserId=fictional-advertiser-001&access_token=fictional-access',
       'plain fictional text',
@@ -55,10 +55,38 @@ test('removes sensitive parameters from signed URLs while preserving safe parame
   assert.match(sanitized.reportUrl, /^https:\/\/api\.example\/report\?/);
   assert.match(sanitized.reportUrl, /noteId=fictional-note-002/);
   assert.match(sanitized.reportUrl, /pageNum=2/);
-  assert.doesNotMatch(sanitized.reportUrl, /xsec_token|sign=|fictional-xsec|fictional-signature/);
+  assert.doesNotMatch(
+    sanitized.reportUrl,
+    /xsec_token|x-s=|xsign=|sign=|fictional-xsec|fictional-xs|fictional-xsign|fictional-signature/
+  );
   assert.match(sanitized.nested[0], /advertiserId=fictional-advertiser-001/);
   assert.doesNotMatch(sanitized.nested[0], /access_token|fictional-access/);
   assert.equal(sanitized.nested[1], 'plain fictional text');
+});
+
+test('removes XHS signature aliases and secret-value keys and redacts the full Bearer credential', () => {
+  const input = {
+    trace: {
+      'X-S': 'fictional-xs-header-secret',
+      xsign: 'fictional-xsign-header-secret',
+      secretValue: 'fictional-secret-value',
+      clientSecretValue: 'fictional-client-secret-value',
+      safeLabel: 'fictional-safe-label',
+    },
+    message: 'request failed; Authorization: Bearer fictional-bearer-credential; retry later',
+    safeText: 'secretary=fictional campaign role (not a credential)',
+  };
+
+  const sanitized = sanitizeSensitiveData(input);
+  const serialized = JSON.stringify(sanitized);
+
+  assert.deepEqual(sanitized.trace, { safeLabel: 'fictional-safe-label' });
+  assert.match(sanitized.message, /request failed/);
+  assert.match(sanitized.message, /retry later/);
+  assert.doesNotMatch(serialized, /fictional-xs-header-secret|fictional-xsign-header-secret/);
+  assert.doesNotMatch(serialized, /fictional-secret-value|fictional-client-secret-value/);
+  assert.doesNotMatch(serialized, /fictional-bearer-credential/);
+  assert.equal(sanitized.safeText, input.safeText);
 });
 
 test('does not leak secret values through errors or checkpoint metadata', () => {

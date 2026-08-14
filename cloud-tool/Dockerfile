@@ -9,7 +9,9 @@ FROM dependencies AS builder
 WORKDIR /workspace
 COPY cloud-tool/ ./cloud-tool/
 COPY web-tool/ ./web-tool/
+COPY xhs/ ./xhs/
 COPY vendor/xlsx.full.min.js ./vendor/xlsx.full.min.js
+COPY adstar-page-hook.js pgy-page-hook.js juguang-page-hook.js xhs-platform-content.js ./
 COPY manifest.json README_V2.md diagnosis-popup.html diagnosis-popup.js diagnosis-spec.js ./
 COPY background.js content-script.js dmp-content-script.js dmp-crowd-presets.json dmp-page-hook.js ./
 COPY page-hook.js rules.js sycm-content-script.js web-tool-bridge.js xinghe-content-script.js ./

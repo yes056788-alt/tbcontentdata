@@ -63,7 +63,7 @@ const projectTaskStart = backgroundSource.indexOf('async function runProjectTask
 const projectTaskEnd = backgroundSource.indexOf('\nfunction ensureBusinessDefenseAutoCollectTask', projectTaskStart);
 const projectTaskSource = backgroundSource.slice(projectTaskStart, projectTaskEnd);
 assert.match(projectTaskSource, /const taskType = 'report'/);
-assert.match(projectTaskSource, /ensureContentDiagnosisReportTask\(\{ platforms \}\)/);
+assert.match(projectTaskSource, /ensureContentDiagnosisReportTask\(\{[\s\S]*platforms,[\s\S]*dateRange,[\s\S]*storeId/);
 assert.doesNotMatch(projectTaskSource, /ensureBusinessDefenseAutoCollectTask/);
 for (const snapshotKey of [
   'businessDefenseSycmTrafficSnapshotV1',

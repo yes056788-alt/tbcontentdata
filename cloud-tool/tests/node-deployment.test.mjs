@@ -76,6 +76,10 @@ test("Docker allow-list contains every root input used by extension packaging", 
   const dockerfile = await source("../Dockerfile");
   const dockerignore = await source("../../.dockerignore");
   const buildInputs = [
+    "adstar-page-hook.js",
+    "pgy-page-hook.js",
+    "juguang-page-hook.js",
+    "xhs-platform-content.js",
     "manifest.json",
     "README_V2.md",
     "diagnosis-popup.html",
@@ -103,8 +107,16 @@ test("Docker allow-list contains every root input used by extension packaging", 
       `${filename} must be included by .dockerignore`,
     );
   }
-  for (const directory of ["cloud-tool", "web-tool"]) {
-    assert.ok(dockerignore.includes(`!${directory}/**`));
+  assert.match(dockerfile, /^COPY xhs\/ \.\/xhs\/$/m);
+  for (const directory of ["cloud-tool", "web-tool", "xhs"]) {
+    assert.ok(
+      dockerignore.split(/\r?\n/).includes(`!${directory}/`),
+      `${directory}/ must be included by .dockerignore`,
+    );
+    assert.ok(
+      dockerignore.split(/\r?\n/).includes(`!${directory}/**`),
+      `${directory}/** must be included by .dockerignore`,
+    );
   }
   assert.ok(dockerignore.includes("!vendor/xlsx.full.min.js"));
 });

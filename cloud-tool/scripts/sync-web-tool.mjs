@@ -61,6 +61,8 @@ for (const name of publicWebFiles) {
 await Promise.all([
   copyFile(resolve(extensionRoot, "diagnosis-popup.js"), resolve(publicRoot, "diagnosis-popup.js")),
   copyFile(resolve(extensionRoot, "diagnosis-spec.js"), resolve(publicRoot, "diagnosis-spec.js")),
+  copyFile(resolve(extensionRoot, "xhs/contract.js"), resolve(publicRoot, "xhs-contract.js")),
+  copyFile(resolve(extensionRoot, "xhs/metrics.js"), resolve(publicRoot, "xhs-metrics.js")),
   copyFile(resolve(extensionRoot, "vendor/xlsx.full.min.js"), resolve(publicRoot, "xlsx.full.min.js")),
   copyFile(resolve(webToolRoot, "cloud-sync.js"), resolve(publicRoot, "cloud-sync.js")),
 ]);
@@ -70,6 +72,8 @@ const versionedWebAssets = new Map(await Promise.all([
   "cloud-sync.js",
   "diagnosis-popup.js",
   "diagnosis-spec.js",
+  "xhs-contract.js",
+  "xhs-metrics.js",
   "xlsx.full.min.js",
 ].map(async (name) => [name, await versionedPublicAssetUrl(name)])));
 
@@ -164,6 +168,7 @@ async function buildExtensionPackage() {
     "xhs-platform-content.js",
     "xhs/contract.js",
     "xhs/quality.js",
+    "xhs/bindings.js",
     "xhs/collector-core.js",
     "xhs/local-cache.js",
     "xhs/page-client.js",
@@ -171,6 +176,9 @@ async function buildExtensionPackage() {
     "xhs/pgy-collector.js",
     "xhs/juguang-accounts.js",
     "xhs/juguang-collector.js",
+    "xhs/runtime.js",
+    "xhs/analysis.js",
+    "xhs/metrics.js",
     "xinghe-content-script.js",
     "diagnosis-popup.js",
     "rules.js",

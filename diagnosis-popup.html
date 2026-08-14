@@ -128,7 +128,7 @@
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 1120px;
+      min-width: 1520px;
     }
     th, td {
       border-bottom: 1px solid #eef1f5;
@@ -175,6 +175,18 @@
       outline: 2px solid rgba(22, 119, 255, .18);
       border-color: #1677ff;
     }
+    .note-count-editor {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .note-count-total {
+      color: #344054;
+      white-space: nowrap;
+    }
+    .note-count-editor .manual-input {
+      width: 104px;
+    }
   </style>
 </head>
 <body>
@@ -204,6 +216,9 @@
             <th>数值</th>
             <th>状态</th>
             <th>来源/公式</th>
+            <th>采集账号</th>
+            <th>数据日期</th>
+            <th>取值模式</th>
             <th>更新时间</th>
           </tr>
         </thead>
@@ -213,6 +228,8 @@
   </main>
   <script src="vendor/xlsx.full.min.js"></script>
   <script src="diagnosis-spec.js"></script>
+  <script src="xhs/contract.js"></script>
+  <script src="xhs/metrics.js"></script>
   <script src="diagnosis-popup.js"></script>
 </body>
 </html>

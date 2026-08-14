@@ -108,17 +108,34 @@ async function run() {
       xhs_dmpVisitors: '3600',
       xhs_l12Penetration: '30%',
       xhs_l45Penetration: '0.3',
+      xhs_unreportedNoteCount: '2',
+      xhs_storeGmv: {
+        value: '8800',
+        manualOverride: true,
+        updatedAt: '2030-01-02T03:04:05.000Z',
+        accountKeys: ['fictional-pgy-account'],
+        dateRange: { from: '2030-01-01', to: '2030-01-31', timezone: 'Asia/Shanghai' },
+        unexpected: 'drop-me',
+      },
       privateUnexpectedKey: 'secret',
     },
   }, 'write');
   await settle();
   assert.deepEqual(
-    Object.assign({}, storageWrites[0].businessDefenseManualInputsV1),
+    JSON.parse(JSON.stringify(storageWrites[0].businessDefenseManualInputsV1)),
     {
       xhs_kolSpend: '1200',
       xhs_dmpVisitors: '3600',
       xhs_l12Penetration: '30%',
       xhs_l45Penetration: '30%',
+      xhs_unreportedNoteCount: '2',
+      xhs_storeGmv: {
+        value: '8800',
+        manualOverride: true,
+        updatedAt: '2030-01-02T03:04:05.000Z',
+        accountKeys: ['fictional-pgy-account'],
+        dateRange: { from: '2030-01-01', to: '2030-01-31', timezone: 'Asia/Shanghai' },
+      },
     }
   );
 
@@ -276,41 +293,46 @@ async function run() {
   assert.equal(runtimeMessages.length, runtimeCountBeforeInvalidSelections);
 
   const importedAt = Date.now();
+  const cloudRun = {
+    schema: 2,
+    runId: 'store-run-cloud-1',
+    batchId: 'batch-cloud',
+    taskType: 'both',
+    runMode: 'batch',
+    account: {
+      id: 'account-cloud',
+      name: '云端账号',
+      platform: 'taobao',
+      storeId: 'store-cloud',
+      storeName: '云端店铺',
+      usernameMasked: 'cl***d',
+    },
+    startedAt: importedAt - 1000,
+    finishedAt: importedAt - 500,
+    updatedAt: importedAt,
+    xinghe: { state: 'ready', noPermission: false, unexpected: 'drop-me' },
+    status: 'success',
+    failures: [],
+    snapshots: {
+      businessDefenseManualInputsV1: { xhs_kolSpend: '1200' },
+    },
+  };
   send('importStoreRun', {
     runId: 'store-run-cloud-1',
-    run: {
-      schema: 2,
-      runId: 'store-run-cloud-1',
-      batchId: 'batch-cloud',
-      taskType: 'both',
-      runMode: 'batch',
-      account: {
-        id: 'account-cloud',
-        name: '云端账号',
-        platform: 'taobao',
-        storeId: 'store-cloud',
-        storeName: '云端店铺',
-        usernameMasked: 'cl***d',
-        password: 'must-be-dropped',
-      },
-      startedAt: importedAt - 1000,
-      finishedAt: importedAt - 500,
-      updatedAt: importedAt,
-      xinghe: { state: 'ready', noPermission: false, unexpected: 'drop-me' },
-      status: 'success',
-      failures: [],
-      snapshots: {
-        businessDefenseManualInputsV1: { xhs_kolSpend: '1200' },
-        unexpectedSnapshot: { secret: 'drop-me' },
-      },
-    },
-  }, 'import-cloud-run');
+    run: Object.assign({}, cloudRun, {
+      account: Object.assign({}, cloudRun.account, { password: 'must-be-rejected' }),
+    }),
+  }, 'import-cloud-run-secret');
+  await settle();
+  assert.ok(posted.some((message) => (
+    message.requestId === 'import-cloud-run-secret' && message.ok === false && /敏感凭据/.test(message.message)
+  )));
+
+  send('importStoreRun', { runId: 'store-run-cloud-1', run: cloudRun }, 'import-cloud-run');
   await settle();
   const importedRun = storageState['taobaoStoreRunV1:store-run-cloud-1'];
   assert.equal(importedRun.runId, 'store-run-cloud-1');
   assert.equal(importedRun.account.storeName, '云端店铺');
-  assert.equal(importedRun.account.password, undefined);
-  assert.equal(importedRun.snapshots.unexpectedSnapshot, undefined);
   assert.equal(storageState.taobaoStoreRunIndexV1[0].runId, 'store-run-cloud-1');
   assert.ok(posted.some((message) => (
     message.requestId === 'import-cloud-run' && message.ok === true && message.data.imported === true

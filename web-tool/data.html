@@ -8,6 +8,11 @@
   <title>经营数据记录 - 淘宝经营数据</title>
   <link rel="stylesheet" href="/app.css">
   <link rel="stylesheet" href="/portal.css">
+  <style>
+    .note-count-editor { display: flex; align-items: center; gap: 8px; }
+    .note-count-total { color: #344054; white-space: nowrap; }
+    .note-count-editor .manual-input { width: 118px; }
+  </style>
 </head>
 <body>
   <header class="portal-topbar">
@@ -76,7 +81,7 @@
         </div>
         <div class="table-wrap platform-table-wrap">
           <table>
-            <thead><tr><th>模块</th><th>指标</th><th>数值</th><th>状态</th><th>来源 / 公式</th><th>更新时间</th></tr></thead>
+            <thead><tr><th>模块</th><th>指标</th><th>数值</th><th>状态</th><th>来源 / 公式</th><th>采集账号</th><th>数据日期</th><th>取值模式</th><th>更新时间</th></tr></thead>
             <tbody id="taobaoMetricRows"></tbody>
           </table>
         </div>
@@ -88,16 +93,16 @@
           <span class="platform-chip xiaohongshu">小红书</span>
           <div class="metrics-title-copy">
             <h3 id="xiaohongshuMetricsTitle">小红书经营数据</h3>
-            <p>原始数据手动填写并自动保存；总花费、ROI 等派生指标仍按公式自动计算</p>
+            <p>蒲公英、聚光和淘宝星河自动取数；缺失的原始数据手动填写并自动保存，DMP 现有值保留</p>
           </div>
           <span id="xiaohongshuMetricCount" class="visible-count"></span>
         </div>
         <div class="manual-entry-note" role="note">
-          蓝色输入框均可反复修改，按 Enter 或移开焦点保存。百分比可填写“30”或“30%”，均按 30% 处理。
+          自动取数优先；水下笔记数、缺失项、DMP 保留值或显式手填覆盖显示输入框。百分比可填写“30”或“30%”。
         </div>
         <div class="table-wrap platform-table-wrap">
           <table>
-            <thead><tr><th>模块</th><th>指标</th><th>数值</th><th>状态</th><th>参考来源 / 公式</th><th>更新时间</th></tr></thead>
+            <thead><tr><th>模块</th><th>指标</th><th>数值</th><th>状态</th><th>来源 / 公式</th><th>采集账号</th><th>数据日期</th><th>取值模式</th><th>更新时间</th></tr></thead>
             <tbody id="xiaohongshuMetricRows"></tbody>
           </table>
         </div>
@@ -107,6 +112,8 @@
 
   <script src="/xlsx.full.min.js"></script>
   <script src="/diagnosis-spec.js"></script>
+  <script src="/xhs-contract.js"></script>
+  <script src="/xhs-metrics.js"></script>
   <script src="/diagnosis-popup.js"></script>
 </body>
 </html>

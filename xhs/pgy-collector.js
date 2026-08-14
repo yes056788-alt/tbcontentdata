@@ -111,7 +111,6 @@
         reads: numberOrZero(safe.readNum),
         interactions: numberOrZero(safe.engageNum),
       },
-      source: safe,
     };
   }
 

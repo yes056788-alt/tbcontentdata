@@ -126,7 +126,7 @@ function accountFromTarget(payload) {
 function createFakePageClient(options = {}) {
   const calls = [];
   const events = [];
-  let current = clone(ACCOUNTS[0]);
+  let current = clone(options.initialAccount || ACCOUNTS[0]);
   let activeReports = 0;
   let maxActiveReports = 0;
 
@@ -137,12 +137,17 @@ function createFakePageClient(options = {}) {
 
     if (input.endpoint === 'accounts.current') {
       events.push(`current:${current.vSellerId}`);
-      return clone(current);
+      return clone(options.mainIdentityWithoutVSeller && current.accountType === 4
+        ? { ...current, vSellerId: null }
+        : current);
     }
 
     if (input.endpoint === 'accounts.list') {
       events.push('list');
-      return { accounts: clone(ACCOUNTS) };
+      const accounts = options.childListIsScoped && current.accountType === 602
+        ? [current]
+        : ACCOUNTS;
+      return { accounts: clone(accounts), total: accounts.length };
     }
 
     if (input.endpoint === 'accounts.switch') {
@@ -230,16 +235,70 @@ function createFakePageClient(options = {}) {
     events,
     request,
     getCurrent: () => clone(current),
+    setCurrent: (account) => { current = clone(account); },
     getMaxActiveReports: () => maxActiveReports,
   };
 }
 
-function createCollector(pageClient) {
+function createReportMutationClient(dataset, targetAccount, mutateResponse) {
+  const pageClient = createFakePageClient();
+  const request = pageClient.request;
+  pageClient.request = async (input) => {
+    const accountAtCall = pageClient.getCurrent().vSellerId;
+    const response = await request(input);
+    const payload = input && input.payload || {};
+    const actualDataset = payload.dataSource === 'account'
+      ? 'account'
+      : payload.timeUnit === 'DAY' ? 'daily' : 'summary';
+    if (
+      input.endpoint === 'reports.query' &&
+      accountAtCall === targetAccount &&
+      actualDataset === dataset
+    ) {
+      const changed = clone(response);
+      mutateResponse(changed);
+      return changed;
+    }
+    return response;
+  };
+  return pageClient;
+}
+
+function createCollector(pageClient, dependencies = {}) {
   return createJuguangCollector({
     pageClient,
     cache: createMemoryCache(),
     now: () => '2030-02-01T00:00:00.000Z',
+    ...dependencies,
   });
+}
+
+function createRuntimeAccountDependencies(pageClient, options = {}) {
+  const switches = [];
+  const returns = [];
+  return {
+    switches,
+    returns,
+    dependencies: {
+      async switchAccount(input) {
+        const target = accountFromTarget(input && input.target || {});
+        if (!target) throw new Error('fictional runtime target account not found');
+        switches.push(clone(target));
+        pageClient.events.push(`runtime-switch:${target.vSellerId}`);
+        if (target.accountType === 4) {
+          throw new Error('main account must use the injected returnToMainAccount DOM workflow');
+        }
+        pageClient.setCurrent(target);
+      },
+      async returnToMainAccount(input) {
+        returns.push(clone(input));
+        pageClient.events.push('return-main');
+        if (options.returnFailure) throw new Error('fictional return-to-main failure');
+        pageClient.setCurrent(ACCOUNTS[0]);
+        return clone(ACCOUNTS[0]);
+      },
+    },
+  };
 }
 
 function collectionOptions(overrides = {}) {
@@ -323,6 +382,89 @@ test('parses report pages and normalizes string-packed metrics without hiding sc
   );
 });
 
+test('invalid or missing account fee is a schema failure, never verified no spend', async (t) => {
+  for (const scenario of [
+    { name: 'placeholder fee', metrics: { fee: '--' } },
+    { name: 'null fee', metrics: { fee: null } },
+    { name: 'blank fee', metrics: { fee: '' } },
+    { name: 'missing fee', metrics: {} },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const pageClient = createReportMutationClient(
+        'account',
+        'fictional-child-zero',
+        (response) => {
+          response.data.totalData.dataValueJson = JSON.stringify(scenario.metrics);
+        }
+      );
+      const result = await createCollector(pageClient).collect(collectionOptions({
+        runId: `fictional-juguang-invalid-fee-${scenario.name.replace(/\s+/g, '-')}`,
+      }));
+      const account = result.accounts.find((unit) => (
+        unit.account.vSellerId === 'fictional-child-zero'
+      ));
+
+      assert.notEqual(account.status, 'verified_no_spend');
+      assert.equal(account.status, 'failed');
+      assert.equal(account.schemaValid, false);
+      assert.ok(account.errors.some((error) => (
+        error.code === 'report_schema_invalid' && /fee/i.test(error.message)
+      )));
+    });
+  }
+});
+
+test('unsupported non-fee columns in account, summary, or daily reports downgrade the account to partial', async (t) => {
+  for (const dataset of ['account', 'summary', 'daily']) {
+    await t.test(dataset, async () => {
+      const targetAccount = dataset === 'account'
+        ? 'fictional-child-zero'
+        : 'fictional-main-vseller';
+      const pageClient = createReportMutationClient(dataset, targetAccount, (response) => {
+        response.data.unsupportedColumns = ['impression'];
+      });
+      const result = await createCollector(pageClient).collect(collectionOptions({
+        runId: `fictional-juguang-unsupported-${dataset}`,
+      }));
+      const account = result.accounts.find((unit) => unit.account.vSellerId === targetAccount);
+
+      assert.equal(result.status, 'partial');
+      assert.equal(account.status, 'partial');
+      assert.equal(account.schemaValid, true);
+      assert.ok(account.warnings.some((warning) => (
+        warning.code === 'unsupported_columns' &&
+        warning.dataset === dataset &&
+        warning.columns.includes('impression')
+      )));
+    });
+  }
+});
+
+test('unsupported fee in account, summary, or daily reports is a schema failure', async (t) => {
+  for (const dataset of ['account', 'summary', 'daily']) {
+    await t.test(dataset, async () => {
+      const targetAccount = dataset === 'account'
+        ? 'fictional-child-zero'
+        : 'fictional-main-vseller';
+      const pageClient = createReportMutationClient(dataset, targetAccount, (response) => {
+        response.data.unsupportedColumns = ['fee'];
+      });
+      const result = await createCollector(pageClient).collect(collectionOptions({
+        runId: `fictional-juguang-unsupported-fee-${dataset}`,
+      }));
+      const account = result.accounts.find((unit) => unit.account.vSellerId === targetAccount);
+
+      assert.equal(account.status, 'failed');
+      assert.equal(account.schemaValid, false);
+      assert.ok(account.errors.some((error) => (
+        error.code === 'report_schema_invalid' &&
+        /fee/i.test(error.message) &&
+        /unsupported/i.test(error.message)
+      )));
+    });
+  }
+});
+
 test('reconciles account, period-note, and daily spend within the one-percent gate', () => {
   const matched = reconcileJuguangSpend({
     accountSpend: 300,
@@ -397,6 +539,75 @@ test('discovers accounts, collects them sequentially, verifies zero spend, and r
   assert.equal(reportCalls.filter((call) => (
     call.accountAtCall === 'fictional-child-zero' && call.payload.dataSource === 'note'
   )).length, 0, 'zero-spend account must skip empty note pagination');
+});
+
+test('starting from a child returns to verified main before discovery and restores the original child in finally', async () => {
+  const pageClient = createFakePageClient({
+    initialAccount: ACCOUNTS[1],
+    childListIsScoped: true,
+    mainIdentityWithoutVSeller: true,
+  });
+  const runtimeAccounts = createRuntimeAccountDependencies(pageClient);
+  const result = await createCollector(pageClient, runtimeAccounts.dependencies).collect(collectionOptions({
+    runId: 'fictional-juguang-run-started-in-child',
+  }));
+
+  assert.equal(result.status, 'complete');
+  assert.ok(runtimeAccounts.returns.length >= 1, 'child discovery must use returnToMainAccount');
+  const returnIndex = pageClient.events.indexOf('return-main');
+  const listIndex = pageClient.events.indexOf('list');
+  assert.ok(returnIndex >= 0 && returnIndex < listIndex,
+    'account listing must happen only after the return-to-main workflow');
+  assert.deepEqual(result.accounts.map((unit) => unit.account.vSellerId), [
+    'fictional-main-vseller',
+    'fictional-child-spend',
+    'fictional-child-zero',
+  ]);
+  assert.equal(result.initialAccount.vSellerId, 'fictional-child-spend');
+  assert.equal(pageClient.getCurrent().vSellerId, 'fictional-child-spend');
+  assert.equal(runtimeAccounts.switches.at(-1).vSellerId, 'fictional-child-spend',
+    'finally must navigate back to the original child account');
+});
+
+test('a main identity without vSellerId resolves to the listed account and is collected exactly once', async () => {
+  const pageClient = createFakePageClient({
+    initialAccount: ACCOUNTS[0],
+    mainIdentityWithoutVSeller: true,
+  });
+  const runtimeAccounts = createRuntimeAccountDependencies(pageClient);
+  const result = await createCollector(pageClient, runtimeAccounts.dependencies).collect(collectionOptions({
+    runId: 'fictional-juguang-run-main-without-vseller',
+  }));
+
+  const mainUnits = result.accounts.filter((unit) => Number(unit.account.advertiserId) === 1001);
+  assert.equal(result.status, 'complete');
+  assert.equal(mainUnits.length, 1, 'the current and listed main account must be canonicalized before dedupe');
+  assert.equal(result.accounts.length, 3);
+  assert.equal(new Set(result.accounts.map((unit) => unit.account.vSellerId)).size, 3);
+  assert.equal(runtimeAccounts.switches.some((account) => account.accountType === 4), false,
+    'main-account transitions must not use child URL navigation');
+  assert.ok(runtimeAccounts.returns.length >= 1, 'main collection/restoration must use the DOM return workflow');
+  assert.equal(pageClient.getCurrent().accountType, 4);
+});
+
+test('a failed child-to-main transition cannot be reported as a complete one-account collection', async () => {
+  const pageClient = createFakePageClient({
+    initialAccount: ACCOUNTS[1],
+    childListIsScoped: true,
+  });
+  const runtimeAccounts = createRuntimeAccountDependencies(pageClient, { returnFailure: true });
+  const result = await createCollector(pageClient, runtimeAccounts.dependencies).collect(collectionOptions({
+    runId: 'fictional-juguang-run-return-main-failed',
+  }));
+
+  assert.notEqual(result.status, 'complete');
+  assert.ok(['partial', 'failed'].includes(result.status));
+  assert.equal(runtimeAccounts.returns.length, 1);
+  assert.equal(pageClient.calls.some((call) => call.endpoint === 'accounts.list'), false,
+    'a child-scoped list must not be mistaken for the full advertiser list');
+  assert.ok(result.errors.some((error) => (
+    error.code === 'account_discovery_failed' || error.code === 'account_restore_failed'
+  )));
 });
 
 test('marks schema drift in one advertiser partial, continues later accounts, and restores initial identity', async () => {

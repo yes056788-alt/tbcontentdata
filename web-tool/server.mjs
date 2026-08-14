@@ -27,6 +27,8 @@ const routes = new Map([
   ['/account-vault.js', { path: join(here, 'account-vault.js'), type: 'text/javascript; charset=utf-8' }],
   ['/diagnosis-popup.js', { path: join(extensionRoot, 'diagnosis-popup.js'), type: 'text/javascript; charset=utf-8' }],
   ['/diagnosis-spec.js', { path: join(extensionRoot, 'diagnosis-spec.js'), type: 'text/javascript; charset=utf-8' }],
+  ['/xhs-contract.js', { path: join(extensionRoot, 'xhs', 'contract.js'), type: 'text/javascript; charset=utf-8' }],
+  ['/xhs-metrics.js', { path: join(extensionRoot, 'xhs', 'metrics.js'), type: 'text/javascript; charset=utf-8' }],
   ['/xlsx.full.min.js', { path: join(extensionRoot, 'vendor', 'xlsx.full.min.js'), type: 'text/javascript; charset=utf-8' }],
 ]);
 

@@ -46,6 +46,8 @@ const ORDER_PAGES = Object.freeze({
       orderName: '虚构订单一',
       projectId: 'fictional-project-001',
       settleSeqId: 'fictional-settle-001',
+      memberId: 'fictional-member-001',
+      memberName: '虚构星河账号一',
       deliveryModeCode: 88,
       media: 'RED_BOOK',
       startTime: '2030-01-03 00:00:00',
@@ -56,6 +58,8 @@ const ORDER_PAGES = Object.freeze({
       orderName: '虚构范围外订单',
       projectId: 'fictional-project-outside',
       settleSeqId: 'fictional-settle-outside',
+      memberId: 'fictional-member-001',
+      memberName: '虚构星河账号一',
       startTime: '2030-02-01 00:00:00',
       endTime: '2030-02-05 23:59:59',
     },
@@ -66,6 +70,8 @@ const ORDER_PAGES = Object.freeze({
       orderName: '虚构无日期订单',
       projectId: 'fictional-project-no-date',
       settleSeqId: 'fictional-settle-no-date',
+      memberId: 'fictional-member-001',
+      memberName: '虚构星河账号一',
       reportDeliveryMode: 'fictionalCustomMode',
     },
   ],
@@ -127,7 +133,18 @@ function createFakePageClient(options = {}) {
 
     if (input.endpoint === 'orders.list') {
       const page = requestPage(payload);
-      return modelEnvelope(ORDER_PAGES[page] || [], page, 3);
+      const orders = (ORDER_PAGES[page] || []).map((order) => ({ ...order }));
+      if (options.missingOrderIdentity) {
+        orders.forEach((order) => {
+          delete order.memberId;
+          delete order.memberName;
+        });
+      }
+      if (options.multipleOrderIdentities && page === 2 && orders[0]) {
+        orders[0].memberId = 'fictional-member-002';
+        orders[0].memberName = '虚构星河账号二';
+      }
+      return modelEnvelope(orders, page, 3);
     }
 
     if (input.endpoint === 'reports.summary') {
@@ -171,6 +188,9 @@ function createFakePageClient(options = {}) {
           contentId: contentIds[id] || `fictional-note-for-${id}`,
           visitorCount: 30,
           gmv: 300,
+          slrAttrItmCltUv1d: 12,
+          slrAttrItmOrdGmv1d1bpOrd: 240,
+          slrAttrItmOrdGmv1dNot1bpOrd: 60,
         };
       } else {
         row = { orderId: id, fee: 120, gmv: 300 };
@@ -288,6 +308,10 @@ test('collects complete lists and all required nested data only for date-related
   assert.equal(result.status, 'complete');
   assert.equal(result.truncated, false);
   assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.identity, {
+    memberId: 'fictional-member-001',
+    memberName: '虚构星河账号一',
+  });
   assert.equal(result.lists.projects.items.length, 3);
   assert.equal(result.lists.orders.items.length, 3);
   assert.equal(result.storeSummary.id, 'fictional-store');
@@ -329,6 +353,15 @@ test('collects complete lists and all required nested data only for date-related
     ]
   );
   assert.deepEqual(
+    {
+      favoriteUv: result.contentRows[0].slrAttrItmCltUv1d,
+      seededProductGmv: result.contentRows[0].slrAttrItmOrdGmv1d1bpOrd,
+      linkedProductGmv: result.contentRows[0].slrAttrItmOrdGmv1dNot1bpOrd,
+    },
+    { favoriteUv: 12, seededProductGmv: 240, linkedProductGmv: 60 },
+    '星河真实接口的收藏/任务商品 GMV/连带 GMV 必须进入分析投影',
+  );
+  assert.deepEqual(
     result.excluded.projects.map((item) => item.id),
     ['fictional-project-outside']
   );
@@ -351,6 +384,34 @@ test('collects complete lists and all required nested data only for date-related
     ['fictional-project-outside', 'fictional-order-outside'].includes(unitId(call.payload))
   ));
   assert.deepEqual(excludedNestedCalls, []);
+});
+
+test('warns and leaves identity empty when Star order rows have no member identity', async () => {
+  const pageClient = createFakePageClient({ missingOrderIdentity: true });
+  const result = await createCollector(pageClient).collect(collectionOptions({
+    runId: 'fictional-adstar-run-missing-account-identity',
+  }));
+
+  assert.equal(result.identity, null);
+  const warning = result.warnings.find((item) => item.code === 'adstar_account_identity_missing');
+  assert.ok(warning);
+  assert.equal(warning.missingMemberIdCount, 3);
+  assert.equal(warning.orderCount, 3);
+});
+
+test('multiple Star member identities are ambiguous and can never produce complete status', async () => {
+  const pageClient = createFakePageClient({ multipleOrderIdentities: true });
+  const result = await createCollector(pageClient).collect(collectionOptions({
+    runId: 'fictional-adstar-run-ambiguous-account-identity',
+  }));
+
+  assert.equal(result.identity, null);
+  assert.equal(result.status, 'partial');
+  const warning = result.warnings.find((item) => item.code === 'adstar_account_identity_ambiguous');
+  assert.ok(warning);
+  assert.equal(warning.identityCount, 2);
+  assert.equal(warning.identities, undefined);
+  assert.doesNotMatch(JSON.stringify(warning), /fictional-member|\u865a构星河账号/);
 });
 
 test('marks maxProjects and maxOrders limits as partial truncation after full list pagination', async () => {

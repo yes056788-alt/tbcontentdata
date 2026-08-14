@@ -3,6 +3,46 @@ import type { runs } from "@/db/schema";
 
 type RunRow = typeof runs.$inferSelect;
 
+const MAX_XHS_SNAPSHOT_BYTES = 8 * 1024 * 1024;
+const XHS_SNAPSHOT_KEYS = new Set([
+  "xhsAnalysisSnapshotV1",
+  "xhsCollectionStatusV1",
+]);
+const SENSITIVE_RUN_KEYS = new Set([
+  "password",
+  "masterpassword",
+  "authorization",
+  "cookie",
+  "cookies",
+  "token",
+  "accesstoken",
+  "refreshtoken",
+  "signature",
+  "sign",
+  "secret",
+  "xsectoken",
+  "tbtoken",
+  "apikey",
+  "secretkey",
+  "sessionid",
+  "csrftoken",
+]);
+const FORBIDDEN_XHS_STATE_KEYS = new Set([
+  "raw",
+  "rawresponse",
+  "rawresponses",
+  "rawpayload",
+  "rawpages",
+  "checkpoint",
+  "checkpoints",
+  "pages",
+  "cache",
+  "cachekey",
+  "fingerprint",
+  "indexeddb",
+  "datasets",
+]);
+
 function cleanText(value: unknown, maxLength: number) {
   return String(value ?? "").trim().slice(0, maxLength);
 }
@@ -13,25 +53,158 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function assertNoPasswords(value: unknown, depth = 0) {
+function normalizedRunKey(value: unknown) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function isSensitiveRunKey(value: unknown) {
+  const key = normalizedRunKey(value);
+  if (
+    SENSITIVE_RUN_KEYS.has(key) ||
+    key === "xs" ||
+    key === "xsign" ||
+    key.includes("authorization") ||
+    key.includes("credential")
+  ) return true;
+  const stems = ["token", "cookie", "cookies", "signature", "password", "secret"];
+  const descriptors = ["", "value", "header", "hash", "data", "key", "param", "parameter"];
+  return stems.some((stem) =>
+    descriptors.some((descriptor) => key.endsWith(stem + descriptor)),
+  );
+}
+
+function isForbiddenXhsStateKey(value: unknown) {
+  const key = normalizedRunKey(value);
+  return (
+    FORBIDDEN_XHS_STATE_KEYS.has(key) ||
+    key.startsWith("raw") ||
+    key.startsWith("checkpoint")
+  );
+}
+
+function stringContainsCredential(value: unknown) {
+  if (typeof value !== "string") return false;
+  let candidate = value;
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (/https?:\/\/[^\s/@]+(?::[^\s/@]*)?@/i.test(candidate)) return true;
+    const assignment = /(?:[?&#]|\b)([a-z0-9_.%-]{1,160})["']?\s*[:=]/gi;
+    let match: RegExpExecArray | null;
+    while ((match = assignment.exec(candidate))) {
+      let key = match[1];
+      try {
+        key = decodeURIComponent(key);
+      } catch {
+        key = match[1];
+      }
+      if (isSensitiveRunKey(key)) return true;
+    }
+    let decoded = candidate;
+    try {
+      decoded = decodeURIComponent(candidate);
+    } catch {
+      decoded = candidate;
+    }
+    if (decoded === candidate) break;
+    candidate = decoded;
+  }
+  return false;
+}
+
+function assertNoRunCredentials(
+  value: unknown,
+  depth = 0,
+  seen = new WeakSet<object>(),
+) {
+  if (depth > 64) {
+    throw new ApiError(400, "RUN_TOO_DEEP", "历史归档嵌套层级过深。");
+  }
+  if (stringContainsCredential(value)) {
+    throw new ApiError(
+      400,
+      "RUN_CONTAINS_SECRET",
+      "历史归档包含敏感凭据或签名链接。",
+    );
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return;
+    seen.add(value);
+    value.forEach((item) => assertNoRunCredentials(item, depth + 1, seen));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (isSensitiveRunKey(key)) {
+      throw new ApiError(
+        400,
+        "RUN_CONTAINS_SECRET",
+        "历史归档包含敏感凭据或签名链接。",
+      );
+    }
+    assertNoRunCredentials(child, depth + 1, seen);
+  }
+}
+
+function assertNoXhsRawState(
+  value: unknown,
+  depth = 0,
+  seen = new WeakSet<object>(),
+) {
   if (depth > 64) {
     throw new ApiError(400, "RUN_TOO_DEEP", "历史归档嵌套层级过深。");
   }
   if (Array.isArray(value)) {
-    value.forEach((item) => assertNoPasswords(item, depth + 1));
+    if (seen.has(value)) return;
+    seen.add(value);
+    value.forEach((item) => assertNoXhsRawState(item, depth + 1, seen));
     return;
   }
   if (!value || typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (normalizedKey === "password" || normalizedKey === "masterpassword") {
+    if (isForbiddenXhsStateKey(key)) {
       throw new ApiError(
         400,
-        "RUN_CONTAINS_PASSWORD",
-        "历史归档不能包含密码字段。",
+        "RUN_CONTAINS_XHS_RAW_STATE",
+        "小红书快照包含不应上传的 raw/checkpoint 原始分页状态。",
       );
     }
-    assertNoPasswords(child, depth + 1);
+    assertNoXhsRawState(child, depth + 1, seen);
+  }
+}
+
+export function assertRunPayloadSafe(value: unknown) {
+  assertNoRunCredentials(value);
+  const snapshots = asRecord(asRecord(value).snapshots);
+  for (const key of XHS_SNAPSHOT_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(snapshots, key)) continue;
+    const snapshot = snapshots[key];
+    let serialized = "";
+    try {
+      serialized = JSON.stringify(snapshot);
+    } catch {
+      throw new ApiError(
+        400,
+        "XHS_SNAPSHOT_INVALID",
+        "小红书快照不是可存储的 JSON 数据。",
+      );
+    }
+    if (
+      !serialized ||
+      new TextEncoder().encode(serialized).byteLength >=
+        MAX_XHS_SNAPSHOT_BYTES
+    ) {
+      throw new ApiError(
+        413,
+        "XHS_SNAPSHOT_TOO_LARGE",
+        "小红书快照超过 8MB 安全限制。",
+      );
+    }
+    assertNoXhsRawState(snapshot);
   }
 }
 
@@ -70,7 +243,7 @@ export function validateRunId(value: unknown) {
 
 export function extractRunMetadata(runValue: unknown, metadataValue: unknown) {
   const run = requireObject(runValue, "run 必须是 JSON 对象。");
-  assertNoPasswords(run);
+  assertRunPayloadSafe(run);
   const metadata = asRecord(metadataValue);
   const account = asRecord(run.account);
   const runId = validateRunId(firstValue(metadata.runId, run.runId));

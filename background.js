@@ -3,13 +3,17 @@
 importScripts(
   'xhs/contract.js',
   'xhs/quality.js',
+  'xhs/bindings.js',
   'xhs/local-cache.js',
   'xhs/collector-core.js',
   'xhs/page-client.js',
   'xhs/adstar-collector.js',
   'xhs/pgy-collector.js',
   'xhs/juguang-accounts.js',
-  'xhs/juguang-collector.js'
+  'xhs/juguang-collector.js',
+  'xhs/analysis.js',
+  'xhs/metrics.js',
+  'xhs/runtime.js'
 );
 
 const TAG = '[光合分析]';
@@ -17,10 +21,17 @@ const xhsPageClient = XhsPageClient.createPageClient({
   sendMessage: (tabId, envelope) => chrome.tabs.sendMessage(tabId, envelope),
 });
 const xhsLocalCollectionCache = XhsLocalCache.createIndexedDbCache({});
-const xhsAdstarCollector = XhsAdstarCollector.createAdstarCollector({
+const xhsRuntime = XhsRuntime.createXhsRuntime({
+  chrome,
   pageClient: xhsPageClient,
   cache: xhsLocalCollectionCache,
+  collectors: {
+    adstar: (dependencies) => XhsAdstarCollector.createAdstarCollector(dependencies),
+    pgy: (dependencies) => XhsPgyCollector.createPgyCollector(dependencies),
+    juguang: (dependencies) => XhsJuguangCollector.createJuguangCollector(dependencies),
+  },
 });
+xhsRuntime.register();
 const SYCM_CONTENT_ANALYSIS_PATH = '/xsite/contentanalysis/overview_new_v2';
 const WXT_TRACE_STORAGE_KEY = 'wxtReportApiTraceV1';
 const WXT_TRACE_MAX_RECORDS = 120;
@@ -42,7 +53,10 @@ const ACCOUNT_VAULT_SESSION_KEY = 'taobaoAccountVaultSessionV1';
 const PROJECT_TASK_STATUS_KEY = 'taobaoProjectTaskStatusV1';
 const STORE_RUN_INDEX_KEY = 'taobaoStoreRunIndexV1';
 const STORE_RUN_KEY_PREFIX = 'taobaoStoreRunV1:';
+const XHS_STORE_BINDINGS_KEY = 'xhsStoreAccountBindingsV1';
 const PLATFORM_TASK_IDS = ['sycm', 'guanghe', 'wxt', 'dmp'];
+const XHS_PLATFORM_TASK_IDS = ['adstar', 'pgy', 'juguang'];
+const REPORT_PLATFORM_TASK_IDS = PLATFORM_TASK_IDS.concat(XHS_PLATFORM_TASK_IDS);
 const PLATFORM_RETRY_ATTEMPTS = 5;
 const wxtTraceTabs = new Map();
 let wxtTraceWriteQueue = Promise.resolve();
@@ -1858,6 +1872,40 @@ function normalizePlatformTaskIds(value) {
   return selected;
 }
 
+function normalizeProjectPlatformTaskIds(value) {
+  if (value === undefined || value === null) return PLATFORM_TASK_IDS.slice();
+  const selected = Array.from(new Set((Array.isArray(value) ? value : [])
+    .map((item) => String(item || '').trim())
+    .filter((item) => REPORT_PLATFORM_TASK_IDS.includes(item))));
+  if (!selected.length) throw new Error('请至少选择一个平台任务。');
+  return selected;
+}
+
+function isValidXhsCalendarDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1];
+}
+
+function normalizeXhsDateRange(value, required) {
+  const source = value && typeof value === 'object' ? value : {};
+  const from = String(source.from || '').trim();
+  const to = String(source.to || '').trim();
+  if (!required && !from && !to) return null;
+  if (!isValidXhsCalendarDate(from) || !isValidXhsCalendarDate(to) || from > to) {
+    throw new Error('请选择有效的小红书开始和结束日期。');
+  }
+  const duration = (Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / 86400000;
+  if (!Number.isFinite(duration) || duration > 366) throw new Error('小红书取数范围不能超过 367 天。');
+  return { from, to, timezone: 'Asia/Shanghai' };
+}
+
 function shouldRetryPlatformError(error) {
   if (error && error.retryable === false) return false;
   const message = String(error && error.message || error || '');
@@ -1870,7 +1918,7 @@ async function runPlatformStepWithRetry(step) {
   for (let attempt = 1; attempt <= PLATFORM_RETRY_ATTEMPTS; attempt += 1) {
     attempts = attempt;
     try {
-      return { detail: await step.run(), attempts };
+      return { detail: await step.run(attempt), attempts };
     } catch (error) {
       lastError = error;
       if (attempt >= PLATFORM_RETRY_ATTEMPTS || !shouldRetryPlatformError(error)) break;
@@ -3522,18 +3570,108 @@ function contentDiagnosisResultMessage(detail) {
   if (detail && Number.isFinite(Number(detail.targetCount))) {
     messages.push('光合匹配：' + Number(detail.matchedCount || 0) + '/' + Number(detail.targetCount));
   }
+  if (detail && Number.isFinite(Number(detail.noteCount))) {
+    messages.push('笔记：' + Number(detail.noteCount));
+  }
   if (detail && Number.isFinite(Number(detail.count))) {
     messages.push('人群：' + Number(detail.count) + '/4');
   }
   if (detail && Array.isArray(detail.warnings) && detail.warnings.length) {
-    messages.push('部分画像未返回');
+    const isXhsDetail = Array.isArray(detail.platforms) &&
+      detail.platforms.some((platform) => XHS_PLATFORM_TASK_IDS.includes(platform));
+    messages.push(isXhsDetail
+      ? '质量门禁：' + detail.warnings.length + ' 项需处理'
+      : '部分画像未返回');
   }
   if (detail && detail.warning) messages.push(String(detail.warning));
   return messages.join('；');
 }
 
+async function runXhsAnalysisTask(options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const platforms = normalizeProjectPlatformTaskIds(source.platforms)
+    .filter((platform) => XHS_PLATFORM_TASK_IDS.includes(platform));
+  if (!platforms.length) return { ok: true, skipped: true, partial: false };
+  const storeId = batchText(source.storeId || source.accountKey, 100);
+  if (!storeId) throw new Error('小红书取数缺少店铺归属标识。');
+  const dateRange = normalizeXhsDateRange(source.dateRange, true);
+  const runId = batchText(source.runId, 120) || ('xhs-' + Date.now().toString(36));
+  const collection = await xhsRuntime.run({
+    runId,
+    accountKey: storeId,
+    dateRange,
+    platforms,
+  });
+  const collections = collection && collection.platforms || {};
+  const generatedAt = new Date().toISOString();
+  const storedBindings = await chrome.storage.local.get(XHS_STORE_BINDINGS_KEY);
+  const bindingResult = XhsBindings.reconcileStoreBindings({
+    storeId,
+    selectedPlatforms: platforms,
+    collections,
+    registry: storedBindings && storedBindings[XHS_STORE_BINDINGS_KEY],
+    updatedAt: generatedAt,
+  });
+  const snapshot = XhsAnalysis.createXhsAnalysisSnapshot({
+    runId,
+    storeId,
+    dateRange,
+    selectedPlatforms: platforms,
+    accountBindings: bindingResult.bindings,
+    bindingIssues: bindingResult.issues,
+    generatedAt,
+    asOf: dateRange.to,
+    targetRoi: Number.isFinite(Number(source.targetRoi)) ? Number(source.targetRoi) : null,
+    collections,
+  });
+  XhsMetrics.assertSnapshotWithinLimit(snapshot);
+  const platformFailures = platforms.filter((platform) => ![
+    'complete', 'verified_no_spend',
+  ].includes(String(collections[platform] && collections[platform].status || 'failed')));
+  const allFailed = platforms.every((platform) => [
+    'failed', 'cancelled', 'missing',
+  ].includes(String(collections[platform] && collections[platform].status || 'missing')));
+  const bindingIssues = Array.isArray(bindingResult.issues) ? bindingResult.issues : [];
+  const blockingBindingIssues = bindingIssues.filter((issue) => {
+    const platform = String(issue && issue.platform || '');
+    const status = String(collections[platform] && collections[platform].status || 'missing');
+    return !(
+      issue && issue.code === 'account_identity_missing' &&
+      platforms.includes(platform) &&
+      ['failed', 'cancelled'].includes(status)
+    );
+  });
+  const bindingGatePassed = bindingResult.ready === true || (
+    bindingIssues.length > 0 && blockingBindingIssues.length === 0
+  );
+  const storedAnalysis = {};
+  if (bindingResult.changed) storedAnalysis[XHS_STORE_BINDINGS_KEY] = bindingResult.registry;
+  if (!allFailed && bindingGatePassed) storedAnalysis.xhsAnalysisSnapshotV1 = snapshot;
+  if (Object.keys(storedAnalysis).length) await chrome.storage.local.set(storedAnalysis);
+  const warnings = (snapshot.quality.issues || [])
+    .map((issue) => issue.message || issue.code)
+    .filter(Boolean);
+  return {
+    ok: !allFailed && bindingGatePassed,
+    code: allFailed ? 'XHS_COLLECTION_FAILED'
+      : (!bindingGatePassed ? 'XHS_ACCOUNT_BINDING_FAILED' : ''),
+    source: '淘宝星河、蒲公英、聚光三源联表',
+    noteCount: Array.isArray(snapshot.notes) ? snapshot.notes.length : 0,
+    partial: !allFailed && (
+      platformFailures.length > 0 || snapshot.quality.decisionReady !== true || !bindingGatePassed
+    ),
+    status: collection.status,
+    platforms,
+    warnings,
+    warning: allFailed ? '所选小红书平台均未成功返回。'
+      : (!bindingGatePassed ? '当前平台真实账号与所选店铺绑定校验未通过。' : ''),
+    snapshot: !allFailed && bindingGatePassed ? snapshot : null,
+  };
+}
+
 async function runContentDiagnosisReport(options) {
-  const selectedPlatforms = new Set(normalizePlatformTaskIds(options && options.platforms));
+  const selectedPlatforms = new Set(normalizeProjectPlatformTaskIds(options && options.platforms));
+  const selectedXhsPlatforms = XHS_PLATFORM_TASK_IDS.filter((platform) => selectedPlatforms.has(platform));
   const runId = 'taobao-report-' + Date.now().toString(36) + '-' +
     Math.random().toString(36).slice(2, 10);
   const startedAt = Date.now();
@@ -3548,6 +3686,7 @@ async function runContentDiagnosisReport(options) {
     wxtMarketing: null,
     wxtShortVideo: null,
     dmp: null,
+    xiaohongshu: null,
     results: [],
     platforms: Array.from(selectedPlatforms),
   };
@@ -3619,9 +3758,29 @@ async function runContentDiagnosisReport(options) {
         return detail;
       },
     },
+    {
+      key: 'xiaohongshu',
+      platform: 'xiaohongshu',
+      name: '小红书三平台全链路',
+      run: async (attempt) => {
+        const detail = await runXhsAnalysisTask({
+          runId: runId + '-xhs-attempt-' + attempt,
+          storeId: options && options.storeId,
+          dateRange: options && options.dateRange,
+          targetRoi: options && options.targetRoi,
+          platforms: selectedXhsPlatforms,
+        });
+        report.xiaohongshu = detail && detail.snapshot || null;
+        return detail;
+      },
+    },
   ];
 
-  steps.filter((step) => !selectedPlatforms.has(step.platform)).forEach((step) => {
+  const isStepSelected = (step) => step.key === 'xiaohongshu'
+    ? selectedXhsPlatforms.length > 0
+    : selectedPlatforms.has(step.platform);
+
+  steps.filter((step) => !isStepSelected(step)).forEach((step) => {
     resultsByKey.set(step.key, {
       key: step.key,
       name: step.name,
@@ -3635,6 +3794,7 @@ async function runContentDiagnosisReport(options) {
   if (selectedPlatforms.has('guanghe')) activeKeys.add('guanghe');
   if (selectedPlatforms.has('wxt')) activeKeys.add('wxtMarketing');
   if (selectedPlatforms.has('dmp')) activeKeys.add('dmp');
+  if (selectedXhsPlatforms.length) activeKeys.add('xiaohongshu');
   let reportWriteQueue = Promise.resolve();
   const orderedResults = () => steps
     .map((step) => resultsByKey.get(step.key))
@@ -3693,12 +3853,14 @@ async function runContentDiagnosisReport(options) {
       if (step.startDelayMs) await waitMilliseconds(step.startDelayMs);
       const execution = await runPlatformStepWithRetry(step);
       const detail = execution.detail;
+      const detailOk = !detail || detail.ok !== false;
       result = {
         key: step.key,
         name: step.name,
-        ok: true,
+        ok: detailOk,
+        code: detail && detail.code || '',
         partial: Boolean(detail && detail.partial),
-        message: (execution.attempts > 1 ? '第 ' + execution.attempts + ' 次尝试成功；' : '') +
+        message: (detailOk && execution.attempts > 1 ? '第 ' + execution.attempts + ' 次尝试成功；' : '') +
           contentDiagnosisResultMessage(detail),
       };
     } catch (error) {
@@ -3742,6 +3904,9 @@ async function runContentDiagnosisReport(options) {
   if (selectedPlatforms.has('dmp')) tasks.push(executeStep(steps.find((step) => step.key === 'dmp')));
   if (selectedPlatforms.has('wxt')) tasks.push(wxtPipeline());
   await Promise.all(tasks);
+  if (selectedXhsPlatforms.length) {
+    await executeStep(steps.find((step) => step.key === 'xiaohongshu'));
+  }
 
   const finishedAt = Date.now();
   const results = orderedResults();
@@ -4363,6 +4528,8 @@ const ACCOUNT_RUN_SNAPSHOT_KEYS = [
   'taobaoContentDiagnosisReportStatusV1',
   'taobaoContentDiagnosisReportV1',
   'taobaoContentDiagnosisWxtReportV1',
+  'xhsAnalysisSnapshotV1',
+  'xhsCollectionStatusV1',
 ];
 
 async function clearAccountRunSnapshots() {
@@ -4392,6 +4559,12 @@ async function archiveAccountRun(account, batchId, startedAt, loginResult, autoR
   const runId = 'store-run-' + finishedAt.toString(36) + '-' + Math.random().toString(36).slice(2, 9);
   const failures = resultFailures(autoResult).concat(resultFailures(reportResult));
   if (failureMessage) failures.push(String(failureMessage));
+  const reportFailed = Boolean(reportResult && reportResult.ok === false);
+  const collectFailed = Boolean(autoResult && autoResult.ok === false);
+  const taskFailed = Boolean(failureMessage) ||
+    (taskType === 'report' && reportFailed) ||
+    (taskType === 'collect' && collectFailed) ||
+    (taskType === 'both' && reportFailed && collectFailed);
   const snapshots = {};
   ACCOUNT_RUN_SNAPSHOT_KEYS.forEach((key) => {
     if (stored[key] !== undefined) snapshots[key] = stored[key];
@@ -4410,7 +4583,7 @@ async function archiveAccountRun(account, batchId, startedAt, loginResult, autoR
       state: loginResult && loginResult.state || '',
       noPermission: Boolean(loginResult && loginResult.noPermission),
     },
-    status: failureMessage ? 'failed' : (failures.length ? 'partial' : 'success'),
+    status: taskFailed ? 'failed' : (failures.length ? 'partial' : 'success'),
     failures,
     snapshots,
   };
@@ -4662,7 +4835,9 @@ async function runProjectTask(payload) {
   const storeId = batchText(storeSource.id, 100);
   const storeName = batchText(storeSource.name, 120);
   const taskType = 'report';
-  const platforms = normalizePlatformTaskIds(source.platforms);
+  const platforms = normalizeProjectPlatformTaskIds(source.platforms);
+  const hasXhs = platforms.some((platform) => XHS_PLATFORM_TASK_IDS.includes(platform));
+  const dateRange = normalizeXhsDateRange(source.dateRange, hasXhs);
   if (!storeId || !storeName) throw new Error('请先选择本次任务归属的店铺。');
   const startedAt = Date.now();
   const taskId = 'project-task-' + startedAt.toString(36) + '-' + Math.random().toString(36).slice(2, 9);
@@ -4671,6 +4846,7 @@ async function runProjectTask(payload) {
     taskId,
     taskType,
     platforms,
+    dateRange,
     runMode: 'current',
     storeId,
     storeName,
@@ -4689,7 +4865,12 @@ async function runProjectTask(payload) {
   let failureMessage = '';
   try {
     await saveProjectTaskStatus(Object.assign({}, baseStatus, { phase: '一键读取并生成项目结果' }));
-    reportResult = await ensureContentDiagnosisReportTask({ platforms }).promise;
+    reportResult = await ensureContentDiagnosisReportTask({
+      platforms,
+      dateRange,
+      storeId,
+      targetRoi: source.targetRoi,
+    }).promise;
   } catch (error) {
     failureMessage = error && error.message ? error.message : String(error);
   }
@@ -4721,7 +4902,7 @@ async function runProjectTask(payload) {
   await saveProjectTaskStatus(Object.assign({}, baseStatus, {
     running: false,
     finishedAt,
-    phase: failureMessage ? '任务失败' : '任务已完成',
+    phase: archive.status === 'failed' ? '任务失败' : '任务已完成',
     status: archive.status,
     archiveRunId: archive.runId,
     failureCount: archive.failureCount,
@@ -4733,7 +4914,9 @@ async function runProjectTask(payload) {
     taskId,
     runId: archive.runId,
     status: archive.status,
-    message: failureMessage || '一键取数结果已归档。',
+    message: failureMessage || (archive.status === 'failed'
+      ? '本次所选平台均未成功返回，请根据任务记录修复后重试。'
+      : '一键取数结果已归档。'),
   };
 }
 

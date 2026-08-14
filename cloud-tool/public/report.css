@@ -608,6 +608,52 @@
   text-align: center;
 }
 
+.xhs-report-body { padding: 18px 0; }
+
+.xhs-source-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0 18px 18px;
+}
+
+.xhs-source-card {
+  padding: 16px;
+  border: 1px solid #dfe4ea;
+  border-top: 3px solid #d13c5a;
+  background: #fff;
+}
+
+.xhs-source-card > span { color: #667085; font-size: 10px; font-weight: 750; letter-spacing: .08em; }
+.xhs-source-card h3 { margin: 4px 0 12px; font-size: 18px; }
+.xhs-source-card strong { color: #067647; }
+.xhs-source-card p,
+.xhs-source-card small { display: block; margin: 6px 0 0; color: #667085; font-size: 11px; }
+
+.xhs-quality-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px 20px;
+  margin: 0 18px 18px;
+  padding: 16px 18px;
+  border: 1px solid #dfe4ea;
+  background: #fff;
+}
+
+.xhs-quality-panel span { color: #667085; font-size: 10px; font-weight: 750; }
+.xhs-quality-panel h3 { margin: 3px 0 0; font-size: 18px; }
+.xhs-quality-panel > b { color: #243b72; font-size: 12px; }
+.xhs-quality-list { grid-column: 1 / -1; margin: 0; padding: 0; list-style: none; }
+.xhs-quality-list li { display: flex; gap: 10px; padding: 8px 0; border-top: 1px solid #edf0f3; }
+.xhs-quality-list li b { color: #b42318; font-size: 11px; }
+.xhs-quality-list li span,
+.xhs-quality-empty { color: #667085; font-size: 11px; }
+.xhs-quality-empty { grid-column: 1 / -1; margin: 0; }
+.xhs-kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 18px; }
+.xhs-table-heading { display: flex; align-items: center; justify-content: space-between; padding: 13px 15px; }
+.xhs-table-heading h3 { margin: 0; font-size: 15px; }
+.xhs-table-heading span { color: #667085; font-size: 11px; }
+
 @media (max-width: 1100px) {
   .report-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .report-shell { grid-template-columns: 1fr; }
@@ -621,6 +667,8 @@
   .diagnosis-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .diagnosis-kpis > div { border-bottom: 1px solid #dfe4ea; }
   .dmp-legend { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .xhs-source-grid { grid-template-columns: 1fr; }
+  .xhs-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 620px) {
@@ -642,4 +690,8 @@
   .dmp-report-body { padding: 12px; }
   .dmp-legend { grid-template-columns: 1fr; }
   .dmp-warning { align-items: flex-start; flex-direction: column; }
+  .xhs-source-grid,
+  .xhs-quality-panel { margin-right: 12px; margin-left: 12px; }
+  .xhs-quality-panel { grid-template-columns: 1fr; }
+  .xhs-kpis { grid-template-columns: 1fr; }
 }

@@ -45,6 +45,8 @@ async function verifyAutoCollectPartialPropagation() {
     },
     BUSINESS_DEFENSE_AUTO_STATUS_KEY: 'auto-status',
     PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp'],
+    XHS_PLATFORM_TASK_IDS: ['adstar', 'pgy', 'juguang'],
+    REPORT_PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp', 'adstar', 'pgy', 'juguang'],
     PLATFORM_RETRY_ATTEMPTS: 5,
     async runBusinessDefenseGuanghe() {
       throw new Error('unselected guanghe runner should not run');
@@ -108,6 +110,8 @@ async function verifyReportPartialPropagation() {
     CONTENT_DIAGNOSIS_REPORT_KEY: 'report-data',
     CONTENT_DIAGNOSIS_WXT_KEY: 'report-wxt',
     PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp'],
+    XHS_PLATFORM_TASK_IDS: ['adstar', 'pgy', 'juguang'],
+    REPORT_PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp', 'adstar', 'pgy', 'juguang'],
     PLATFORM_RETRY_ATTEMPTS: 5,
     contentDiagnosisResultMessage(detail) {
       return detail && detail.source || '';

@@ -95,7 +95,10 @@ vm.runInContext(
 );
 assert.deepEqual(
   Array.from(bridgeContext.manualKeys).sort(),
-  Array.from(manualMetrics, (metric) => metric.key).sort()
+  Array.from(new Set([
+    ...Array.from(manualMetrics, (metric) => metric.key),
+    'xhs_unreportedNoteCount',
+  ])).sort()
 );
 
 const collectDmpStart = dashboard.indexOf('function collectDmp');
@@ -110,7 +113,7 @@ assert.match(dashboard, /patchStoreRunManualInput/);
 assert.match(dashboard, /navigator\.locks\.request/);
 assert.match(bridge, /'storeRunManualInputs'/);
 assert.match(dashboard, /appendSheet\('淘天', '淘宝经营数据'\)/);
-assert.match(dashboard, /appendSheet\('小红书', '小红书手填数据'\)/);
+assert.match(dashboard, /appendSheet\('小红书', '小红书经营数据'\)/);
 assert.match(dashboard, /async function copyTable\(\)[\s\S]*await flushManualInputs\(\)/);
 assert.match(dashboard, /async function exportExcel\(\)[\s\S]*await flushManualInputs\(\)/);
 assert.match(bridge, /businessDefenseManualInputsV1:[\s\S]*manualInputs/);

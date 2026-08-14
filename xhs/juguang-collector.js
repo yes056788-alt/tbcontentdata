@@ -52,10 +52,42 @@
   }
 
   function numericMetric(value) {
-    if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+    if (typeof value === 'number') return value;
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'string' && value.trim() === '') return value;
     const normalized = String(value == null ? '' : value).replace(/[,￥¥%]/g, '').trim();
     const number = Number(normalized);
     return Number.isFinite(number) ? number : value;
+  }
+
+  function reportSchemaError(message) {
+    const error = new Error(message);
+    error.schemaInvalid = true;
+    return error;
+  }
+
+  function unsupportedColumnNames(value) {
+    const names = (Array.isArray(value) ? value : []).map((item) => {
+      if (typeof item === 'string') return item.trim();
+      if (!isObject(item)) return '';
+      return String(
+        item.column || item.columnName || item.name || item.field || item.key || ''
+      ).trim();
+    }).filter(Boolean);
+    return Array.from(new Set(names));
+  }
+
+  function assertFeeSupported(dataset, columns) {
+    if (!unsupportedColumnNames(columns).some((column) => column.toLowerCase() === 'fee')) return;
+    throw reportSchemaError(`Juguang ${dataset} response marks required fee as unsupported.`);
+  }
+
+  function recordUnsupportedColumns(output, dataset, columns) {
+    const names = unsupportedColumnNames(columns);
+    assertFeeSupported(dataset, names);
+    if (names.length === 0) return false;
+    output.warnings.push({ code: 'unsupported_columns', dataset, columns: names });
+    return true;
   }
 
   function parseMetricObject(value) {
@@ -119,24 +151,35 @@
       hasNext,
       nextPage: hasNext ? currentPage + 1 : null,
       totalData: normalizeReportTotal(data),
-      unsupportedColumns: Array.isArray(data.unsupportedColumns)
-        ? contract.sanitizeSensitiveData(data.unsupportedColumns)
-        : [],
+      unsupportedColumns: unsupportedColumnNames(data.unsupportedColumns),
     };
   }
 
-  function spendOf(value) {
-    const number = Number(value);
-    return Number.isFinite(number) ? number : 0;
+  function spendOf(value, field) {
+    const missing = value === null || value === undefined ||
+      (typeof value === 'string' && value.trim() === '');
+    const number = missing ? NaN : Number(value);
+    if (!Number.isFinite(number) || number < 0) {
+      throw reportSchemaError(
+        `Juguang response ${field || 'fee'} must be a finite non-negative fee.`
+      );
+    }
+    return number;
   }
 
   function reconcileJuguangSpend(input) {
     const source = isObject(input) ? input : {};
-    const accountSpend = spendOf(source.accountSpend);
+    const accountSpend = spendOf(source.accountSpend, 'account fee');
     const summarySpend = (Array.isArray(source.summaryRows) ? source.summaryRows : [])
-      .reduce((sum, row) => sum + spendOf(row && row.metrics && row.metrics.fee), 0);
+      .reduce((sum, row, index) => sum + spendOf(
+        row && row.metrics && row.metrics.fee,
+        `summaryRows[${index}].metrics.fee`
+      ), 0);
     const dailySpend = (Array.isArray(source.dailyRows) ? source.dailyRows : [])
-      .reduce((sum, row) => sum + spendOf(row && row.metrics && row.metrics.fee), 0);
+      .reduce((sum, row, index) => sum + spendOf(
+        row && row.metrics && row.metrics.fee,
+        `dailyRows[${index}].metrics.fee`
+      ), 0);
     const tolerance = Math.max(0.01, Math.abs(accountSpend) * 0.01);
     const issues = [];
     if (Math.abs(summarySpend - accountSpend) > tolerance) {
@@ -193,7 +236,28 @@
       return accountTools.normalizeListedAccount(await request(context.tabId, 'accounts.current', {}));
     }
 
+    async function returnToMainAccount(context, current) {
+      if (typeof settings.returnToMainAccount !== 'function') {
+        throw new Error('Juguang child account discovery requires the return-to-main workflow.');
+      }
+      await settings.returnToMainAccount({
+        tabId: context.tabId,
+        current: accountTools.normalizeListedAccount(current),
+        reportPath: '/aurora/ad/datareports-basic/note',
+      });
+      const actual = await currentAccount(context);
+      if (Number(actual.accountType) !== 4) {
+        throw new Error(`Juguang main account identity mismatch: expected accountType 4, got ${actual.accountType}`);
+      }
+      return actual;
+    }
+
     async function switchAccount(context, target) {
+      if (Number(target && target.accountType) === 4 && typeof settings.returnToMainAccount === 'function') {
+        const current = await currentAccount(context);
+        const actual = await returnToMainAccount(context, current);
+        return accountTools.verifyAccount(actual, target);
+      }
       if (typeof settings.switchAccount === 'function') {
         await settings.switchAccount({ tabId: context.tabId, target, reportPath: '/aurora/ad/datareports-basic/note' });
       } else {
@@ -209,6 +273,9 @@
     }
 
     async function discoverAccounts(context, initial) {
+      if (Number(initial && initial.accountType) !== 4) {
+        await returnToMainAccount(context, initial);
+      }
       const discovered = [];
       for (const shadowAccount of [false, true]) {
         let pageIndex = 1;
@@ -225,11 +292,21 @@
           pageIndex += 1;
         }
       }
+
+      const normalizedInitial = accountTools.normalizeListedAccount(initial);
+      const canonicalInitial = discovered.find((account) => (
+        normalizedInitial.vSellerId && String(account.vSellerId || '') === String(normalizedInitial.vSellerId)
+      )) || discovered.find((account) => (
+        Number(account.advertiserId) === Number(normalizedInitial.advertiserId) &&
+        Number(account.accountType) === Number(normalizedInitial.accountType)
+      )) || normalizedInitial;
       const byKey = new Map();
-      for (const account of [initial, ...discovered]) {
+      for (const account of discovered) {
         byKey.set(accountTools.accountKey(account), account);
       }
-      return Array.from(byKey.values());
+      const canonicalKey = accountTools.accountKey(canonicalInitial);
+      if (!byKey.has(canonicalKey)) byKey.set(canonicalKey, canonicalInitial);
+      return { initialAccount: canonicalInitial, targets: Array.from(byKey.values()) };
     }
 
     function reportBody(context, overrides) {
@@ -278,13 +355,23 @@
           })),
           parsePage(response, page) {
             const parsed = parseJuguangPage(response, page);
+            assertFeeSupported(dataset, parsed.unsupportedColumns);
+            spendOf(parsed.totalData.metrics.fee, `${dataset} totalData.metrics.fee`);
+            const items = parsed.items.map(normalizeReportRow);
+            items.forEach((item, index) => spendOf(
+              item && item.metrics && item.metrics.fee,
+              `${dataset} dataList[${index}].metrics.fee`
+            ));
             lastTotal = parsed.totalData;
-            unsupportedColumns = parsed.unsupportedColumns;
-            return Object.assign({}, parsed, { items: parsed.items.map(normalizeReportRow) });
+            unsupportedColumns = unsupportedColumnNames(
+              unsupportedColumns.concat(parsed.unsupportedColumns)
+            );
+            return Object.assign({}, parsed, { items });
           },
         });
       } catch (error) {
         paginationError = error;
+        if (error && error.schemaInvalid) throw error;
         const record = await settings.cache.read(cacheKey);
         if (!record || Number(record.receivedCount) === 0) throw error;
         await settings.cache.update(cacheKey, {
@@ -322,6 +409,7 @@
         warnings: [],
         errors: [],
       };
+      let hasUnsupportedColumns = false;
       try {
         await switchAccount(context, account);
       } catch (error) {
@@ -338,9 +426,12 @@
         }));
         const parsed = parseJuguangPage(response, 1);
         output.accountSummary = parsed.totalData;
-        const accountSpend = spendOf(parsed.totalData.metrics.fee);
+        hasUnsupportedColumns = recordUnsupportedColumns(
+          output, 'account', parsed.unsupportedColumns
+        ) || hasUnsupportedColumns;
+        const accountSpend = spendOf(parsed.totalData.metrics.fee, 'account totalData.metrics.fee');
         if (accountSpend <= 0) {
-          output.status = 'verified_no_spend';
+          output.status = hasUnsupportedColumns ? 'partial' : 'verified_no_spend';
           output.reconciliation = {
             reconciled: true, accountSpend: 0, summarySpend: 0, dailySpend: 0, issues: [],
           };
@@ -353,6 +444,9 @@
         });
         output.summaryRows = summary.result.items;
         output.checkpoints.summary = summary.result;
+        hasUnsupportedColumns = recordUnsupportedColumns(
+          output, 'summary', summary.unsupportedColumns
+        ) || hasUnsupportedColumns;
         if (summary.paginationError) {
           output.errors.push(errorRecord(summary.paginationError, { code: 'pagination_incomplete', dataset: 'summary' }));
         }
@@ -363,12 +457,15 @@
         });
         output.dailyRows = daily.result.items;
         output.checkpoints.daily = daily.result;
+        hasUnsupportedColumns = recordUnsupportedColumns(
+          output, 'daily', daily.unsupportedColumns
+        ) || hasUnsupportedColumns;
         if (daily.paginationError) {
           output.errors.push(errorRecord(daily.paginationError, { code: 'pagination_incomplete', dataset: 'daily' }));
         }
 
         output.truncated = Boolean(summary.result.truncated || daily.result.truncated);
-        output.warnings = (summary.result.warnings || []).concat(daily.result.warnings || []);
+        output.warnings.push(...(summary.result.warnings || []), ...(daily.result.warnings || []));
         output.reconciliation = reconcileJuguangSpend({
           accountSpend,
           summaryRows: output.summaryRows,
@@ -376,7 +473,7 @@
         });
         output.warnings.push(...output.reconciliation.issues);
         output.status = summary.result.status === 'complete' && daily.result.status === 'complete' &&
-          output.reconciliation.reconciled && output.errors.length === 0
+          output.reconciliation.reconciled && output.errors.length === 0 && !hasUnsupportedColumns
           ? 'complete'
           : 'partial';
       } catch (error) {
@@ -409,7 +506,9 @@
       let targets = [];
       try {
         initialAccount = await currentAccount(context);
-        targets = await discoverAccounts(context, initialAccount);
+        const discovery = await discoverAccounts(context, initialAccount);
+        initialAccount = discovery.initialAccount;
+        targets = discovery.targets;
         for (const account of targets) accounts.push(await collectAccount(context, account));
       } catch (error) {
         errors.push(errorRecord(error, { code: 'account_discovery_failed' }));
@@ -435,7 +534,8 @@
       const accountErrors = accounts.flatMap((account) => (account.errors || []).map((error) => (
         Object.assign({ accountId: accountTools.accountKey(account.account) }, error)
       )));
-      const status = errors.length === 0 && accountErrors.length === 0 && failedUnits.length === 0 && !truncated
+      const status = targets.length > 0 && accounts.length === targets.length &&
+        errors.length === 0 && accountErrors.length === 0 && failedUnits.length === 0 && !truncated
         ? 'complete'
         : targets.length || accounts.length ? 'partial' : 'failed';
       return {
