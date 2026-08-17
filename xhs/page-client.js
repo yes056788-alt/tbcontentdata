@@ -5,7 +5,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createXhsPageClientApi() {
   'use strict';
 
-  const CHANNEL = 'xhs-page-bridge-v1';
+  const CHANNEL = 'xhs-page-bridge-v2';
   const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
   const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
   const MAX_PAYLOAD_BYTES = 64 * 1024;

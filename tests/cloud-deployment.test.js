@@ -12,7 +12,7 @@ const origins = [
 ];
 const retiredHostedOrigin = ['https://taobao-business-team', 'sunset-camel-1085', 'chatgpt', 'site'].join('.');
 
-assert.equal(manifest.version, '2.37.5');
+assert.equal(manifest.version, '2.37.6');
 const bridgeScript = manifest.content_scripts.find((item) =>
   Array.isArray(item.js) && item.js.includes('web-tool-bridge.js')
 );

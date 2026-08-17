@@ -17,7 +17,7 @@ const pageHookSource = fs.readFileSync(pageHookPath, 'utf8');
 const platformContentSource = fs.readFileSync(path.join(root, 'xhs-platform-content.js'), 'utf8');
 const pageClient = require('../xhs/page-client');
 
-const CHANNEL = 'xhs-page-bridge-v1';
+const CHANNEL = 'xhs-page-bridge-v2';
 const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
 const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
 const JUGUANG_ORIGIN = 'https://ad.xiaohongshu.com';

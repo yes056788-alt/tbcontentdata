@@ -1918,7 +1918,13 @@ async function runPlatformStepWithRetry(step) {
   for (let attempt = 1; attempt <= PLATFORM_RETRY_ATTEMPTS; attempt += 1) {
     attempts = attempt;
     try {
-      return { detail: await step.run(attempt), attempts };
+      const detail = await step.run(attempt);
+      const retryReturnedFailure = Boolean(detail && detail.ok === false &&
+        detail.code === 'XHS_COLLECTION_FAILED' && detail.retryable !== false);
+      if (!retryReturnedFailure || attempt >= PLATFORM_RETRY_ATTEMPTS) {
+        return { detail, attempts };
+      }
+      await waitMilliseconds(Math.min(5000, 1200 + attempt * 650));
     } catch (error) {
       lastError = error;
       if (attempt >= PLATFORM_RETRY_ATTEMPTS || !shouldRetryPlatformError(error)) break;
@@ -3587,6 +3593,38 @@ function contentDiagnosisResultMessage(detail) {
   return messages.join('；');
 }
 
+const XHS_TERMINAL_COLLECTION_ERROR_CODES = new Set([
+  'XHS_PLATFORM_TAB_MISSING',
+  'XHS_PLATFORM_TAB_AMBIGUOUS',
+  'XHS_COLLECTOR_UNAVAILABLE',
+  'ADSTAR_TOKEN_MISSING',
+  'PGY_IDENTITY_UNAVAILABLE',
+  'identity_unavailable',
+  'summary_invalid',
+  'schema_invalid',
+  'report_schema_invalid',
+  'account_identity_mismatch',
+]);
+
+function xhsCollectionFailureRetryable(collections, platforms) {
+  const source = collections && typeof collections === 'object' ? collections : {};
+  const requested = Array.isArray(platforms) ? platforms : [];
+  if (!requested.length) return false;
+  return requested.every((platform) => {
+    const state = source[platform] && typeof source[platform] === 'object'
+      ? source[platform]
+      : {};
+    if (String(state.status || 'missing') !== 'failed') return false;
+    const errors = Array.isArray(state.errors) ? state.errors : [];
+    if (!errors.length) return false;
+    return errors.every((record) => {
+      const error = record && typeof record === 'object' ? record : {};
+      return error.retryable !== false &&
+        !XHS_TERMINAL_COLLECTION_ERROR_CODES.has(String(error.code || ''));
+    });
+  });
+}
+
 async function runXhsAnalysisTask(options) {
   const source = options && typeof options === 'object' ? options : {};
   const platforms = normalizeProjectPlatformTaskIds(source.platforms)
@@ -3655,6 +3693,7 @@ async function runXhsAnalysisTask(options) {
     ok: !allFailed && bindingGatePassed,
     code: allFailed ? 'XHS_COLLECTION_FAILED'
       : (!bindingGatePassed ? 'XHS_ACCOUNT_BINDING_FAILED' : ''),
+    retryable: allFailed && xhsCollectionFailureRetryable(collections, platforms),
     source: '淘宝星河、蒲公英、聚光三源联表',
     noteCount: Array.isArray(snapshot.notes) ? snapshot.notes.length : 0,
     partial: !allFailed && (

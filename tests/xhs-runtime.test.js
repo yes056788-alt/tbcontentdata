@@ -758,8 +758,10 @@ test('runtime injects a fixed DOM return-to-main workflow and verifies Juguang a
 
   assert.equal(result.status, 'complete');
   assert.equal(dependencyType, 'function');
-  assert.ok(chrome.fixture.scriptExecutions.length >= 1);
-  assert.ok(chrome.fixture.scriptExecutions.every((execution) => (
+  const returnToMainExecutions = chrome.fixture.scriptExecutions
+    .filter((execution) => execution.hasFixedFunction);
+  assert.equal(returnToMainExecutions.length, 1);
+  assert.ok(returnToMainExecutions.every((execution) => (
     execution.target.tabId === 13 && execution.target.allFrames !== true && execution.hasFixedFunction
   )), 'the fixed DOM workflow must stay in the target tab top frame');
   assert.ok(pageClientCalls.length >= 1, 'accountType 4 must be verified after the DOM action');
@@ -808,5 +810,8 @@ test('runtime retries a stale child identity after returning to the Juguang main
   assert.equal(result.platforms.juguang.status, 'complete');
   assert.equal(currentAttempts, 2);
   assert.equal(waitCalls, 1);
-  assert.equal(chrome.fixture.scriptExecutions.length, 1);
+  assert.equal(
+    chrome.fixture.scriptExecutions.filter((execution) => execution.hasFixedFunction).length,
+    1,
+  );
 });

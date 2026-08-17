@@ -15,7 +15,7 @@ const syncSource = fs.readFileSync(
 const pageHookPath = path.join(root, 'adstar-page-hook.js');
 const pageHookSource = fs.readFileSync(pageHookPath, 'utf8');
 
-const CHANNEL = 'xhs-page-bridge-v1';
+const CHANNEL = 'xhs-page-bridge-v2';
 const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
 const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
 const ADSTAR_ORIGIN = 'https://adstar.alimama.com';

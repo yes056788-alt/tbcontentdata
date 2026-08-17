@@ -16,10 +16,17 @@
   const PLATFORM_ORDER = Object.freeze(['adstar', 'pgy', 'juguang']);
   const READY_STATUSES = new Set(['complete', 'verified_no_spend']);
   const PLATFORM_CONFIG = Object.freeze({
-    adstar: Object.freeze({ origin: 'https://adstar.alimama.com', name: '淘宝星河' }),
-    pgy: Object.freeze({ origin: 'https://pgy.xiaohongshu.com', name: '蒲公英' }),
-    juguang: Object.freeze({ origin: 'https://ad.xiaohongshu.com', name: '聚光' }),
+    adstar: Object.freeze({
+      origin: 'https://adstar.alimama.com', name: '淘宝星河', hookFile: 'adstar-page-hook.js',
+    }),
+    pgy: Object.freeze({
+      origin: 'https://pgy.xiaohongshu.com', name: '蒲公英', hookFile: 'pgy-page-hook.js',
+    }),
+    juguang: Object.freeze({
+      origin: 'https://ad.xiaohongshu.com', name: '聚光', hookFile: 'juguang-page-hook.js',
+    }),
   });
+  const PLATFORM_CONTENT_FILE = 'xhs-platform-content.js';
   const REPORT_SENDERS = new Set([
     'https://tbdata.aizicheng.com/report.html',
     'http://localhost:3400/report.html',
@@ -295,6 +302,37 @@
       await chromeApi.storage.local.set({ [STATUS_KEY]: compactValue(value) });
     }
 
+    async function recoverPlatformBridge(tabId, platform) {
+      const config = PLATFORM_CONFIG[platform];
+      if (!config || !config.hookFile || !chromeApi.scripting ||
+          typeof chromeApi.scripting.executeScript !== 'function') {
+        const unavailable = new Error(`${config && config.name || platform}页面桥接自动恢复不可用。`);
+        unavailable.code = 'XHS_PAGE_BRIDGE_RECOVERY_FAILED';
+        unavailable.retryable = false;
+        throw unavailable;
+      }
+      try {
+        await chromeApi.scripting.executeScript({
+          target: { tabId: Number(tabId), frameIds: [0] },
+          world: 'MAIN',
+          files: [config.hookFile],
+        });
+        await chromeApi.scripting.executeScript({
+          target: { tabId: Number(tabId), frameIds: [0] },
+          world: 'ISOLATED',
+          files: [PLATFORM_CONTENT_FILE],
+        });
+      } catch (error) {
+        const recoveryError = new Error(
+          `${config.name}页面桥接自动恢复失败，请刷新该平台页面后重试：` +
+          String(error && error.message || error || '脚本注入失败')
+        );
+        recoveryError.code = 'XHS_PAGE_BRIDGE_RECOVERY_FAILED';
+        recoveryError.retryable = true;
+        throw recoveryError;
+      }
+    }
+
     async function executeRun(input) {
       const source = isObject(input) ? input : {};
       const runId = String(source.runId || createRunId()).trim();
@@ -358,6 +396,7 @@
             }, platform);
           } else {
             try {
+              await recoverPlatformBridge(Number(tab.id), platform);
               const result = await collectorInstances[platform].collect({
                 tabId: Number(tab.id), runId, accountKey, dateRange,
                 pageSize: source.pageSize,
@@ -379,7 +418,9 @@
                 paginationComplete: false,
                 reconciled: false,
                 warnings: [],
-                errors: [errorRecord(error, 'XHS_COLLECTION_FAILED')],
+                errors: [errorRecord(error, error && error.code || 'XHS_COLLECTION_FAILED', {
+                  retryable: error && error.retryable !== false,
+                })],
               }, platform);
             }
           }

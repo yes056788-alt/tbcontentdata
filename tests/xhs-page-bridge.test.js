@@ -8,7 +8,7 @@ const root = path.join(__dirname, '..');
 const pageClientPath = path.join(root, 'xhs', 'page-client.js');
 const platformContentPath = path.join(root, 'xhs-platform-content.js');
 
-const EXPECTED_CHANNEL = 'xhs-page-bridge-v1';
+const EXPECTED_CHANNEL = 'xhs-page-bridge-v2';
 const EXPECTED_REQUEST_TYPE = 'XHS_PAGE_REQUEST';
 const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
 const PLATFORM_CASES = [

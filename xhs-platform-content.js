@@ -3,7 +3,7 @@
 
   if (self !== top) return;
 
-  const CHANNEL = 'xhs-page-bridge-v1';
+  const CHANNEL = 'xhs-page-bridge-v2';
   const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
   const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
   const MAX_PAYLOAD_BYTES = 64 * 1024;
@@ -23,6 +23,9 @@
   });
   const platform = PLATFORM_BY_ORIGIN[location.origin];
   if (!platform) return;
+  const INSTALL_FLAG = '__taobaoDataAssistantXhsPlatformContentV2';
+  if (window[INSTALL_FLAG]) return;
+  Object.defineProperty(window, INSTALL_FLAG, { value: true });
 
   const pending = new Map();
 

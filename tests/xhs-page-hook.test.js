@@ -5,7 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
-const CHANNEL = 'xhs-page-bridge-v1';
+const CHANNEL = 'xhs-page-bridge-v2';
 const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
 const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
 

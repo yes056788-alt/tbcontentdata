@@ -784,20 +784,60 @@
     }[String(value || '')] || '未采集';
   }
 
-  function buildXhsMarkup() {
-    const analysis = xhsAnalysis && typeof xhsAnalysis === 'object' ? xhsAnalysis : {};
-    const management = analysis.management && typeof analysis.management === 'object'
-      ? analysis.management : {};
-    const costs = management.costs && typeof management.costs === 'object' ? management.costs : {};
-    const taskResult = management.starTaskResult && typeof management.starTaskResult === 'object'
-      ? management.starTaskResult : {};
-    const outsideResult = management.outsideDirectResult && typeof management.outsideDirectResult === 'object'
-      ? management.outsideDirectResult : {};
-    const quality = analysis.quality && typeof analysis.quality === 'object'
-      ? analysis.quality : { decisionReady: false, issues: [] };
+  function redactXhsDiagnosticText(value) {
+    let text = String(value == null ? '' : value).trim();
+    if (!text) return '';
+    text = text
+      .replace(
+        /(^|[^A-Za-z0-9_.-])(?:raw(?:body|data)?|headers?|request(?:url|uri)|url)\s*[:=]\s*(?:\{[^}]*\}|\[[^\]]*\]|"[^"]*"|'[^']*'|[^,;，；)>\]}]+)/gi,
+        (_match, prefix) => prefix + '[敏感详情已隐藏]',
+      )
+      .replace(
+        /(^|[^A-Za-z0-9_.-])(?:authorization\s*[:=]\s*)?bearer\s+[^\s,;，；)>\]}]+/gi,
+        (_match, prefix) => prefix + '[凭据已隐藏]',
+      )
+      .replace(
+        /(^|[^A-Za-z0-9_.-])(?:[A-Za-z0-9_.-]*(?:token|cookie|authorization|signature|password|passwd|credential)[A-Za-z0-9_.-]*|[A-Za-z0-9_.-]*secret(?:key|value)?|[A-Za-z0-9_.-]*sessionid|x-?sign|x-?s|sign|csrf[A-Za-z0-9_.-]*|set-?cookie|api[-_]?key)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;，；)>\]}]+)/gi,
+        (_match, prefix) => prefix + '[凭据已隐藏]',
+      )
+      .replace(/https?:\/\/[^\s<>"'，；。！？、）】}]+/gi, '[请求地址已隐藏]');
+    return text.length > 260 ? text.slice(0, 259) + '…' : text;
+  }
+
+  function xhsDiagnosticRecords(state) {
+    if (!state || !['failed', 'partial'].includes(String(state.status || ''))) return [];
+    const records = [];
+    for (const [kind, fallbackCode, values] of [
+      ['error', 'unknown_error', state.errors],
+      ['warning', 'warning', state.warnings],
+    ]) {
+      (Array.isArray(values) ? values : []).forEach((record) => {
+        const item = record && typeof record === 'object' ? record : { message: record };
+        const rawCode = String(item.code || fallbackCode).trim();
+        const normalizedCode = redactXhsDiagnosticText(rawCode)
+          .replace(/[^A-Za-z0-9_.:-]+/g, '_').slice(0, 80);
+        const code = /[A-Za-z0-9]/.test(normalizedCode) ? normalizedCode : fallbackCode;
+        const message = redactXhsDiagnosticText(item.message) || '未提供技术说明';
+        records.push({ kind, code, message });
+      });
+    }
+    return records;
+  }
+
+  function buildXhsDiagnosticMarkup(state) {
+    const records = xhsDiagnosticRecords(state);
+    if (!records.length) return '';
+    return '<details class="xhs-source-diagnostics"><summary>技术详情（' + records.length + '）</summary><ul>' +
+      records.map((record) => '<li data-xhs-diagnostic-kind="' + record.kind + '"><code>' +
+        escapeHtml(record.code) + '</code><span>' + escapeHtml(record.message) + '</span></li>').join('') +
+      '</ul></details>';
+  }
+
+  function buildXhsSourceCardsMarkup(analysis) {
+    const snapshot = analysis && typeof analysis === 'object' ? analysis : {};
     const platformStates = xhsStatus && xhsStatus.platforms && typeof xhsStatus.platforms === 'object'
       ? xhsStatus.platforms : {};
-    const accountMeta = analysis.accounts && typeof analysis.accounts === 'object' ? analysis.accounts : {};
+    const accountMeta = snapshot.accounts && typeof snapshot.accounts === 'object' ? snapshot.accounts : {};
     const sourceCards = XHS_PLATFORMS.map((platform) => {
       const state = platformStates[platform.key] && typeof platformStates[platform.key] === 'object'
         ? platformStates[platform.key] : {};
@@ -809,8 +849,24 @@
         escapeHtml(platform.key.toUpperCase()) + '</span><h3>' + escapeHtml(platform.name) + '</h3><strong>' +
         escapeHtml(xhsStatusLabel(state.status)) + '</strong><p>来源时间 / 采集时间：' +
         escapeHtml(formatXhsTime(collectedAt)) + '</p><small>' +
-        escapeHtml(accountKeys.length ? accountKeys.join('、') : '账号待识别') + '</small></article>';
+        escapeHtml(accountKeys.length ? accountKeys.join('、') : '账号待识别') + '</small>' +
+        buildXhsDiagnosticMarkup(state) + '</article>';
     }).join('');
+    return '<section class="xhs-source-grid">' + sourceCards + '</section>';
+  }
+
+  function buildXhsMarkup() {
+    const analysis = xhsAnalysis && typeof xhsAnalysis === 'object' ? xhsAnalysis : {};
+    const management = analysis.management && typeof analysis.management === 'object'
+      ? analysis.management : {};
+    const costs = management.costs && typeof management.costs === 'object' ? management.costs : {};
+    const taskResult = management.starTaskResult && typeof management.starTaskResult === 'object'
+      ? management.starTaskResult : {};
+    const outsideResult = management.outsideDirectResult && typeof management.outsideDirectResult === 'object'
+      ? management.outsideDirectResult : {};
+    const quality = analysis.quality && typeof analysis.quality === 'object'
+      ? analysis.quality : { decisionReady: false, issues: [] };
+    const sourceCards = buildXhsSourceCardsMarkup(analysis);
     const metrics = taskResult.metrics && typeof taskResult.metrics === 'object' ? taskResult.metrics : {};
     const kpis = [
       ['总投入', formatMoney(costs.total)],
@@ -861,8 +917,8 @@
         formatMoney(results.starTaskGmv) + '</td><td>' + formatDecimal(results.starTaskRoi, 2) + '</td><td>' +
         escapeHtml(action && action.action || 'observe') + '</td></tr>';
     }).join('') : '<tr><td colspan="6">当前日期范围暂无可联表笔记</td></tr>';
-    return '<div class="xhs-report-body"><section class="xhs-source-grid">' + sourceCards +
-      '</section><section class="xhs-quality-panel"><div><span>数据质量</span><h3>' +
+    return '<div class="xhs-report-body">' + sourceCards +
+      '<section class="xhs-quality-panel"><div><span>数据质量</span><h3>' +
       (quality.decisionReady ? '可用于经营决策' : '需补数后再决策') + '</h3></div><b>' +
       (quality.decisionReady ? 'decisionReady = true' : 'decisionReady = false') + '</b>' + issueMarkup +
       '</section><section class="diagnosis-kpis xhs-kpis">' + kpis +
@@ -884,7 +940,7 @@
     const error = sectionError('xiaohongshu');
     if (!xhsAnalysis && error) {
       const partial = xhsStatus && xhsStatus.status === 'partial';
-      target.innerHTML = '<div class="section-error"><strong>' +
+      target.innerHTML = buildXhsSourceCardsMarkup(null) + '<div class="section-error"><strong>' +
         (partial ? '小红书全链路取数不完整' : '小红书全链路取数失败') +
         '</strong><p>' + escapeHtml(error) + '</p></div>';
       return;

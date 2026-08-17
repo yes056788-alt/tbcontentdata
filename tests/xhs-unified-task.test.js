@@ -23,7 +23,7 @@ const platformHelpers = block(
 );
 const runXhsSource = block(
   backgroundSource,
-  'async function runXhsAnalysisTask',
+  'const XHS_TERMINAL_COLLECTION_ERROR_CODES',
   '\nasync function runContentDiagnosisReport'
 );
 const reportSource = block(
@@ -208,6 +208,71 @@ test('runXhsAnalysisTask returns ok false when every requested source failed or 
   });
 
   assert.equal(result.ok, false, 'all failed/cancelled XHS work must fail the top-level step');
+});
+
+test('runXhsAnalysisTask marks terminal platform failures as non-retryable', async (t) => {
+  for (const testCase of [
+    { platform: 'adstar', error: { code: 'XHS_PLATFORM_TAB_MISSING' } },
+    { platform: 'adstar', error: { code: 'XHS_PLATFORM_TAB_AMBIGUOUS' } },
+    { platform: 'adstar', error: { code: 'XHS_COLLECTOR_UNAVAILABLE' } },
+    { platform: 'pgy', error: { code: 'identity_unavailable' } },
+    { platform: 'pgy', error: { code: 'summary_invalid' } },
+    { platform: 'pgy', error: { code: 'schema_invalid' } },
+    { platform: 'juguang', error: { code: 'report_schema_invalid' } },
+    { platform: 'juguang', error: { code: 'account_identity_mismatch' } },
+    { platform: 'adstar', error: { code: 'fictional-explicit-terminal', retryable: false } },
+  ]) {
+    await t.test(testCase.error.code, async () => {
+      const harness = createRunXhsHarness({
+        collectionStatus: 'failed',
+        collections: {
+          [testCase.platform]: { status: 'failed', errors: [testCase.error] },
+        },
+      });
+
+      const result = await harness.run({
+        runId: `fictional-xhs-terminal-${testCase.error.code}`,
+        storeId: 'fictional-store-terminal',
+        platforms: [testCase.platform],
+        dateRange: { from: '2030-01-01', to: '2030-01-31', timezone: 'Asia/Shanghai' },
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.code, 'XHS_COLLECTION_FAILED');
+      assert.equal(result.retryable, false);
+    });
+  }
+});
+
+test('runXhsAnalysisTask keeps a purely transient all-failed collection retryable', async () => {
+  const harness = createRunXhsHarness({
+    collectionStatus: 'failed',
+    collections: {
+      adstar: {
+        status: 'failed',
+        errors: [{ code: 'ADSTAR_NETWORK_ERROR', retryable: true }],
+      },
+      pgy: {
+        status: 'failed',
+        errors: [{ code: 'PGY_TIMEOUT', retryable: true }],
+      },
+      juguang: {
+        status: 'failed',
+        errors: [{ code: 'JUGUANG_NETWORK_ERROR', retryable: true }],
+      },
+    },
+  });
+
+  const result = await harness.run({
+    runId: 'fictional-xhs-transient-all-failed',
+    storeId: 'fictional-store-transient',
+    platforms: ['adstar', 'pgy', 'juguang'],
+    dateRange: { from: '2030-01-01', to: '2030-01-31', timezone: 'Asia/Shanghai' },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'XHS_COLLECTION_FAILED');
+  assert.equal(result.retryable, true);
 });
 
 test('runXhsAnalysisTask keeps two successful sources when the failed or cancelled source only lacks identity', async () => {

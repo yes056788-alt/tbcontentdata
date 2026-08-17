@@ -152,6 +152,7 @@ function createReportHarness() {
       reportStatus = state.reportStatus && typeof state.reportStatus === 'object' ? state.reportStatus : {};
     },
     buildXhsMarkup,
+    applyArchiveRun,
     renderXhs,
   });
 })();`;
@@ -367,6 +368,140 @@ test('XHS report renders an explicit failure instead of a report body for termin
     assert.match(markup, /class="section-error"/, `${status} must render the error state`);
     assert.match(markup, expected, `${status} must explain the terminal state`);
     assert.doesNotMatch(markup, /三平台账号、日期、分页和对账均已通过/);
+  }
+});
+
+test('XHS failed and partial source cards expose only folded redacted code and message diagnostics', () => {
+  const liveHarness = createReportHarness();
+  liveHarness.api.setState({
+    status: {
+      status: 'failed',
+      platforms: {
+        adstar: {
+          status: 'failed',
+          errors: [{
+            code: 'XHS_PLATFORM_TAB_MISSING',
+            message: '请刷新平台页 https://adstar.example.invalid/report?access_token=fictional-url-secret',
+            raw: 'fictional-raw-secret',
+            headers: { Authorization: 'Bearer fictional-header-secret' },
+            requestUrl: 'https://adstar.example.invalid/private',
+          }],
+        },
+        pgy: {
+          status: 'partial',
+          warnings: [{
+            code: 'pagination_incomplete',
+            message: '分页中断，token=fictional-message-secret，请稍后重试',
+            rawBody: 'fictional-warning-raw-secret',
+          }],
+        },
+        juguang: {
+          status: 'complete',
+          errors: [{ code: 'must_not_render', message: 'fictional-complete-source-secret' }],
+        },
+      },
+    },
+    analysis: null,
+  });
+
+  liveHarness.api.renderXhs();
+  const liveMarkup = liveHarness.elements.get('xhsReport').innerHTML;
+  assert.match(liveMarkup, /data-xhs-platform="adstar"[\s\S]*XHS_PLATFORM_TAB_MISSING[\s\S]*请刷新平台页/);
+  assert.match(liveMarkup, /data-xhs-platform="pgy"[\s\S]*pagination_incomplete[\s\S]*分页中断/);
+  assert.match(liveMarkup, /<details class="xhs-source-diagnostics">\s*<summary>/);
+  assert.doesNotMatch(liveMarkup, /<details[^>]*\sopen(?:\s|>)/, 'technical details must be folded by default');
+  for (const secret of [
+    'https://adstar.example.invalid', 'access_token', 'fictional-url-secret',
+    'token=', 'fictional-message-secret', 'fictional-raw-secret',
+    'Authorization', 'fictional-header-secret', 'requestUrl',
+    'fictional-warning-raw-secret', 'must_not_render', 'fictional-complete-source-secret',
+  ]) {
+    assert.equal(liveMarkup.includes(secret), false, `report leaked ${secret}`);
+  }
+
+  const archiveHarness = createReportHarness();
+  archiveHarness.api.applyArchiveRun({
+    runId: 'fictional-archived-xhs-failure',
+    snapshots: {
+      [XHS_STATUS_KEY]: {
+        status: 'partial',
+        platforms: {
+          adstar: { status: 'complete' },
+          pgy: {
+            status: 'partial',
+            warnings: [{ code: 'archived_page_gap', message: '归档分页证据不完整' }],
+          },
+          juguang: { status: 'failed', errors: [{ code: 'archived_account_missing', message: '归档账号未识别' }] },
+        },
+      },
+    },
+  });
+  archiveHarness.api.renderXhs();
+  const archiveMarkup = archiveHarness.elements.get('xhsReport').innerHTML;
+  assert.match(archiveMarkup, /archived_page_gap[\s\S]*归档分页证据不完整/);
+  assert.match(archiveMarkup, /archived_account_missing[\s\S]*归档账号未识别/);
+});
+
+test('XHS diagnostics redact credential aliases from code and message while preserving safe explanations', () => {
+  const harness = createReportHarness();
+  harness.api.setState({
+    status: {
+      status: 'failed',
+      platforms: {
+        adstar: {
+          status: 'failed',
+          errors: [
+            {
+              code: 'XHS_TOKEN_EXPIRED',
+              message: '登录会话已过期，请刷新页面后重试',
+            },
+            {
+              code: 'UPSTREAM_sessionId=fictional-code-session',
+              message: 'clientSecret=fictional-message-client-secret；普通说明保留',
+            },
+            {
+              code: 'X-S:fictional-code-xs',
+              message: 'xsign=fictional-message-xsign，签名失败请重试',
+            },
+            {
+              code: 'Bearer fictional-code-bearer',
+              message: 'Authorization: Bearer fictional-message-bearer；请重新登录',
+            },
+            {
+              code: 'https://api.example.invalid/private?sign=fictional-code-url-sign',
+              message: '签名请求 https://api.example.invalid/private?X-S=fictional-message-url-sign，保留结论',
+            },
+            {
+              code: 'headers={Authorization:Bearer fictional-code-header}',
+              message: 'raw=fictional-message-raw payload；requestUrl=https://api.example.invalid/private；安全提示保留',
+            },
+          ],
+        },
+        pgy: { status: 'complete' },
+        juguang: { status: 'complete' },
+      },
+    },
+    analysis: null,
+  });
+
+  harness.api.renderXhs();
+  const markup = harness.elements.get('xhsReport').innerHTML;
+
+  assert.match(markup, /XHS_TOKEN_EXPIRED[\s\S]*登录会话已过期，请刷新页面后重试/);
+  assert.match(markup, /<code>unknown_error<\/code>/, 'fully redacted error codes must use the safe fallback');
+  for (const safeText of ['普通说明保留', '签名失败请重试', '请重新登录', '保留结论', '安全提示保留']) {
+    assert.equal(markup.includes(safeText), true, `report removed safe explanation: ${safeText}`);
+  }
+  for (const leakedText of [
+    'sessionId', 'clientSecret', 'xsign', 'X-S:', 'Bearer',
+    'fictional-code-session', 'fictional-message-client-secret',
+    'fictional-code-xs', 'fictional-message-xsign',
+    'fictional-code-bearer', 'fictional-message-bearer',
+    'fictional-code-url-sign', 'fictional-message-url-sign',
+    'headers=', 'fictional-code-header', 'raw=', 'fictional-message-raw',
+    'requestUrl=', 'https://api.example.invalid',
+  ]) {
+    assert.equal(markup.includes(leakedText), false, `report leaked ${leakedText}`);
   }
 });
 
