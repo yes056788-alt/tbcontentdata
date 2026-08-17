@@ -6,6 +6,12 @@
   const RUN_INDEX_KEY = 'taobaoStoreRunIndexV1';
   const TASK_STATUS_KEY = 'taobaoProjectTaskStatusV1';
   const BATCH_STATUS_KEY = 'taobaoAccountBatchStatusV1';
+  const XHS_BINDINGS_KEY = 'xhsStoreAccountBindingsV1';
+  const XHS_BINDING_PLATFORMS = Object.freeze({
+    adstar: '淘宝星河',
+    pgy: '蒲公英',
+    juguang: '聚光',
+  });
   const taskType = 'report';
   const pendingRequests = new Map();
   const $ = (selector) => document.querySelector(selector);
@@ -32,6 +38,10 @@
   let selectedStoreId = '';
   let activeMode = 'current';
   let refreshing = false;
+  let xhsBindingSummary = null;
+  let xhsBindingSummaryStoreId = '';
+  let xhsBindingLoading = false;
+  let xhsBindingError = '';
 
   function selectedPlatforms(mode) {
     const picker = document.querySelector('[data-platform-picker="' + mode + '"]');
@@ -103,6 +113,94 @@
 
   function storeById(storeId) {
     return directory.stores.find((store) => store.id === storeId) || null;
+  }
+
+  function xhsBindingManagementSupported() {
+    return bridgeCapabilities.has('xhsBindingManagement');
+  }
+
+  function xhsBindingManagementLocked() {
+    return Boolean(
+      taskStatus && taskStatus.running ||
+      batchStatus && (batchStatus.running || batchStatus.paused)
+    );
+  }
+
+  function normalizeXhsBindingSummary(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const platforms = source.platforms && typeof source.platforms === 'object'
+      ? source.platforms
+      : {};
+    return {
+      platforms: Object.fromEntries(Object.keys(XHS_BINDING_PLATFORMS).map((platform) => {
+        const item = platforms[platform] && typeof platforms[platform] === 'object'
+          ? platforms[platform]
+          : {};
+        const updatedAt = String(item.updatedAt || '').slice(0, 80);
+        return [platform, {
+          bound: item.bound === true,
+          updatedAt: Number.isFinite(Date.parse(updatedAt)) ? updatedAt : '',
+        }];
+      })),
+    };
+  }
+
+  function renderXhsBindingPanel() {
+    const store = storeById(selectedStoreId);
+    $('#xhsBindingStoreName').textContent = store ? store.name : '未选择';
+    if (!store) {
+      $('#xhsBindingRows').innerHTML = '<p class="xhs-binding-empty">选择店铺后查看三平台绑定状态。</p>';
+      return;
+    }
+    if (!xhsBindingManagementSupported()) {
+      $('#xhsBindingRows').innerHTML = '<p class="xhs-binding-empty">当前数据助手版本不支持安全绑定管理，请重新加载最新扩展。</p>';
+      return;
+    }
+    if (xhsBindingError) {
+      $('#xhsBindingRows').innerHTML = '<p class="xhs-binding-empty">' + escapeHtml(xhsBindingError) + '</p>';
+      return;
+    }
+    if (xhsBindingLoading || xhsBindingSummaryStoreId !== store.id || !xhsBindingSummary) {
+      $('#xhsBindingRows').innerHTML = '<p class="xhs-binding-empty">正在读取安全绑定摘要…</p>';
+      return;
+    }
+    const locked = xhsBindingManagementLocked();
+    $('#xhsBindingRows').innerHTML = Object.entries(XHS_BINDING_PLATFORMS).map(([platform, label]) => {
+      const item = xhsBindingSummary.platforms[platform] || { bound: false, updatedAt: '' };
+      const state = item.bound ? '已绑定' : '未绑定';
+      const updated = item.updatedAt ? '记录更新：' + formatDate(item.updatedAt) : '暂无更新时间';
+      return '<div class="xhs-binding-row" role="listitem"><span><strong>' + escapeHtml(label) +
+        ' · <b class="xhs-binding-state' + (item.bound ? '' : ' unbound') + '">' + state + '</b></strong><small>' +
+        escapeHtml(updated) + '</small></span><button class="row-action danger" type="button" data-reset-xhs-binding="' + platform + '"' +
+        (!item.bound || locked ? ' disabled' : '') + '>解除旧绑定</button></div>';
+    }).join('');
+  }
+
+  async function refreshXhsBindingSummary() {
+    const store = storeById(selectedStoreId);
+    if (!store || !connected || !xhsBindingManagementSupported() || xhsBindingManagementLocked()) {
+      renderXhsBindingPanel();
+      return;
+    }
+    const requestedStoreId = store.id;
+    xhsBindingLoading = true;
+    xhsBindingError = '';
+    renderXhsBindingPanel();
+    try {
+      const summary = await request('getXhsBindingSummary', { storeId: requestedStoreId }, 10000);
+      if (selectedStoreId !== requestedStoreId) return;
+      xhsBindingSummary = normalizeXhsBindingSummary(summary);
+      xhsBindingSummaryStoreId = requestedStoreId;
+    } catch (error) {
+      if (selectedStoreId === requestedStoreId) {
+        xhsBindingSummary = null;
+        xhsBindingSummaryStoreId = '';
+        xhsBindingError = error && error.message || '小红书绑定状态读取失败。';
+      }
+    } finally {
+      if (selectedStoreId === requestedStoreId) xhsBindingLoading = false;
+      renderXhsBindingPanel();
+    }
   }
 
   function formatDate(value) {
@@ -358,6 +456,7 @@
   }
 
   function renderStatus() {
+    renderXhsBindingPanel();
     if (activeMode === 'batch') {
       const status = batchStatus || null;
       const sameTask = Boolean(status && (status.taskType === taskType || status.taskType === 'both'));
@@ -475,6 +574,7 @@
       renderLogs();
       renderBatchSession();
       renderStatus();
+      await refreshXhsBindingSummary();
       if (sessionResponse && sessionResponse.ok === false) {
         setNotice('当前数据助手版本不支持账号库会话，请在扩展管理页重新加载扩展。', 'error');
       }
@@ -560,6 +660,36 @@
     setTimeout(refresh, 350);
   }
 
+  async function resetXhsBinding(platform) {
+    const store = storeById(selectedStoreId);
+    const label = XHS_BINDING_PLATFORMS[platform];
+    if (!store || !label) throw new Error('请先选择店铺和有效的小红书平台。');
+    if (!connected || !xhsBindingManagementSupported()) {
+      throw new Error('当前数据助手不支持安全绑定管理，请重新加载最新扩展。');
+    }
+    if (xhsBindingManagementLocked()) throw new Error('任务执行期间不能解除小红书店铺绑定。');
+    const requestedStoreId = store.id;
+    xhsBindingLoading = true;
+    xhsBindingError = '';
+    renderXhsBindingPanel();
+    try {
+      const summary = await request('resetXhsBinding', {
+        storeId: requestedStoreId,
+        platform,
+      }, 10000);
+      if (summary && summary.cancelled === true) return;
+      if (selectedStoreId === requestedStoreId) {
+        xhsBindingSummary = normalizeXhsBindingSummary(summary);
+        xhsBindingSummaryStoreId = requestedStoreId;
+      }
+      setNotice(label + '旧绑定已解除；下次 READY 采集成功后才会建立新绑定。', 'success');
+    } finally {
+      if (selectedStoreId === requestedStoreId) xhsBindingLoading = false;
+      renderXhsBindingPanel();
+    }
+    await refreshXhsBindingSummary();
+  }
+
   async function openRun(runId) {
     if (!runId) return;
     location.href = '/report-view.html?archive=' + encodeURIComponent(runId);
@@ -597,6 +727,9 @@
     if (message.type === 'storageChanged' && (message.keys || []).some((key) => (
       [DIRECTORY_KEY, RUN_INDEX_KEY, TASK_STATUS_KEY, BATCH_STATUS_KEY].includes(key)
     ))) refresh();
+    else if (message.type === 'storageChanged' && (message.keys || []).includes(XHS_BINDINGS_KEY)) {
+      refreshXhsBindingSummary();
+    }
   });
 
   document.querySelectorAll('[data-task-mode]').forEach((button) => {
@@ -610,7 +743,14 @@
     });
   });
   $('#taskGroupSelect').addEventListener('change', () => { selectedStoreId = ''; renderStoreOptions(); });
-  $('#taskStoreSelect').addEventListener('change', (event) => { selectedStoreId = event.currentTarget.value; renderStatus(); });
+  $('#taskStoreSelect').addEventListener('change', (event) => {
+    selectedStoreId = event.currentTarget.value;
+    xhsBindingSummary = null;
+    xhsBindingSummaryStoreId = '';
+    xhsBindingError = '';
+    renderStatus();
+    refreshXhsBindingSummary();
+  });
   $('#startCurrentTaskBtn').addEventListener('click', () => {
     startCurrentTask().catch((error) => { setNotice(error.message, 'error'); refresh(); });
   });
@@ -667,6 +807,14 @@
   $('#taskRunRows').addEventListener('click', (event) => {
     const button = event.target.closest('[data-run-action]');
     if (button) handleRunAction(button).catch((error) => setNotice(error.message, 'error'));
+  });
+  $('#xhsBindingRows').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-reset-xhs-binding]');
+    if (!button || button.disabled) return;
+    resetXhsBinding(button.dataset.resetXhsBinding).catch((error) => {
+      setNotice(error.message, 'error');
+      refreshXhsBindingSummary();
+    });
   });
 
   initializeXhsDateRange();

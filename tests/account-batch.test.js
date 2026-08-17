@@ -17,7 +17,7 @@ const reportHtml = fs.readFileSync(path.join(root, 'web-tool', 'report.html'), '
 const vaultSource = fs.readFileSync(path.join(root, 'web-tool', 'account-vault.js'), 'utf8');
 const server = fs.readFileSync(path.join(root, 'web-tool', 'server.mjs'), 'utf8');
 
-assert.equal(manifest.version, '2.37.10');
+assert.equal(manifest.version, '2.37.11');
 assert.ok(manifest.host_permissions.includes('https://oapi.dingtalk.com/*'));
 assert.ok(manifest.content_scripts.some((entry) => (
   entry.matches.includes('*://adstar.alimama.com/*') && entry.js.includes('xinghe-content-script.js')

@@ -26,6 +26,10 @@
           <fieldset class="platform-picker" data-platform-picker="current"><legend>执行平台</legend><div class="platform-picker-grid"><label><input type="checkbox" value="sycm" checked><span><strong>生意参谋</strong><small>流量诊断</small></span></label><label><input type="checkbox" value="guanghe" checked><span><strong>光合</strong><small>渠道与资产</small></span></label><label><input type="checkbox" value="wxt" checked><span><strong>万相台</strong><small>营销与短视频</small></span></label><label><input type="checkbox" value="dmp" checked><span><strong>达摩盘</strong><small>人群画像</small></span></label><label><input type="checkbox" value="adstar" checked><span><strong>淘宝星河</strong><small>项目、订单与成交</small></span></label><label><input type="checkbox" value="pgy" checked><span><strong>蒲公英</strong><small>报备笔记与合作成本</small></span></label><label><input type="checkbox" value="juguang" checked><span><strong>聚光</strong><small>多账户投放与归因</small></span></label></div></fieldset>
           <div class="task-fields xhs-date-fields"><div class="field-block"><label for="xhsDateFrom">小红书开始日期</label><input id="xhsDateFrom" type="date"></div><div class="field-block"><label for="xhsDateTo">小红书结束日期</label><input id="xhsDateTo" type="date"></div></div>
           <div class="task-scope">小红书按中国标准时间（Asia/Shanghai）取数；蒲公英日期口径为笔记发布时间，星河和聚光按所选经营周期。三源会严格串行并在取数后按 noteId 联表。首次成功运行会将当前三平台真实账号绑定到所选店铺；后续账号不一致时将阻止归档与经营决策。</div>
+          <section id="xhsBindingPanel" class="xhs-binding-panel" aria-labelledby="xhsBindingTitle">
+            <div class="xhs-binding-head"><div><h3 id="xhsBindingTitle">小红书账号绑定</h3><p>所选店铺：<strong id="xhsBindingStoreName">未选择</strong>。只显示是否已绑定，不显示任何账号标识。</p></div></div>
+            <div id="xhsBindingRows" class="xhs-binding-rows" role="list" aria-live="polite"><p class="xhs-binding-empty">选择店铺后查看三平台绑定状态。</p></div>
+          </section>
           <div class="task-actions"><button id="startCurrentTaskBtn" class="button primary" type="button">开始一键取数</button></div>
         </div>
         <div id="batchModePanel" class="task-mode-panel" hidden>

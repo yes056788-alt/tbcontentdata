@@ -496,14 +496,39 @@
             const clickable = (element) => element && (
               element.closest && element.closest('button,[role="button"],a,li,[role="menuitem"]') || element
             );
-            const findReturnAction = () => Array.from(document.querySelectorAll(
-              'button,[role="button"],a,li,[role="menuitem"],span,div'
-            )).find((element) => normalizedText(element.textContent) === '返回主账户');
+            const visibleClickable = (element) => {
+              const target = clickable(element);
+              if (!target || typeof target.click !== 'function' ||
+                  typeof target.getBoundingClientRect !== 'function') return null;
+              const rect = target.getBoundingClientRect();
+              if (Number(rect.width) <= 0 || Number(rect.height) <= 0) return null;
+              if (target.disabled === true || target.getAttribute && (
+                target.getAttribute('aria-hidden') === 'true' ||
+                target.getAttribute('aria-disabled') === 'true'
+              )) return null;
+              const view = target.ownerDocument && target.ownerDocument.defaultView;
+              const style = view && typeof view.getComputedStyle === 'function'
+                ? view.getComputedStyle(target)
+                : null;
+              if (style && (
+                style.display === 'none' || style.visibility === 'hidden' ||
+                style.pointerEvents === 'none' || String(style.opacity) === '0'
+              )) return null;
+              return target;
+            };
+            const findReturnAction = () => {
+              for (const element of Array.from(document.querySelectorAll(
+                'button,[role="button"],a,li,[role="menuitem"],span,div'
+              ))) {
+                if (normalizedText(element.textContent) !== '返回主账户') continue;
+                const target = visibleClickable(element);
+                if (target) return target;
+              }
+              return null;
+            };
             const clickReturnAction = () => {
-              const action = findReturnAction();
-              if (!action) return false;
-              const target = clickable(action);
-              if (!target || typeof target.click !== 'function') return false;
+              const target = findReturnAction();
+              if (!target) return false;
               target.click();
               return true;
             };

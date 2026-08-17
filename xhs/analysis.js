@@ -566,7 +566,22 @@
         });
       }
     }
-    const sanitized = contract.sanitizeSensitiveData(issues);
+    const issueIndexes = new Map();
+    const severityRank = { info: 1, warning: 2, critical: 3 };
+    const sanitized = [];
+    for (const issue of contract.sanitizeSensitiveData(issues)) {
+      const key = `${String(issue && issue.code || '')}\u0000${String(issue && issue.platform || '')}`;
+      if (!issueIndexes.has(key)) {
+        issueIndexes.set(key, sanitized.length);
+        sanitized.push(issue);
+        continue;
+      }
+      const index = issueIndexes.get(key);
+      const previous = sanitized[index];
+      const previousRank = severityRank[String(previous && previous.severity || '')] || 0;
+      const nextRank = severityRank[String(issue && issue.severity || '')] || 0;
+      if (nextRank > previousRank) sanitized[index] = issue;
+    }
     return {
       decisionReady: !sanitized.some((issue) => issue.severity === 'critical'),
       requiredPlatforms: ['pgy', 'juguang', 'adstar'],

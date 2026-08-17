@@ -152,6 +152,8 @@ function createReportHarness() {
       reportStatus = state.reportStatus && typeof state.reportStatus === 'object' ? state.reportStatus : {};
     },
     buildXhsMarkup,
+    sectionHasData,
+    sectionError,
     applyArchiveRun,
     renderXhs,
   });
@@ -395,6 +397,66 @@ test('XHS report renders an explicit failure instead of a report body for termin
     assert.match(markup, /class="section-error"/, `${status} must render the error state`);
     assert.match(markup, expected, `${status} must explain the terminal state`);
     assert.doesNotMatch(markup, /三平台账号、日期、分页和对账均已通过/);
+  }
+});
+
+test('failed XHS binding gate is not marked generated and shows only redacted issue fields', () => {
+  const harness = createReportHarness();
+  harness.api.setState({
+    status: {
+      status: 'complete',
+      platforms: {
+        adstar: { status: 'complete' },
+        pgy: { status: 'complete' },
+        juguang: { status: 'complete' },
+      },
+    },
+    analysis: null,
+    reportStatus: {
+      results: [{
+        key: 'xiaohongshu',
+        name: '小红书三平台全链路',
+        ok: false,
+        code: 'XHS_ACCOUNT_BINDING_FAILED',
+        message: '当前平台真实账号与所选店铺绑定校验未通过。',
+        bindingIssues: [{
+          code: 'account_binding_mismatch',
+          platform: 'pgy',
+          message: 'advertiserId=fictional-message-advertiser; memberId=fictional-message-member; ' +
+            'brandUserId=fictional-message-brand; otherStoreId=fictional-message-store',
+          expected: ['pgy:fictional-expected-token'],
+          actual: ['pgy:fictional-actual-token'],
+        }, {
+          code: 'advertiserId=fictional-code-advertiser',
+          platform: 'pgy',
+          message: 'memberId=fictional-unknown-member',
+        }],
+      }],
+    },
+  });
+
+  assert.equal(
+    harness.api.sectionHasData('xiaohongshu'),
+    false,
+    'collection status without an analysis snapshot must not produce an “已生成” section badge',
+  );
+  const error = harness.api.sectionError('xiaohongshu');
+  assert.match(error, /蒲公英\s*\/\s*account_binding_mismatch/);
+  assert.match(error, /当前蒲公英登录账号与所选店铺绑定不一致/);
+  assert.match(error, /蒲公英\s*\/\s*account_binding_issue/);
+  assert.match(error, /账号绑定校验未通过/);
+
+  harness.api.renderXhs();
+  const markup = harness.elements.get('xhsReport').innerHTML;
+  assert.match(markup, /蒲公英\s*\/\s*account_binding_mismatch/);
+  assert.match(markup, /蒲公英\s*\/\s*account_binding_issue/);
+  for (const forbidden of [
+    'fictional-message-advertiser', 'fictional-message-member', 'fictional-message-brand',
+    'fictional-message-store', 'fictional-expected-token', 'fictional-actual-token',
+    'fictional-code-advertiser', 'fictional-unknown-member',
+    'expected', 'actual', 'token=',
+  ]) {
+    assert.equal(markup.includes(forbidden), false, `binding failure view leaked ${forbidden}`);
   }
 });
 

@@ -25,11 +25,13 @@
     'projectDirectory',
     'projectTasks',
     'xhsAnalysis',
+    'xhsBindingManagement',
   ];
   const ACCOUNT_VAULT_KEY = 'taobaoAccountVaultV1';
   const ACCOUNT_BATCH_STATUS_KEY = 'taobaoAccountBatchStatusV1';
   const PROJECT_DIRECTORY_KEY = 'taobaoProjectDirectoryV1';
   const PROJECT_TASK_STATUS_KEY = 'taobaoProjectTaskStatusV1';
+  const XHS_STORE_BINDINGS_KEY = 'xhsStoreAccountBindingsV1';
   const STORE_RUN_INDEX_KEY = 'taobaoStoreRunIndexV1';
   const STORE_RUN_KEY_PREFIX = 'taobaoStoreRunV1:';
   const MAX_IMPORTED_RUN_BYTES = 24 * 1024 * 1024;
@@ -135,6 +137,11 @@
   const VERSION = chrome.runtime.getManifest().version;
   const PLATFORM_TASK_IDS = ['sycm', 'guanghe', 'wxt', 'dmp'];
   const XHS_PLATFORM_TASK_IDS = ['adstar', 'pgy', 'juguang'];
+  const XHS_BINDING_PLATFORM_NAMES = Object.freeze({
+    adstar: '淘宝星河',
+    pgy: '蒲公英',
+    juguang: '聚光',
+  });
 
   function cleanText(value, maxLength) {
     return String(value == null ? '' : value).trim().slice(0, Number(maxLength) || 160);
@@ -380,6 +387,104 @@
     if (location.pathname !== '/report.html') {
       throw new Error('请从“一键取数”页面发起任务。');
     }
+  }
+
+  function isPlainObject(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function sanitizeXhsBindingPlatform(value) {
+    const platform = cleanText(value, 24);
+    if (!XHS_PLATFORM_TASK_IDS.includes(platform)) {
+      throw new Error('小红书绑定平台不在允许范围内。');
+    }
+    return platform;
+  }
+
+  function safeXhsBindingUpdatedAt(value) {
+    const updatedAt = cleanText(value, 80);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(updatedAt) ||
+        !Number.isFinite(Date.parse(updatedAt))) return '';
+    return updatedAt;
+  }
+
+  function xhsBindingSummary(registry, storeId) {
+    const stores = isPlainObject(registry && registry.stores) ? registry.stores : {};
+    const store = isPlainObject(stores[storeId]) ? stores[storeId] : {};
+    const platforms = isPlainObject(store.platforms) ? store.platforms : {};
+    const updatedAt = safeXhsBindingUpdatedAt(store.updatedAt);
+    return {
+      platforms: Object.fromEntries(XHS_PLATFORM_TASK_IDS.map((platform) => [platform, {
+        bound: Array.isArray(platforms[platform]) && platforms[platform].some((token) => (
+          typeof token === 'string' && token.trim().length > 0
+        )),
+        updatedAt,
+      }])),
+    };
+  }
+
+  function sanitizeXhsBindingSummary(value) {
+    const source = isPlainObject(value) ? value : {};
+    const platforms = isPlainObject(source.platforms) ? source.platforms : {};
+    return {
+      platforms: Object.fromEntries(XHS_PLATFORM_TASK_IDS.map((platform) => {
+        const record = isPlainObject(platforms[platform]) ? platforms[platform] : {};
+        return [platform, {
+          bound: record.bound === true,
+          updatedAt: safeXhsBindingUpdatedAt(record.updatedAt),
+        }];
+      })),
+    };
+  }
+
+  function requireInteractiveXhsBindingReset() {
+    requireOneClickTaskPage();
+    if (window.top !== window) {
+      throw new Error('仅允许在顶层一键取数页面解除小红书绑定。');
+    }
+    if (document.visibilityState !== 'visible') {
+      throw new Error('请切换到可见的一键取数页面后再解除小红书绑定。');
+    }
+    if (typeof document.hasFocus !== 'function' || !document.hasFocus()) {
+      throw new Error('请先聚焦一键取数页面，再解除小红书绑定。');
+    }
+  }
+
+  async function loadXhsBindingManagementContext(payload, options) {
+    requireOneClickTaskPage();
+    const settings = options && typeof options === 'object' ? options : {};
+    const storeId = cleanText(payload && payload.storeId, 100);
+    if (!storeId) throw new Error('请先选择项目目录中的店铺。');
+    const platform = settings.platform ? sanitizeXhsBindingPlatform(payload && payload.platform) : '';
+    const stored = await chrome.storage.local.get([
+      PROJECT_DIRECTORY_KEY,
+      PROJECT_TASK_STATUS_KEY,
+      ACCOUNT_BATCH_STATUS_KEY,
+      XHS_STORE_BINDINGS_KEY,
+    ]);
+    const directory = isPlainObject(stored[PROJECT_DIRECTORY_KEY]) ? stored[PROJECT_DIRECTORY_KEY] : {};
+    const knownStore = (Array.isArray(directory.stores) ? directory.stores : []).find((store) => (
+      isPlainObject(store) && cleanText(store.id, 100) === storeId
+    ));
+    if (!knownStore) throw new Error('所选店铺不在当前项目目录中。');
+    const storeName = cleanText(knownStore.name, 120);
+    if (!storeName) throw new Error('项目目录中的店铺名称无效。');
+    const batchStatus = stored[ACCOUNT_BATCH_STATUS_KEY];
+    if (batchStatus && (batchStatus.running || batchStatus.paused)) {
+      throw new Error('批量任务执行或暂停期间不能管理小红书店铺绑定。');
+    }
+    const taskStatus = stored[PROJECT_TASK_STATUS_KEY];
+    if (taskStatus && taskStatus.running) {
+      throw new Error('当前账号任务执行期间不能管理小红书店铺绑定。');
+    }
+    return {
+      platform,
+      registry: isPlainObject(stored[XHS_STORE_BINDINGS_KEY])
+        ? stored[XHS_STORE_BINDINGS_KEY]
+        : {},
+      storeId,
+      storeName,
+    };
   }
 
   function sanitizeRunId(value) {
@@ -773,6 +878,34 @@
       await chrome.storage.local.remove(keys);
       return { cleared: keys };
     }
+    if (action === 'getXhsBindingSummary') {
+      const context = await loadXhsBindingManagementContext(payload);
+      return xhsBindingSummary(context.registry, context.storeId);
+    }
+    if (action === 'resetXhsBinding') {
+      requireInteractiveXhsBindingReset();
+      const context = await loadXhsBindingManagementContext(payload, {
+        platform: true,
+      });
+      const platformName = XHS_BINDING_PLATFORM_NAMES[context.platform];
+      const confirmation = '请先确认：当前“' + platformName + '”平台登录账号属于所选店铺“' +
+        context.storeName + '”。本操作只解除该店铺的' + platformName +
+        '旧绑定，不会立即重绑；下次该平台 READY 采集成功后才会建立新绑定。是否继续？';
+      if (!window.confirm(confirmation)) {
+        return Object.assign({ cancelled: true }, xhsBindingSummary(context.registry, context.storeId));
+      }
+      const response = await runtimeMessage({
+        type: 'XHS_BINDING_RESET',
+        source: 'business-defense-web-tool',
+        storeId: context.storeId,
+        platform: context.platform,
+        confirmedByExtension: true,
+      });
+      if (!response || response.ok !== true) {
+        throw new Error(response && response.message || '小红书旧绑定解除失败。');
+      }
+      return sanitizeXhsBindingSummary(response.summary);
+    }
     if (action === 'setAccountVault') {
       const vault = sanitizeEncryptedVault(payload && payload.vault);
       await chrome.storage.local.set({ [ACCOUNT_VAULT_KEY]: vault });
@@ -954,7 +1087,9 @@
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
-    const keys = Object.keys(changes || {}).filter((key) => READABLE_KEYS.has(key));
+    const keys = Object.keys(changes || {}).filter((key) => (
+      READABLE_KEYS.has(key) || key === XHS_STORE_BINDINGS_KEY
+    ));
     if (keys.length) post({ type: 'storageChanged', keys });
   });
 

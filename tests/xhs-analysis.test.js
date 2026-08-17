@@ -519,6 +519,58 @@ test('rejects mismatched date ranges and account bindings at the analysis gate',
   )));
 });
 
+test('deduplicates quality issues by code and platform while preserving distinct issue keys', () => {
+  const input = completeInput();
+  input.collections.pgy.identity.brandUserId = 'fictional-wrong-brand-user';
+  input.bindingIssues = [
+    {
+      severity: 'critical',
+      code: 'account_binding_mismatch',
+      platform: 'pgy',
+      message: 'Binding reconciliation already rejected the PGY account.',
+    },
+    {
+      severity: 'critical',
+      code: 'account_binding_mismatch',
+      platform: 'adstar',
+      message: 'The same code on another platform remains distinct.',
+    },
+    {
+      severity: 'critical',
+      code: 'account_identity_bound_to_other_store',
+      platform: 'pgy',
+      message: 'A different code on the same platform remains distinct.',
+    },
+  ];
+
+  const snapshot = createXhsAnalysisSnapshot(input);
+  const issueKeys = snapshot.quality.issues.map((issue) => `${issue.code}:${issue.platform}`);
+
+  assert.equal(issueKeys.filter((key) => key === 'account_binding_mismatch:pgy').length, 1);
+  assert.ok(issueKeys.includes('account_binding_mismatch:adstar'));
+  assert.ok(issueKeys.includes('account_identity_bound_to_other_store:pgy'));
+});
+
+test('keeps the highest severity when duplicate quality issues share a code and platform', () => {
+  const input = completeInput();
+  input.collections.pgy.identity.brandUserId = 'fictional-wrong-brand-user';
+  input.bindingIssues = [{
+    severity: 'warning',
+    code: 'account_binding_mismatch',
+    platform: 'pgy',
+    message: 'An earlier non-blocking observation must not hide the binding gate.',
+  }];
+
+  const snapshot = createXhsAnalysisSnapshot(input);
+  const matches = snapshot.quality.issues.filter((issue) => (
+    issue.code === 'account_binding_mismatch' && issue.platform === 'pgy'
+  ));
+
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].severity, 'critical');
+  assert.equal(snapshot.quality.decisionReady, false);
+});
+
 test('projects only compact analysis fields and excludes signed URLs, credentials, and raw payloads', () => {
   const input = completeInput();
   const snapshot = createXhsAnalysisSnapshot(input);

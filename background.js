@@ -50,6 +50,7 @@ const CONTENT_DIAGNOSIS_REPORT_KEY = 'taobaoContentDiagnosisReportV1';
 const CONTENT_DIAGNOSIS_WXT_KEY = 'taobaoContentDiagnosisWxtReportV1';
 const ACCOUNT_BATCH_STATUS_KEY = 'taobaoAccountBatchStatusV1';
 const ACCOUNT_VAULT_SESSION_KEY = 'taobaoAccountVaultSessionV1';
+const PROJECT_DIRECTORY_KEY = 'taobaoProjectDirectoryV1';
 const PROJECT_TASK_STATUS_KEY = 'taobaoProjectTaskStatusV1';
 const STORE_RUN_INDEX_KEY = 'taobaoStoreRunIndexV1';
 const STORE_RUN_KEY_PREFIX = 'taobaoStoreRunV1:';
@@ -3606,6 +3607,159 @@ const XHS_TERMINAL_COLLECTION_ERROR_CODES = new Set([
   'account_identity_mismatch',
 ]);
 
+const XHS_BINDING_PLATFORM_NAMES = Object.freeze({
+  adstar: '淘宝星河',
+  pgy: '蒲公英',
+  juguang: '聚光',
+});
+
+const XHS_BINDING_ISSUE_MESSAGES = Object.freeze({
+  account_binding_mismatch: (platformName) =>
+    `当前${platformName}登录账号与所选店铺绑定不一致。`,
+  account_identity_bound_to_other_store: (platformName) =>
+    `当前${platformName}登录账号已绑定到另一店铺，禁止重新归属。`,
+  account_identity_missing: (platformName) =>
+    `无法确认${platformName}的真实登录账号，禁止用于店铺决策。`,
+  account_identity_ambiguous: (platformName) =>
+    `无法唯一确认${platformName}账号，禁止用于店铺决策。`,
+});
+
+function sanitizeXhsBindingIssues(value) {
+  return (Array.isArray(value) ? value : []).map((record) => {
+    const issue = record && typeof record === 'object' ? record : {};
+    const platform = Object.prototype.hasOwnProperty.call(
+      XHS_BINDING_PLATFORM_NAMES,
+      String(issue.platform || ''),
+    ) ? String(issue.platform) : '';
+    const rawCode = String(issue.code || '');
+    const code = Object.prototype.hasOwnProperty.call(XHS_BINDING_ISSUE_MESSAGES, rawCode)
+      ? rawCode
+      : 'account_binding_issue';
+    const platformName = platform ? XHS_BINDING_PLATFORM_NAMES[platform] : '';
+    const messageFactory = XHS_BINDING_ISSUE_MESSAGES[code];
+    const message = messageFactory && platformName
+      ? messageFactory(platformName)
+      : '账号绑定校验未通过。';
+    return { code, platform, message };
+  }).filter((issue) => issue.platform);
+}
+
+let xhsBindingRegistryQueue = Promise.resolve();
+let xhsBindingMutationPending = 0;
+
+function withXhsBindingRegistryLock(operation) {
+  const task = xhsBindingRegistryQueue.then(
+    () => operation(),
+    () => operation(),
+  );
+  xhsBindingRegistryQueue = task.then(
+    () => undefined,
+    () => undefined,
+  );
+  return task;
+}
+
+function xhsBindingRecord(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function safeXhsBindingUpdatedAt(value) {
+  const updatedAt = batchText(value, 80);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(updatedAt) ||
+      !Number.isFinite(Date.parse(updatedAt))) return '';
+  return updatedAt;
+}
+
+function safeXhsBindingSummary(registry, storeId) {
+  const stores = xhsBindingRecord(registry && registry.stores);
+  const store = xhsBindingRecord(stores[storeId]);
+  const bindings = xhsBindingRecord(store.platforms);
+  const updatedAt = safeXhsBindingUpdatedAt(store.updatedAt);
+  return {
+    platforms: Object.fromEntries(XHS_PLATFORM_TASK_IDS.map((platform) => [platform, {
+      bound: Array.isArray(bindings[platform]) && bindings[platform].some((token) => (
+        typeof token === 'string' && token.trim().length > 0
+      )),
+      updatedAt,
+    }])),
+  };
+}
+
+function isTrustedXhsBindingResetSender(message, sender) {
+  return Boolean(
+    message && message.confirmedByExtension === true &&
+    sender && sender.id === chrome.runtime.id &&
+    isOneClickWebToolSender(message, sender)
+  );
+}
+
+function xhsBindingTasksRunning(stored) {
+  const source = xhsBindingRecord(stored);
+  const projectStatus = xhsBindingRecord(source[PROJECT_TASK_STATUS_KEY]);
+  const batchStatus = xhsBindingRecord(source[ACCOUNT_BATCH_STATUS_KEY]);
+  return Boolean(
+    projectTaskPromise ||
+    accountBatchPromise ||
+    projectStatus.running ||
+    batchStatus.running ||
+    batchStatus.paused
+  );
+}
+
+function requestXhsBindingReset(message) {
+  xhsBindingMutationPending += 1;
+  const task = withXhsBindingRegistryLock(async () => {
+    const source = xhsBindingRecord(message);
+    if (source.confirmedByExtension !== true) {
+      throw new Error('解除旧绑定缺少扩展内部确认。');
+    }
+    const storeId = batchText(source.storeId, 100);
+    if (!storeId) throw new Error('请先选择项目目录中的店铺。');
+    const platform = batchText(source.platform, 24);
+    if (!XHS_PLATFORM_TASK_IDS.includes(platform)) {
+      throw new Error('小红书绑定平台不在允许范围内。');
+    }
+    const stored = await chrome.storage.local.get([
+      PROJECT_DIRECTORY_KEY,
+      PROJECT_TASK_STATUS_KEY,
+      ACCOUNT_BATCH_STATUS_KEY,
+      XHS_STORE_BINDINGS_KEY,
+    ]);
+    if (xhsBindingTasksRunning(stored)) {
+      throw new Error('任务或批量任务执行期间不能解除小红书店铺绑定。');
+    }
+    const directory = xhsBindingRecord(stored && stored[PROJECT_DIRECTORY_KEY]);
+    const knownStore = (Array.isArray(directory.stores) ? directory.stores : []).some((store) => (
+      xhsBindingRecord(store).id === storeId
+    ));
+    if (!knownStore) throw new Error('所选店铺不在当前项目目录中。');
+
+    const registry = xhsBindingRecord(stored && stored[XHS_STORE_BINDINGS_KEY]);
+    const currentStores = xhsBindingRecord(registry.stores);
+    const currentStore = xhsBindingRecord(currentStores[storeId]);
+    const nextPlatforms = Object.assign({}, xhsBindingRecord(currentStore.platforms));
+    delete nextPlatforms[platform];
+    const updatedAt = new Date().toISOString();
+    const nextRegistry = Object.assign({}, registry, {
+      schema: batchText(registry.schema, 80) || XHS_STORE_BINDINGS_KEY,
+      schemaVersion: Number.isInteger(Number(registry.schemaVersion))
+        ? Number(registry.schemaVersion)
+        : 2,
+      stores: Object.assign({}, currentStores, {
+        [storeId]: Object.assign({}, currentStore, {
+          platforms: nextPlatforms,
+          updatedAt,
+        }),
+      }),
+    });
+    await chrome.storage.local.set({ [XHS_STORE_BINDINGS_KEY]: nextRegistry });
+    return safeXhsBindingSummary(nextRegistry, storeId);
+  });
+  return task.finally(() => {
+    xhsBindingMutationPending = Math.max(0, xhsBindingMutationPending - 1);
+  });
+}
+
 function xhsCollectionFailureRetryable(collections, platforms) {
   const source = collections && typeof collections === 'object' ? collections : {};
   const requested = Array.isArray(platforms) ? platforms : [];
@@ -3642,72 +3796,76 @@ async function runXhsAnalysisTask(options) {
   });
   const collections = collection && collection.platforms || {};
   const generatedAt = new Date().toISOString();
-  const storedBindings = await chrome.storage.local.get(XHS_STORE_BINDINGS_KEY);
-  const bindingResult = XhsBindings.reconcileStoreBindings({
-    storeId,
-    selectedPlatforms: platforms,
-    collections,
-    registry: storedBindings && storedBindings[XHS_STORE_BINDINGS_KEY],
-    updatedAt: generatedAt,
+  return withXhsBindingRegistryLock(async () => {
+    const storedBindings = await chrome.storage.local.get(XHS_STORE_BINDINGS_KEY);
+    const bindingResult = XhsBindings.reconcileStoreBindings({
+      storeId,
+      selectedPlatforms: platforms,
+      collections,
+      registry: storedBindings && storedBindings[XHS_STORE_BINDINGS_KEY],
+      updatedAt: generatedAt,
+    });
+    const bindingIssues = Array.isArray(bindingResult.issues) ? bindingResult.issues : [];
+    const safeBindingIssues = sanitizeXhsBindingIssues(bindingIssues);
+    const snapshot = XhsAnalysis.createXhsAnalysisSnapshot({
+      runId,
+      storeId,
+      dateRange,
+      selectedPlatforms: platforms,
+      accountBindings: bindingResult.bindings,
+      bindingIssues: safeBindingIssues.map((issue) => Object.assign({ severity: 'critical' }, issue)),
+      generatedAt,
+      asOf: dateRange.to,
+      targetRoi: Number.isFinite(Number(source.targetRoi)) ? Number(source.targetRoi) : null,
+      collections,
+    });
+    XhsMetrics.assertSnapshotWithinLimit(snapshot);
+    const platformFailures = platforms.filter((platform) => ![
+      'complete', 'verified_no_spend',
+    ].includes(String(collections[platform] && collections[platform].status || 'failed')));
+    const allFailed = platforms.every((platform) => [
+      'failed', 'cancelled', 'missing',
+    ].includes(String(collections[platform] && collections[platform].status || 'missing')));
+    const blockingBindingIssues = bindingIssues.filter((issue) => {
+      const platform = String(issue && issue.platform || '');
+      const status = String(collections[platform] && collections[platform].status || 'missing');
+      const unavailableIdentity = issue && issue.code === 'account_identity_missing' &&
+        platforms.includes(platform) && ['failed', 'cancelled'].includes(status);
+      const partialJuguangIdentity = issue && platform === 'juguang' &&
+        platforms.includes(platform) && status === 'partial' && [
+          'account_identity_missing', 'account_identity_ambiguous',
+        ].includes(issue.code);
+      return !(unavailableIdentity || partialJuguangIdentity);
+    });
+    const bindingGatePassed = bindingResult.ready === true || (
+      bindingIssues.length > 0 && blockingBindingIssues.length === 0
+    );
+    const storedAnalysis = {};
+    if (bindingResult.changed) storedAnalysis[XHS_STORE_BINDINGS_KEY] = bindingResult.registry;
+    if (!allFailed && bindingGatePassed) storedAnalysis.xhsAnalysisSnapshotV1 = snapshot;
+    if (Object.keys(storedAnalysis).length) await chrome.storage.local.set(storedAnalysis);
+    const warnings = (snapshot.quality.issues || [])
+      .map((issue) => issue.message || issue.code)
+      .filter(Boolean);
+    return {
+      ok: !allFailed && bindingGatePassed,
+      code: allFailed ? 'XHS_COLLECTION_FAILED'
+        : (!bindingGatePassed ? 'XHS_ACCOUNT_BINDING_FAILED' : ''),
+      retryable: allFailed && xhsCollectionFailureRetryable(collections, platforms),
+      source: '淘宝星河、蒲公英、聚光三源联表',
+      noteCount: Array.isArray(snapshot.notes) ? snapshot.notes.length : 0,
+      partial: !allFailed && (
+        platformFailures.length > 0 || snapshot.quality.decisionReady !== true || !bindingGatePassed
+      ),
+      status: collection.status,
+      platforms,
+      bindingIssues: safeBindingIssues,
+      warnings,
+      warning: allFailed ? '所选小红书平台均未成功返回。'
+        : (!bindingGatePassed ? '当前平台真实账号与所选店铺绑定校验未通过。' : ''),
+      snapshot: !allFailed && bindingGatePassed ? snapshot : null,
+    };
   });
-  const snapshot = XhsAnalysis.createXhsAnalysisSnapshot({
-    runId,
-    storeId,
-    dateRange,
-    selectedPlatforms: platforms,
-    accountBindings: bindingResult.bindings,
-    bindingIssues: bindingResult.issues,
-    generatedAt,
-    asOf: dateRange.to,
-    targetRoi: Number.isFinite(Number(source.targetRoi)) ? Number(source.targetRoi) : null,
-    collections,
-  });
-  XhsMetrics.assertSnapshotWithinLimit(snapshot);
-  const platformFailures = platforms.filter((platform) => ![
-    'complete', 'verified_no_spend',
-  ].includes(String(collections[platform] && collections[platform].status || 'failed')));
-  const allFailed = platforms.every((platform) => [
-    'failed', 'cancelled', 'missing',
-  ].includes(String(collections[platform] && collections[platform].status || 'missing')));
-  const bindingIssues = Array.isArray(bindingResult.issues) ? bindingResult.issues : [];
-  const blockingBindingIssues = bindingIssues.filter((issue) => {
-    const platform = String(issue && issue.platform || '');
-    const status = String(collections[platform] && collections[platform].status || 'missing');
-    const unavailableIdentity = issue && issue.code === 'account_identity_missing' &&
-      platforms.includes(platform) && ['failed', 'cancelled'].includes(status);
-    const partialJuguangIdentity = issue && platform === 'juguang' &&
-      platforms.includes(platform) && status === 'partial' && [
-        'account_identity_missing', 'account_identity_ambiguous',
-      ].includes(issue.code);
-    return !(unavailableIdentity || partialJuguangIdentity);
-  });
-  const bindingGatePassed = bindingResult.ready === true || (
-    bindingIssues.length > 0 && blockingBindingIssues.length === 0
-  );
-  const storedAnalysis = {};
-  if (bindingResult.changed) storedAnalysis[XHS_STORE_BINDINGS_KEY] = bindingResult.registry;
-  if (!allFailed && bindingGatePassed) storedAnalysis.xhsAnalysisSnapshotV1 = snapshot;
-  if (Object.keys(storedAnalysis).length) await chrome.storage.local.set(storedAnalysis);
-  const warnings = (snapshot.quality.issues || [])
-    .map((issue) => issue.message || issue.code)
-    .filter(Boolean);
-  return {
-    ok: !allFailed && bindingGatePassed,
-    code: allFailed ? 'XHS_COLLECTION_FAILED'
-      : (!bindingGatePassed ? 'XHS_ACCOUNT_BINDING_FAILED' : ''),
-    retryable: allFailed && xhsCollectionFailureRetryable(collections, platforms),
-    source: '淘宝星河、蒲公英、聚光三源联表',
-    noteCount: Array.isArray(snapshot.notes) ? snapshot.notes.length : 0,
-    partial: !allFailed && (
-      platformFailures.length > 0 || snapshot.quality.decisionReady !== true || !bindingGatePassed
-    ),
-    status: collection.status,
-    platforms,
-    warnings,
-    warning: allFailed ? '所选小红书平台均未成功返回。'
-      : (!bindingGatePassed ? '当前平台真实账号与所选店铺绑定校验未通过。' : ''),
-    snapshot: !allFailed && bindingGatePassed ? snapshot : null,
-  };
 }
 
 async function runContentDiagnosisReport(options) {
@@ -3904,6 +4062,9 @@ async function runContentDiagnosisReport(options) {
         message: (detailOk && execution.attempts > 1 ? '第 ' + execution.attempts + ' 次尝试成功；' : '') +
           contentDiagnosisResultMessage(detail),
       };
+      if (step.key === 'xiaohongshu') {
+        result.bindingIssues = sanitizeXhsBindingIssues(detail && detail.bindingIssues);
+      }
     } catch (error) {
       result = {
         key: step.key,
@@ -5057,12 +5218,30 @@ function ensureProjectTask(payload) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.type !== 'XHS_BINDING_RESET') return;
+  if (!isTrustedXhsBindingResetSender(message, sender)) {
+    sendResponse({ ok: false, message: '仅允许当前扩展在可见的一键取数页确认后解除绑定。' });
+    return;
+  }
+  requestXhsBindingReset(message).then((summary) => {
+    sendResponse({ ok: true, summary });
+  }).catch((error) => {
+    sendResponse({ ok: false, message: error && error.message ? error.message : String(error) });
+  });
+  return true;
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== 'PROJECT_TASK_START') return;
   if (!isOneClickWebToolSender(message, sender)) {
     sendResponse({ ok: false, message: '请从淘宝全链路网页工具的“一键取数”页面发起任务。' });
     return;
   }
   (async () => {
+    if (xhsBindingMutationPending) {
+      sendResponse({ ok: false, message: '小红书店铺绑定正在更新，请完成后再启动当前账号任务。' });
+      return;
+    }
     if (accountBatchPromise) {
       sendResponse({ ok: false, message: '分组批量任务正在执行，请完成后再执行当前账号任务。' });
       return;
@@ -5184,6 +5363,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false, message: '当前有单店取数或报告任务正在执行，请完成后再启动批量任务。' });
       return;
     }
+    if (xhsBindingMutationPending) {
+      sendResponse({ ok: false, message: '小红书店铺绑定正在更新，请完成后再启动批量任务。' });
+      return;
+    }
     let payload = message.payload || {};
     if (message.type === 'ACCOUNT_BATCH_START_FROM_SESSION') {
       const sessionStored = await chrome.storage.session.get(ACCOUNT_VAULT_SESSION_KEY);
@@ -5192,6 +5375,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ? await chrome.storage.local.get(ACCOUNT_BATCH_STATUS_KEY)
         : {};
       payload = prepareAccountBatchFromSession(vault, payload, statusStored[ACCOUNT_BATCH_STATUS_KEY]);
+    }
+    if (xhsBindingMutationPending) {
+      sendResponse({ ok: false, message: '小红书店铺绑定正在更新，请完成后再启动批量任务。' });
+      return;
     }
     const launch = ensureAccountBatchTask(payload);
     sendResponse({ ok: true, started: launch.started, running: true });

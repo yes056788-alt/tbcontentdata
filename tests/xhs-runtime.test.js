@@ -1174,6 +1174,186 @@ test('runtime injects a fixed DOM return-to-main workflow and verifies Juguang a
   assert.ok(pageClientCalls.length >= 1, 'accountType 4 must be verified after the DOM action');
 });
 
+test('runtime ignores a mounted but hidden Juguang return action until the account menu is visible', async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-hidden-return',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+    brand: { brandUserName: '虚构所属品牌' },
+  };
+  const main = {
+    vSellerId: 'fictional-main-vseller-hidden-return',
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构所属品牌',
+  };
+  let current = clone(child);
+  let currentFrame = {
+    tabId: 13,
+    frameId: 0,
+    documentId: 'fixture-doc-hidden-return-child',
+    documentLifecycle: 'active',
+    url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`,
+  };
+  const committedListeners = new Set();
+  const clicked = [];
+  let menuOpen = false;
+  let identityCalls = 0;
+  const chrome = createFakeChrome();
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return clone(currentFrame);
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const emitCommitted = (details) => {
+    currentFrame = Object.assign({}, currentFrame, details);
+    for (const listener of Array.from(committedListeners)) listener(clone(details));
+  };
+  const visibleRect = {
+    top: 12, left: 1080, right: 1260, bottom: 44, width: 180, height: 32,
+  };
+  const hiddenRect = {
+    top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0,
+  };
+  const styleView = {
+    getComputedStyle(element) {
+      return {
+        display: 'block',
+        visibility: 'visible',
+        pointerEvents: element.pointerBlocked ? 'none' : 'auto',
+        opacity: '1',
+      };
+    },
+  };
+  const ownerDocument = { defaultView: styleView };
+  const pointerBlockedReturnAction = {
+    textContent: '返回主账户',
+    pointerBlocked: true,
+    ownerDocument,
+    closest() {
+      return this;
+    },
+    getAttribute() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return visibleRect;
+    },
+    click() {
+      clicked.push('return:pointer-blocked');
+    },
+  };
+  const returnAction = {
+    textContent: '返回主账户',
+    ownerDocument,
+    closest() {
+      return this;
+    },
+    getAttribute() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return menuOpen ? visibleRect : hiddenRect;
+    },
+    click() {
+      clicked.push(menuOpen ? 'return:visible' : 'return:hidden');
+      if (!menuOpen) return;
+      current = clone(main);
+      emitCommitted({
+        tabId: 13,
+        frameId: 0,
+        documentId: 'fixture-doc-hidden-return-main',
+        documentLifecycle: 'active',
+        url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+      });
+    },
+  };
+  const accountTrigger = {
+    textContent: child.name,
+    ownerDocument,
+    closest() {
+      return this;
+    },
+    getAttribute() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return visibleRect;
+    },
+    click() {
+      clicked.push('account-trigger');
+      menuOpen = true;
+    },
+  };
+  const document = {
+    documentElement: { clientWidth: 1280 },
+    querySelectorAll(selector) {
+      const value = String(selector);
+      if (value.includes('img.avatar')) return [];
+      // The real menu subtree stays mounted while closed; only its geometry changes.
+      return [pointerBlockedReturnAction, returnAction, accountTrigger];
+    },
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (details) => {
+    if (typeof details.func === 'function') {
+      return executeInjectedFunction(details, document);
+    }
+    return originalExecuteScript(details);
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 30,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        identityCalls += 1;
+        return clone(current);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      assert.equal(verified.accountType, 4);
+      assert.equal(verified.advertiserId, main.advertiserId);
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.deepEqual(clicked, ['account-trigger', 'return:visible']);
+  assert.equal(identityCalls, 1);
+  assert.equal(committedListeners.size, 0);
+  const committedDocumentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+    entry.target && Array.isArray(entry.target.documentIds)
+  ));
+  assert.deepEqual(committedDocumentInjections.map((entry) => ({
+    documentIds: entry.target.documentIds,
+    world: entry.world,
+  })), [
+    { documentIds: ['fixture-doc-hidden-return-main'], world: 'MAIN' },
+    { documentIds: ['fixture-doc-hidden-return-main'], world: 'ISOLATED' },
+  ]);
+});
+
 test('runtime executes the Juguang DOM workflow through the exact current account name without clicking near matches', async () => {
   const runtimeModule = loadRuntime();
   const child = {
@@ -1390,7 +1570,9 @@ test('runtime skips a hidden exact Juguang account-name trigger and opens the vi
     x: 24, y: 12, top: 12, left: 24, right: 56, bottom: 44, width: 32, height: 32,
   });
   const hiddenExactTrigger = element(child.name, null, { label: 'hidden-exact-account-trigger' });
-  const returnAction = element('返回主账户', () => { returnedToMain = true; });
+  const returnAction = element('返回主账户', () => { returnedToMain = true; }, {}, {
+    x: 1080, y: 48, top: 48, left: 1080, right: 1232, bottom: 80, width: 152, height: 32,
+  });
   const document = {
     documentElement: { clientWidth: 1280 },
     querySelectorAll(selector) {

@@ -306,9 +306,7 @@
   }
 
   function sectionHasData(section) {
-    if (section === 'xiaohongshu') return Boolean(
-      xhsAnalysis || xhsStatus && Object.keys(xhsStatus).length
-    );
+    if (section === 'xiaohongshu') return Boolean(xhsAnalysis);
     if (section === 'flow') return Boolean(reportData && reportData.sycm && reportData.guanghe);
     if (section === 'guanghe') return Boolean(reportData && reportData.guanghe);
     if (section === 'wxt') return Boolean(validWxtSnapshot() && wxtReport.marketing && wxtReport.marketing.ok);
@@ -323,6 +321,12 @@
     if (section === 'xiaohongshu') {
       const result = resultByKey('xiaohongshu');
       if (!xhsAnalysis && result && result.ok === false) {
+        const bindingIssues = safeXhsBindingIssues(result.bindingIssues);
+        if (bindingIssues.length) {
+          return bindingIssues.map((issue) => (
+            issue.platformName + ' / ' + issue.code + '：' + issue.message
+          )).join('；');
+        }
         return result.message || '小红书三平台取数未生成可用的分析快照。';
       }
       if (!xhsAnalysis && xhsStatus && xhsStatus.status === 'failed') {
@@ -802,6 +806,34 @@
       )
       .replace(/https?:\/\/[^\s<>"'，；。！？、）】}]+/gi, '[请求地址已隐藏]');
     return text.length > 260 ? text.slice(0, 259) + '…' : text;
+  }
+
+  function safeXhsBindingIssues(value) {
+    const platformNames = new Map(XHS_PLATFORMS.map((platform) => [platform.key, platform.name]));
+    const messages = {
+      account_binding_mismatch: (platformName) =>
+        '当前' + platformName + '登录账号与所选店铺绑定不一致。',
+      account_identity_bound_to_other_store: (platformName) =>
+        '当前' + platformName + '登录账号已绑定到另一店铺，禁止重新归属。',
+      account_identity_missing: (platformName) =>
+        '无法确认' + platformName + '的真实登录账号，禁止用于店铺决策。',
+      account_identity_ambiguous: (platformName) =>
+        '无法唯一确认' + platformName + '账号，禁止用于店铺决策。',
+    };
+    return (Array.isArray(value) ? value : []).map((record) => {
+      const issue = record && typeof record === 'object' ? record : {};
+      const platform = String(issue.platform || '');
+      if (!platformNames.has(platform)) return null;
+      const rawCode = String(issue.code || '');
+      const code = Object.prototype.hasOwnProperty.call(messages, rawCode)
+        ? rawCode
+        : 'account_binding_issue';
+      const platformName = platformNames.get(platform);
+      const message = messages[code]
+        ? messages[code](platformName)
+        : '账号绑定校验未通过。';
+      return { code, platform, platformName, message };
+    }).filter(Boolean);
   }
 
   function xhsDiagnosticRecords(state) {

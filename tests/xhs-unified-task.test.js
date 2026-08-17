@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const XhsContract = require('../xhs/contract');
 
 const root = path.join(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
@@ -25,6 +26,11 @@ const runXhsSource = block(
   backgroundSource,
   'const XHS_TERMINAL_COLLECTION_ERROR_CODES',
   '\nasync function runContentDiagnosisReport'
+);
+const bindingObservabilitySource = block(
+  backgroundSource,
+  'const XHS_BINDING_PLATFORM_NAMES',
+  '\nfunction xhsCollectionFailureRetryable'
 );
 const reportSource = block(
   backgroundSource,
@@ -72,6 +78,7 @@ function createRunXhsHarness(options = {}) {
   };
   const context = vm.createContext({
     XHS_PLATFORM_TASK_IDS: ['adstar', 'pgy', 'juguang'],
+    XhsContract,
     XHS_STORE_BINDINGS_KEY: 'xhsStoreAccountBindingsV1',
     XHS_STORE_ACCOUNT_BINDINGS_KEY: 'xhsStoreAccountBindingsV1',
     XHS_BINDINGS_STORAGE_KEY: 'xhsStoreAccountBindingsV1',
@@ -448,6 +455,84 @@ test('runXhsAnalysisTask still blocks real identity mismatches and cross-store c
   }
 });
 
+test('runXhsAnalysisTask exposes only redacted binding code, platform, and message', async () => {
+  const expectedToken = 'pgy:fictional-expected-account-token';
+  const actualToken = 'pgy:fictional-actual-account-token';
+  const harness = createRunXhsHarness({
+    collectionStatus: 'complete',
+    collections: {
+      pgy: { status: 'complete', identity: { brandUserId: 'fictional-actual-account-token' } },
+    },
+    bindingResult: {
+      registry: { schema: 'xhsStoreAccountBindingsV1', schemaVersion: 2, stores: {} },
+      bindings: { pgy: [expectedToken] },
+      actualIdentities: { pgy: [actualToken] },
+      issues: [{
+        severity: 'critical',
+        code: 'account_binding_mismatch',
+        platform: 'pgy',
+        message: 'advertiserId=fictional-advertiser-id; memberId=fictional-member-id; ' +
+          'brandUserId=fictional-brand-user-id; otherStoreId=fictional-other-store-id; ' +
+          'Authorization: Bearer fictional-binding-credential',
+        expected: [expectedToken],
+        actual: [actualToken],
+        otherStoreId: 'fictional-other-store-id',
+      }, {
+        severity: 'critical',
+        code: 'memberId=fictional-sensitive-code-id',
+        platform: 'pgy',
+        message: 'brandUserId=fictional-sensitive-message-id',
+      }],
+      ready: false,
+      changed: false,
+    },
+    snapshot: {
+      schema: 'xhsAnalysisSnapshotV1',
+      notes: [],
+      quality: { decisionReady: false, issues: [] },
+    },
+  });
+
+  const result = await harness.run({
+    runId: 'fictional-xhs-redacted-binding-issue',
+    storeId: 'fictional-store-redacted-binding-issue',
+    platforms: ['pgy'],
+    dateRange: { from: '2030-03-08', to: '2030-03-14', timezone: 'Asia/Shanghai' },
+  });
+
+  assert.equal(result.ok, false, 'the binding mismatch must remain blocking');
+  assert.equal(result.code, 'XHS_ACCOUNT_BINDING_FAILED');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.bindingIssues)), [{
+    code: 'account_binding_mismatch',
+    platform: 'pgy',
+    message: '当前蒲公英登录账号与所选店铺绑定不一致。',
+  }, {
+    code: 'account_binding_issue',
+    platform: 'pgy',
+    message: '账号绑定校验未通过。',
+  }]);
+  assert.deepEqual(harness.analysisInputs[0].bindingIssues, [{
+    severity: 'critical',
+    code: 'account_binding_mismatch',
+    platform: 'pgy',
+    message: '当前蒲公英登录账号与所选店铺绑定不一致。',
+  }, {
+    severity: 'critical',
+    code: 'account_binding_issue',
+    platform: 'pgy',
+    message: '账号绑定校验未通过。',
+  }]);
+  const serialized = JSON.stringify({ result, analysisInput: harness.analysisInputs[0].bindingIssues });
+  for (const forbidden of [
+    expectedToken, actualToken, 'fictional-binding-credential', 'fictional-other-store-id',
+    'fictional-advertiser-id', 'fictional-member-id', 'fictional-brand-user-id',
+    'fictional-sensitive-code-id', 'fictional-sensitive-message-id',
+    '"expected"', '"actual"', '"otherStoreId"',
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, `binding observability leaked ${forbidden}`);
+  }
+});
+
 test('runXhsAnalysisTask anchors analysis asOf to the requested dateRange.to', async () => {
   const harness = createRunXhsHarness({
     collectionStatus: 'complete',
@@ -491,6 +576,7 @@ test('report executeStep preserves a returned detail.ok false instead of manufac
     CONTENT_DIAGNOSIS_WXT_KEY: 'fictional-report-wxt',
     PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp'],
     XHS_PLATFORM_TASK_IDS: ['adstar', 'pgy', 'juguang'],
+    XhsContract,
     REPORT_PLATFORM_TASK_IDS: ['sycm', 'guanghe', 'wxt', 'dmp', 'adstar', 'pgy', 'juguang'],
     PLATFORM_RETRY_ATTEMPTS: 1,
     contentDiagnosisResultMessage(detail) {
@@ -501,6 +587,14 @@ test('report executeStep preserves a returned detail.ok false instead of manufac
         ok: false,
         partial: true,
         message: '三个虚构来源均未完成',
+        bindingIssues: [{
+          code: 'account_binding_mismatch',
+          platform: 'pgy',
+          message: 'advertiserId=fictional-report-advertiser; otherStoreId=fictional-report-store; ' +
+            'Authorization: Bearer fictional-report-token',
+          expected: ['pgy:fictional-report-expected'],
+          actual: ['pgy:fictional-report-actual'],
+        }],
         snapshot: null,
       };
     },
@@ -512,7 +606,7 @@ test('report executeStep preserves a returned detail.ok false instead of manufac
     async waitMilliseconds() {},
   });
   vm.runInContext(
-    platformHelpers + '\n' + reportSource +
+    platformHelpers + '\n' + bindingObservabilitySource + '\n' + reportSource +
       '\nglobalThis.testRunReport = runContentDiagnosisReport;',
     context
   );
@@ -526,8 +620,27 @@ test('report executeStep preserves a returned detail.ok false instead of manufac
   const finalStatus = storageWrites.at(-1)['fictional-report-status'];
 
   assert.equal(xhsResult.ok, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(xhsResult.bindingIssues)), [{
+    code: 'account_binding_mismatch',
+    platform: 'pgy',
+    message: '当前蒲公英登录账号与所选店铺绑定不一致。',
+  }]);
   assert.equal(result.ok, false, 'a report with no successful selected step must return ok false');
-  assert.equal(finalStatus.results.find((item) => item.key === 'xiaohongshu').ok, false);
+  const archivedResult = finalStatus.results.find((item) => item.key === 'xiaohongshu');
+  assert.equal(archivedResult.ok, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(archivedResult.bindingIssues)), [{
+    code: 'account_binding_mismatch',
+    platform: 'pgy',
+    message: '当前蒲公英登录账号与所选店铺绑定不一致。',
+  }]);
+  const archivedSerialized = JSON.stringify(archivedResult);
+  for (const forbidden of [
+    'fictional-report-token', 'fictional-report-expected', 'fictional-report-actual',
+    'fictional-report-advertiser', 'fictional-report-store',
+    '"expected"', '"actual"',
+  ]) {
+    assert.equal(archivedSerialized.includes(forbidden), false, `archived report leaked ${forbidden}`);
+  }
 });
 
 test('archive status is failed when every selected step failed without an outer exception', async () => {
