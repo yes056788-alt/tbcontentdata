@@ -279,50 +279,79 @@
     return Array.from(duplicates);
   }
 
-  function deriveOrderAccountIdentity(orders) {
-    const values = Array.isArray(orders) ? orders : [];
-    const namesByMemberId = new Map();
-    let missingMemberIdCount = 0;
-    let missingMemberNameCount = 0;
-    for (const order of values) {
-      const memberId = String(order && order.memberId != null ? order.memberId : '').trim();
-      const memberName = String(order && order.memberName != null ? order.memberName : '').trim();
+  function deriveAccountIdentity(projects, orders) {
+    const projectValues = Array.isArray(projects) ? projects : [];
+    const orderValues = Array.isArray(orders) ? orders : [];
+    const candidatesByMemberId = new Map();
+    let missingProjectMemberIdCount = 0;
+    let missingOrderMemberIdCount = 0;
+    let missingOrderMemberNameCount = 0;
+
+    function addCandidate(value, idField, nameField, source) {
+      const memberId = String(value && value[idField] != null ? value[idField] : '').trim();
+      const memberName = String(value && value[nameField] != null ? value[nameField] : '').trim();
       if (!memberId) {
-        missingMemberIdCount += 1;
-        continue;
+        if (source === 'project') missingProjectMemberIdCount += 1;
+        else missingOrderMemberIdCount += 1;
+        return;
       }
-      if (!namesByMemberId.has(memberId)) namesByMemberId.set(memberId, new Set());
-      if (memberName) namesByMemberId.get(memberId).add(memberName);
-      else missingMemberNameCount += 1;
+      if (!candidatesByMemberId.has(memberId)) {
+        candidatesByMemberId.set(memberId, {
+          memberId,
+          projectNames: new Set(),
+          orderNames: new Set(),
+          sources: new Set(),
+        });
+      }
+      const candidate = candidatesByMemberId.get(memberId);
+      candidate.sources.add(source);
+      if (memberName) candidate[source === 'project' ? 'projectNames' : 'orderNames'].add(memberName);
+      else if (source === 'order') missingOrderMemberNameCount += 1;
     }
 
-    const candidates = Array.from(namesByMemberId.entries())
-      .map(([memberId, names]) => ({
-        memberId,
-        memberName: Array.from(names).sort()[0] || null,
+    for (const project of projectValues) {
+      addCandidate(project, 'promoteShopMemberId', 'promoteShopName', 'project');
+    }
+    for (const order of orderValues) {
+      addCandidate(order, 'memberId', 'memberName', 'order');
+    }
+
+    const candidates = Array.from(candidatesByMemberId.values())
+      .map((candidate) => ({
+        memberId: candidate.memberId,
+        memberName: Array.from(candidate.projectNames).sort()[0] ||
+          Array.from(candidate.orderNames).sort()[0] || null,
+        sources: candidate.sources,
       }))
       .sort((left, right) => left.memberId.localeCompare(right.memberId));
     const warnings = [];
-    if (!candidates.length || missingMemberIdCount || missingMemberNameCount) {
+    if (!candidates.length) {
       warnings.push({
         code: 'adstar_account_identity_missing',
-        message: candidates.length
-          ? 'Some Star orders are missing memberId or memberName account identity fields.'
-          : 'Star orders do not expose a memberId account identity.',
-        orderCount: values.length,
-        missingMemberIdCount,
-        missingMemberNameCount,
+        message: 'Star project and order rows do not expose a stable memberId account identity.',
+        projectCount: projectValues.length,
+        orderCount: orderValues.length,
+        missingProjectMemberIdCount,
+        missingOrderMemberIdCount,
+        // Retain the original diagnostic field names for older report readers.
+        missingMemberIdCount: missingOrderMemberIdCount,
+        missingMemberNameCount: missingOrderMemberNameCount,
       });
     }
     if (candidates.length > 1) {
       warnings.push({
         code: 'adstar_account_identity_ambiguous',
-        message: 'Star orders contain multiple memberId account identities.',
+        message: 'Star project and order rows contain multiple memberId account identities.',
         identityCount: candidates.length,
+        projectIdentityCount: candidates.filter((candidate) => candidate.sources.has('project')).length,
+        orderIdentityCount: candidates.filter((candidate) => candidate.sources.has('order')).length,
       });
     }
     return {
-      identity: candidates.length === 1 ? candidates[0] : null,
+      identity: candidates.length === 1 ? {
+        memberId: candidates[0].memberId,
+        memberName: candidates[0].memberName,
+      } : null,
       ambiguous: candidates.length > 1,
       warnings,
     };
@@ -719,7 +748,7 @@
       };
       const selectedProjects = capped(relevantProjects, source.maxProjects);
       const selectedOrders = capped(relevantOrders, source.maxOrders);
-      const accountIdentity = deriveOrderAccountIdentity(ordersList.items);
+      const accountIdentity = deriveAccountIdentity(projectsList.items, ordersList.items);
       const truncation = {
         maxPages: projectsList.truncated || ordersList.truncated,
         maxProjects: selectedProjects.truncated,

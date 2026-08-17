@@ -128,7 +128,19 @@ function createFakePageClient(options = {}) {
           },
         };
       }
-      return modelEnvelope(PROJECT_PAGES[page] || [], page, 3);
+      const projects = (PROJECT_PAGES[page] || []).map((project, index) => {
+        const copy = { ...project };
+        if (options.projectIdentity) {
+          copy.promoteShopMemberId = options.projectIdentity.memberId;
+          copy.promoteShopName = options.projectIdentity.memberName;
+        }
+        if (options.multipleProjectIdentities && page === 2 && index === 0) {
+          copy.promoteShopMemberId = 'fictional-member-002';
+          copy.promoteShopName = '虚构星河账号二';
+        }
+        return copy;
+      });
+      return modelEnvelope(projects, page, 3);
     }
 
     if (input.endpoint === 'orders.list') {
@@ -397,6 +409,71 @@ test('warns and leaves identity empty when Star order rows have no member identi
   assert.ok(warning);
   assert.equal(warning.missingMemberIdCount, 3);
   assert.equal(warning.orderCount, 3);
+});
+
+test('uses the unique promoted shop identity when real-shaped Star orders omit memberId', async () => {
+  const pageClient = createFakePageClient({
+    missingOrderIdentity: true,
+    projectIdentity: {
+      memberId: 'fictional-project-member-001',
+      memberName: '虚构项目推广店铺',
+    },
+  });
+  const result = await createCollector(pageClient).collect(collectionOptions({
+    runId: 'fictional-adstar-run-project-account-identity',
+  }));
+
+  assert.deepEqual(result.identity, {
+    memberId: 'fictional-project-member-001',
+    memberName: '虚构项目推广店铺',
+  });
+  assert.equal(result.status, 'complete');
+  assert.equal(
+    result.warnings.some((item) => item.code === 'adstar_account_identity_missing'),
+    false,
+  );
+});
+
+test('conflicting project and order member identities are ambiguous and never trusted', async () => {
+  const pageClient = createFakePageClient({
+    projectIdentity: {
+      memberId: 'fictional-project-member-conflict',
+      memberName: '虚构冲突推广店铺',
+    },
+  });
+  const result = await createCollector(pageClient).collect(collectionOptions({
+    runId: 'fictional-adstar-run-cross-source-identity-conflict',
+  }));
+
+  assert.equal(result.identity, null);
+  assert.equal(result.status, 'partial');
+  const warning = result.warnings.find((item) => item.code === 'adstar_account_identity_ambiguous');
+  assert.ok(warning);
+  assert.equal(warning.identityCount, 2);
+  assert.doesNotMatch(
+    JSON.stringify(warning),
+    /fictional-project-member-conflict|fictional-member-001|虚构冲突推广店铺/,
+  );
+});
+
+test('multiple promoted-shop identities stay ambiguous when orders expose no memberId', async () => {
+  const pageClient = createFakePageClient({
+    missingOrderIdentity: true,
+    projectIdentity: {
+      memberId: 'fictional-project-member-001',
+      memberName: '虚构项目推广店铺一',
+    },
+    multipleProjectIdentities: true,
+  });
+  const result = await createCollector(pageClient).collect(collectionOptions({
+    runId: 'fictional-adstar-run-project-identity-ambiguous',
+  }));
+
+  assert.equal(result.identity, null);
+  assert.equal(result.status, 'partial');
+  const warning = result.warnings.find((item) => item.code === 'adstar_account_identity_ambiguous');
+  assert.ok(warning);
+  assert.equal(warning.identityCount, 2);
 });
 
 test('multiple Star member identities are ambiguous and can never produce complete status', async () => {

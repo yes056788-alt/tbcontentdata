@@ -325,6 +325,9 @@
             const findExactAccountTrigger = () => Array.from(document.querySelectorAll(
               accountTriggerSelector
             )).find((element) => {
+              if (!element || typeof element.getBoundingClientRect !== 'function') return false;
+              const rect = element.getBoundingClientRect();
+              if (Number(rect.width) <= 0 || Number(rect.height) <= 0) return false;
               const values = [
                 element.textContent,
                 element.getAttribute && element.getAttribute('aria-label'),
@@ -332,13 +335,35 @@
               ].map(normalizedText).filter(Boolean);
               return values.some((text) => exactNames.has(text));
             });
+            const findVisibleHeaderAvatar = () => {
+              const viewportWidth = Number(
+                document.documentElement && document.documentElement.clientWidth
+              ) || Number.POSITIVE_INFINITY;
+              let selected = null;
+              let selectedRight = Number.NEGATIVE_INFINITY;
+              for (const element of Array.from(document.querySelectorAll(
+                'img.avatar,[class*="avatar"],[class*="Avatar"]'
+              ))) {
+                if (!element || typeof element.getBoundingClientRect !== 'function') continue;
+                const rect = element.getBoundingClientRect();
+                const right = Number(rect.right);
+                const visible = Number(rect.width) > 0 && Number(rect.height) > 0 &&
+                  Number(rect.top) >= 0 && Number(rect.top) < 80 &&
+                  Number(rect.left) >= 0 && right <= viewportWidth + 1;
+                if (!visible || right <= selectedRight) continue;
+                selected = element;
+                selectedRight = right;
+              }
+              return selected;
+            };
 
             if (clickReturnAction()) return true;
             const exactTrigger = findExactAccountTrigger();
-            const triggers = exactTrigger ? [] : Array.from(document.querySelectorAll(
+            const headerAvatar = exactTrigger ? null : findVisibleHeaderAvatar();
+            const triggers = exactTrigger || headerAvatar ? [] : Array.from(document.querySelectorAll(
               accountTriggerSelector
             ));
-            const trigger = exactTrigger || triggers.find((element) => {
+            const trigger = exactTrigger || headerAvatar || triggers.find((element) => {
               const text = normalizedText(element.textContent);
               const label = normalizedText(element.getAttribute && element.getAttribute('aria-label'));
               return /账户|切换|广告主/.test(`${text} ${label}`);

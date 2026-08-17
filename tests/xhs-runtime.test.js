@@ -865,6 +865,9 @@ test('runtime executes the Juguang DOM workflow through the exact current accoun
     closest() {
       return this;
     },
+    getBoundingClientRect() {
+      return { top: 12, left: 1100, right: 1240, bottom: 44, width: 140, height: 32 };
+    },
     getAttribute(name) {
       return attributes[name] || null;
     },
@@ -923,6 +926,89 @@ test('runtime executes the Juguang DOM workflow through the exact current accoun
   assert.equal(JSON.stringify(injectedArgs).includes(child.vSellerId), false);
   assert.deepEqual(clicked, [child.name, '返回主账户']);
   assert.equal(clicked.includes(nearMatch.textContent), false);
+});
+
+test('runtime skips a hidden exact Juguang account-name trigger and opens the visible header avatar', async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-avatar-trigger',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const main = {
+    vSellerId: null,
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构所属品牌',
+  };
+  const clicked = [];
+  let menuOpen = false;
+  let returnedToMain = false;
+  const element = (text, onClick, attributes = {}, rect = null) => ({
+    textContent: text,
+    closest() {
+      return this;
+    },
+    getAttribute(name) {
+      return attributes[name] || null;
+    },
+    getBoundingClientRect() {
+      return rect || { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    },
+    click() {
+      clicked.push(attributes.label || text);
+      if (onClick) onClick();
+    },
+  });
+  const headerAvatar = element('', () => { menuOpen = true; }, { label: 'header-avatar' }, {
+    x: 1200, y: 12, top: 12, left: 1200, right: 1232, bottom: 44, width: 32, height: 32,
+  });
+  const unrelatedAvatar = element('', null, { label: 'unrelated-avatar' }, {
+    x: 24, y: 12, top: 12, left: 24, right: 56, bottom: 44, width: 32, height: 32,
+  });
+  const hiddenExactTrigger = element(child.name, null, { label: 'hidden-exact-account-trigger' });
+  const returnAction = element('返回主账户', () => { returnedToMain = true; });
+  const document = {
+    documentElement: { clientWidth: 1280 },
+    querySelectorAll(selector) {
+      const value = String(selector);
+      if (value.includes('img.avatar')) return [unrelatedAvatar, headerAvatar];
+      if (value.includes('span,div')) return menuOpen ? [returnAction] : [];
+      if (value.includes('[class*="account"]')) return [hiddenExactTrigger];
+      return [];
+    },
+  };
+  const chrome = createFakeChrome(PLATFORM_TABS, {
+    executeScript(details) {
+      if (typeof details.func !== 'function') return [{ result: { ok: true } }];
+      return executeInjectedFunction(details, document);
+    },
+  });
+  const fixture = createRuntimeOptions({
+    chrome,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        return clone(returnedToMain ? main : child);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      assert.equal(verified.accountType, 4);
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.deepEqual(clicked, ['header-avatar', '返回主账户']);
 });
 
 test('runtime retries a stale child identity after returning to the Juguang main account', async () => {
