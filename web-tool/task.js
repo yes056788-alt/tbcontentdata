@@ -39,6 +39,14 @@
       .map((input) => input.value) : [];
   }
 
+  function validatePlatformCapabilities(platforms) {
+    const hasXhs = (Array.isArray(platforms) ? platforms : [])
+      .some((platform) => ['adstar', 'pgy', 'juguang'].includes(platform));
+    if (hasXhs && !bridgeCapabilities.has('xhsAnalysis')) {
+      throw new Error('当前一键取数页仍连接旧版数据助手，请刷新本页后重试。');
+    }
+  }
+
   function dateInputValue(value) {
     const year = value.getFullYear();
     const month = String(value.getMonth() + 1).padStart(2, '0');
@@ -519,6 +527,7 @@
     if (!connected) throw new Error('数据助手未连接。');
     const platforms = selectedPlatforms('current');
     if (!platforms.length) throw new Error('请至少选择一个平台任务。');
+    validatePlatformCapabilities(platforms);
     const hasXhs = platforms.some((platform) => ['adstar', 'pgy', 'juguang'].includes(platform));
     const dateRange = {
       from: $('#xhsDateFrom').value,
@@ -632,6 +641,11 @@
   });
   document.querySelectorAll('[data-platform-picker] input[type="checkbox"]').forEach((input) => {
     input.addEventListener('change', () => {
+      const picker = typeof input.closest === 'function' ? input.closest('[data-platform-picker]') : null;
+      const mode = picker && picker.dataset ? picker.dataset.platformPicker : activeMode;
+      if ($('#pageNotice').textContent === '请至少选择一个平台任务。' && selectedPlatforms(mode).length) {
+        setNotice('', '');
+      }
       renderBatchControls();
       renderStatus();
     });
