@@ -318,8 +318,7 @@ function completeInput() {
     accountBindings: {
       pgy: ['pgy:fictional-brand-user-001'],
       juguang: [
-        'juguang:fictional-juguang-brand-001:3001:4:fictional-advertiser-a',
-        'juguang:fictional-juguang-brand-001:3002:602:fictional-advertiser-b',
+        'juguang:fictional-juguang-brand-001:3001:4:main',
       ],
       adstar: ['adstar:fictional-star-member-001'],
     },

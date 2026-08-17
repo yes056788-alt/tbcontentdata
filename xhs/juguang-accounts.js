@@ -10,10 +10,33 @@
 
   if (!contract) throw new Error('XhsContract must be loaded before XhsJuguangAccounts');
 
+  function hasIdentityValue(value) {
+    return value !== undefined && value !== null && String(value).trim() !== '';
+  }
+
+  function normalizeBrand(data, fallback) {
+    const nested = data.brand && typeof data.brand === 'object' && !Array.isArray(data.brand)
+      ? data.brand
+      : null;
+    const brandUserId = nested && hasIdentityValue(nested.brandUserId)
+      ? nested.brandUserId
+      : data.brandUserId;
+    const brandUserName = nested && hasIdentityValue(nested.brandUserName)
+      ? nested.brandUserName
+      : data.brandUserName;
+    if (!nested && !hasIdentityValue(brandUserId) && !hasIdentityValue(brandUserName)) {
+      return fallback;
+    }
+    const brand = Object.assign({}, nested || {});
+    if (hasIdentityValue(brandUserId)) brand.brandUserId = brandUserId;
+    if (hasIdentityValue(brandUserName)) brand.brandUserName = brandUserName;
+    return brand;
+  }
+
   function normalizeCurrentAccount(value) {
     const data = contract.sanitizeSensitiveData(value && typeof value === 'object' ? value : {});
     const subAccount = data.subAccount && typeof data.subAccount === 'object' ? data.subAccount : {};
-    const brand = data.brand && typeof data.brand === 'object' ? data.brand : {};
+    const brand = normalizeBrand(data, {});
     return {
       vSellerId: subAccount.agentSubAccountId || data.vSellerId || null,
       name: subAccount.agentSubAccountName || data.name || brand.brandUserName || null,
@@ -27,12 +50,13 @@
 
   function normalizeListedAccount(value) {
     const row = contract.sanitizeSensitiveData(value && typeof value === 'object' ? value : {});
+    const brand = normalizeBrand(row, null);
     return {
       vSellerId: row.virtualSellerId || row.vSellerId || null,
       name: row.owner && row.owner.name || row.accountName || row.name || null,
       advertiserId: row.advertiserId,
       accountType: row.accountType,
-      brand: row.brand || null,
+      brand,
       agent: row.agent || null,
       owner: row.owner || null,
     };

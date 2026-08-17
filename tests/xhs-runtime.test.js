@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
 const runtimeResource = 'xhs/runtime.js';
@@ -99,6 +100,26 @@ function createFakeChrome(tabs = PLATFORM_TABS, options = {}) {
     },
     fixture: { runtimeListeners, storageWrites, tabQueries, tabUpdates, scriptExecutions },
   };
+}
+
+async function executeInjectedFunction(details, document) {
+  let clock = 0;
+  class FakeDate extends Date {
+    static now() {
+      return clock;
+    }
+  }
+  const context = vm.createContext({
+    Date: FakeDate,
+    document,
+    Promise,
+    setTimeout(resolve, delayMs) {
+      clock += Math.max(0, Number(delayMs) || 0);
+      resolve();
+    },
+  });
+  const injected = vm.runInContext(`(${details.func.toString()})`, context);
+  return [{ result: await injected(...clone(details.args || [])) }];
 }
 
 function allowedSender(overrides = {}) {
@@ -590,6 +611,60 @@ test('runtime runs three sources serially, propagates partial independently, and
   assert.deepEqual(compactRun.platforms.pgy.qualityEvidence, { safeMetric: 7 });
 });
 
+test('status snapshot preserves safe source time and account labels without account identifiers', async () => {
+  const runtimeModule = loadRuntime();
+  const identities = {
+    adstar: {
+      finishedAt: '2030-01-08T00:01:00.000Z',
+      identity: { memberId: 'fictional-member-id-private', memberName: '虚构星河品牌' },
+    },
+    pgy: {
+      finishedAt: '2030-01-08T00:02:00.000Z',
+      identity: { brandUserId: 'fictional-brand-id-private', brandUserName: '虚构蒲公英品牌' },
+    },
+    juguang: {
+      finishedAt: '2030-01-08T00:03:00.000Z',
+      accounts: [{ account: {
+        advertiserId: 'fictional-main-advertiser-private',
+        accountType: 4,
+        brand: { brandUserName: '虚构聚光品牌' },
+      } }, { account: {
+        advertiserId: 'fictional-child-advertiser-private',
+        accountType: 602,
+        name: '虚构聚光子账户',
+      } }],
+    },
+  };
+  const fixture = createRuntimeOptions({
+    collectByPlatform: async (platform) => completeResult(platform, identities[platform]),
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  await runtime.run(runInput());
+
+  const finalStatus = fixture.chrome.fixture.storageWrites
+    .filter((write) => Object.prototype.hasOwnProperty.call(write, STATUS_KEY))
+    .at(-1)[STATUS_KEY];
+  assert.deepEqual(finalStatus.platforms.adstar, {
+    status: 'complete',
+    collectedAt: '2030-01-08T00:01:00.000Z',
+    accountLabel: '虚构星河品牌',
+    accountCount: 1,
+    warnings: [],
+    errors: [],
+  });
+  assert.equal(finalStatus.platforms.pgy.accountLabel, '虚构蒲公英品牌');
+  assert.equal(finalStatus.platforms.juguang.accountLabel, '虚构聚光品牌');
+  assert.equal(finalStatus.platforms.juguang.accountCount, 2);
+  const serializedStatus = JSON.stringify(finalStatus);
+  for (const identifier of [
+    'fictional-member-id-private', 'fictional-brand-id-private',
+    'fictional-main-advertiser-private', 'fictional-child-advertiser-private',
+  ]) {
+    assert.equal(serializedStatus.includes(identifier), false, `status leaked account identifier: ${identifier}`);
+  }
+});
+
 test('runtime rejects a concurrent second run before it can invoke another collector', async () => {
   const runtimeModule = loadRuntime();
   const firstCollectorStarted = deferred();
@@ -767,6 +842,89 @@ test('runtime injects a fixed DOM return-to-main workflow and verifies Juguang a
   assert.ok(pageClientCalls.length >= 1, 'accountType 4 must be verified after the DOM action');
 });
 
+test('runtime executes the Juguang DOM workflow through the exact current account name without clicking near matches', async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-exact-trigger',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+    brandUserName: '虚构所属品牌',
+  };
+  const main = {
+    vSellerId: null,
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构所属品牌',
+  };
+  const clicked = [];
+  let menuOpen = false;
+  let returnedToMain = false;
+  const element = (text, onClick, attributes = {}) => ({
+    textContent: text,
+    closest() {
+      return this;
+    },
+    getAttribute(name) {
+      return attributes[name] || null;
+    },
+    click() {
+      clicked.push(text);
+      if (onClick) onClick();
+    },
+  });
+  const nearMatch = element('虚构当前子账户相关设置');
+  const exactAccountButton = element(child.name, () => { menuOpen = true; });
+  const returnAction = element('返回主账户', () => { returnedToMain = true; });
+  const document = {
+    querySelectorAll(selector) {
+      if (String(selector).includes('span,div')) {
+        return menuOpen
+          ? [nearMatch, exactAccountButton, returnAction]
+          : [nearMatch, exactAccountButton];
+      }
+      return [nearMatch, exactAccountButton];
+    },
+  };
+  let injectedArgs = null;
+  const chrome = createFakeChrome(PLATFORM_TABS, {
+    executeScript(details) {
+      if (typeof details.func !== 'function') return [{ result: { ok: true } }];
+      injectedArgs = clone(details.args);
+      return executeInjectedFunction(details, document);
+    },
+  });
+  const fixture = createRuntimeOptions({
+    chrome,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        return clone(returnedToMain ? main : child);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      assert.equal(verified.accountType, 4);
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.equal(injectedArgs.length, 1);
+  assert.ok(injectedArgs[0].includes(child.name));
+  assert.ok(injectedArgs[0].includes(child.brandUserName));
+  assert.equal(JSON.stringify(injectedArgs).includes(child.vSellerId), false);
+  assert.deepEqual(clicked, [child.name, '返回主账户']);
+  assert.equal(clicked.includes(nearMatch.textContent), false);
+});
+
 test('runtime retries a stale child identity after returning to the Juguang main account', async () => {
   const runtimeModule = loadRuntime();
   const child = {
@@ -814,4 +972,88 @@ test('runtime retries a stale child identity after returning to the Juguang main
     chrome.fixture.scriptExecutions.filter((execution) => execution.hasFixedFunction).length,
     1,
   );
+});
+
+test('runtime verifies the main identity when return navigation destroys the DOM execution result', async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-navigation', advertiserId: 2001, accountType: 602,
+  };
+  const main = {
+    vSellerId: null, advertiserId: 1001, accountType: 4,
+  };
+  let returnedToMain = false;
+  const chrome = createFakeChrome(PLATFORM_TABS, {
+    executeScript() {
+      returnedToMain = true;
+      return [];
+    },
+  });
+  const fixture = createRuntimeOptions({
+    chrome,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        return clone(returnedToMain ? main : child);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      assert.equal(verified.accountType, 4);
+      assert.equal(verified.advertiserId, main.advertiserId);
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.equal(
+    chrome.fixture.scriptExecutions.filter((execution) => execution.hasFixedFunction).length,
+    1,
+  );
+});
+
+test('runtime does not accept a lost DOM execution result while the verified identity stays child', async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-not-returned', advertiserId: 2001, accountType: 602,
+  };
+  const chrome = createFakeChrome(PLATFORM_TABS, {
+    executeScript() {
+      return [];
+    },
+  });
+  let currentAttempts = 0;
+  const fixture = createRuntimeOptions({
+    chrome,
+    wait: async () => {},
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        currentAttempts += 1;
+        return clone(child);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      throw new Error(`collector must not continue for ${platform}`);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'failed');
+  assert.match(result.platforms.juguang.errors[0].message, /accountType|identity|main-account/i);
+  assert.equal(currentAttempts, 3);
 });

@@ -805,11 +805,15 @@
   }
 
   function xhsDiagnosticRecords(state) {
-    if (!state || !['failed', 'partial'].includes(String(state.status || ''))) return [];
+    if (!state) return [];
+    const status = String(state.status || '');
+    const includeErrors = ['failed', 'partial'].includes(status);
+    const includeWarnings = includeErrors || ['complete', 'verified_no_spend'].includes(status);
+    if (!includeErrors && !includeWarnings) return [];
     const records = [];
     for (const [kind, fallbackCode, values] of [
-      ['error', 'unknown_error', state.errors],
-      ['warning', 'warning', state.warnings],
+      ['error', 'unknown_error', includeErrors ? state.errors : []],
+      ['warning', 'warning', includeWarnings ? state.warnings : []],
     ]) {
       (Array.isArray(values) ? values : []).forEach((record) => {
         const item = record && typeof record === 'object' ? record : { message: record };
@@ -845,11 +849,13 @@
         ? accountMeta[platform.key] : {};
       const collectedAt = state.collectedAt || state.finishedAt || state.updatedAt || meta.collectedAt;
       const accountKeys = Array.isArray(meta.accountKeys) ? meta.accountKeys : [];
+      const accountLabel = String(state.accountLabel || '').trim() ||
+        (accountKeys.length ? accountKeys.join('、') : '账号待识别');
       return '<article class="xhs-source-card" data-xhs-platform="' + platform.key + '"><span>' +
         escapeHtml(platform.key.toUpperCase()) + '</span><h3>' + escapeHtml(platform.name) + '</h3><strong>' +
         escapeHtml(xhsStatusLabel(state.status)) + '</strong><p>来源时间 / 采集时间：' +
         escapeHtml(formatXhsTime(collectedAt)) + '</p><small>' +
-        escapeHtml(accountKeys.length ? accountKeys.join('、') : '账号待识别') + '</small>' +
+        escapeHtml(accountLabel) + '</small>' +
         buildXhsDiagnosticMarkup(state) + '</article>';
     }).join('');
     return '<section class="xhs-source-grid">' + sourceCards + '</section>';

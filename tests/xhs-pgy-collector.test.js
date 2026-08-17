@@ -248,6 +248,94 @@ test('normalizes sum data and reconciles total rows, unique notes, and both cost
   assert.ok(mismatch.issues.some((issue) => issue.code === 'cooperation_cost_mismatch'));
 });
 
+test('reconciles only a one-sided platform-fee truncation gap below the per-row yuan bound', () => {
+  const notes = [
+    normalizePgyNote({
+      noteId: 'fictional-rounding-note-001',
+      bizId: 'fictional-rounding-order-001',
+      actualConsume: 259,
+      totalPlatformPrice: 25,
+    }),
+    normalizePgyNote({
+      noteId: 'fictional-rounding-note-002',
+      bizId: 'fictional-rounding-order-002',
+      actualConsume: 169,
+      totalPlatformPrice: 16,
+    }),
+  ];
+  const reconciliation = reconcilePgyCollection({
+    summary: {
+      expectedCount: 2,
+      cooperationCost: 428,
+      platformFee: 42,
+    },
+    notes,
+  });
+
+  assert.equal(reconciliation.reconciled, true);
+  assert.deepEqual(reconciliation.issues, []);
+  assert.deepEqual(reconciliation.platformFeeDiagnostics, {
+    expected: 42,
+    actual: 41,
+    difference: 1,
+    tolerance: 2,
+    feeBearingCount: 2,
+    reconciliation: 'per_row_yuan_truncation',
+  });
+  assert.deepEqual(reconciliation.warnings, [{
+    code: 'platform_fee_rounding_reconciled',
+    message: 'PGY summary platform fee 42 exceeds the note-row total 41 by 1; accepted because 2 fee-bearing rows permit a one-sided truncation gap strictly below 2 yuan.',
+    expected: 42,
+    actual: 41,
+    difference: 1,
+    tolerance: 2,
+    feeBearingCount: 2,
+  }]);
+});
+
+test('keeps reverse and out-of-bound platform-fee differences as blocking mismatches', () => {
+  const notes = [
+    normalizePgyNote({
+      noteId: 'fictional-strict-note-001',
+      bizId: 'fictional-strict-order-001',
+      actualConsume: 100,
+      totalPlatformPrice: 10,
+    }),
+    normalizePgyNote({
+      noteId: 'fictional-strict-note-002',
+      bizId: 'fictional-strict-order-002',
+      actualConsume: 200,
+      totalPlatformPrice: 20,
+    }),
+  ];
+
+  const reverse = reconcilePgyCollection({
+    summary: { expectedCount: 2, cooperationCost: 300, platformFee: 29 },
+    notes,
+  });
+  const reverseIssue = reverse.issues.find((issue) => issue.code === 'platform_fee_mismatch');
+  assert.equal(reverse.reconciled, false);
+  assert.deepEqual(reverseIssue, {
+    code: 'platform_fee_mismatch',
+    message: 'PGY platform fee mismatch: summary 29, note rows 30, difference -1, allowed one-sided truncation gap must be at least 0 and strictly below 2 yuan across 2 fee-bearing rows.',
+    expected: 29,
+    actual: 30,
+    difference: -1,
+    tolerance: 2,
+    feeBearingCount: 2,
+  });
+
+  const outOfBound = reconcilePgyCollection({
+    summary: { expectedCount: 2, cooperationCost: 300, platformFee: 32 },
+    notes,
+  });
+  const outOfBoundIssue = outOfBound.issues.find((issue) => issue.code === 'platform_fee_mismatch');
+  assert.equal(outOfBound.reconciled, false);
+  assert.equal(outOfBoundIssue.difference, 2);
+  assert.equal(outOfBoundIssue.tolerance, 2);
+  assert.match(outOfBoundIssue.message, /strictly below 2 yuan/i);
+});
+
 test('collects identity, sum, and every list page using note publish time as the range basis', async () => {
   const pageClient = createFakePageClient();
   const result = await createCollector(pageClient).collect(collectionOptions());
@@ -287,6 +375,27 @@ test('collects identity, sum, and every list page using note publish time as the
     serialized,
     /fictional-xsec|fictional-signature|fictional-row-token|xsec_token|sign=/
   );
+});
+
+test('propagates an explainable platform-fee truncation warning without degrading collection status', async () => {
+  const pageClient = createFakePageClient({
+    summaryOverride: { totalPlatformPrice: '36' },
+  });
+  const result = await createCollector(pageClient)
+    .collect(collectionOptions('fictional-pgy-run-fee-rounding'));
+
+  assert.equal(result.status, 'complete');
+  assert.equal(result.reconciliation.reconciled, true);
+  assert.deepEqual(result.reconciliation.issues, []);
+  assert.ok(result.warnings.some((warning) => (
+    warning.code === 'platform_fee_rounding_reconciled' &&
+    warning.expected === 36 &&
+    warning.actual === 35 &&
+    warning.difference === 1 &&
+    warning.tolerance === 3 &&
+    warning.feeBearingCount === 3 &&
+    /accepted/i.test(warning.message)
+  )));
 });
 
 test('distinguishes a verified zero-result collection from schema or request failure', async () => {

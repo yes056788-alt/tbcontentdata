@@ -102,7 +102,7 @@ function reportEnvelope(rows, page, pageSize, totalFee) {
     data: {
       dataList: rows.slice((page - 1) * pageSize, page * pageSize),
       page: {
-        pageNum: page,
+        pageIndex: page,
         pageSize,
         totalCount: rows.length,
         totalPage,
@@ -355,6 +355,24 @@ test('normalizes account shapes and strongly verifies advertiserId, accountType,
   );
 });
 
+test('normalizes flat page-hook brand identity into the canonical account brand', () => {
+  const expectedBrand = {
+    brandUserId: 'fictional-flat-brand-id',
+    brandUserName: '虚构扁平品牌',
+  };
+  const flatIdentity = {
+    advertiserId: 1001,
+    accountType: 4,
+    brandUserId: expectedBrand.brandUserId,
+    brandUserName: expectedBrand.brandUserName,
+    name: '虚构主账户',
+    vSellerId: null,
+  };
+
+  assert.deepEqual(normalizeListedAccount(flatIdentity).brand, expectedBrand);
+  assert.deepEqual(normalizeCurrentAccount(flatIdentity).brand, expectedBrand);
+});
+
 test('parses report pages and normalizes string-packed metrics without hiding schema drift', () => {
   const response = reportEnvelope([
     reportRow('fictional-note-001', 12, { time: '2030-01-01', marketingTarget: 4, deliveryMode: 0 }),
@@ -379,6 +397,65 @@ test('parses report pages and normalizes string-packed metrics without hiding sc
   assert.throws(
     () => parseJuguangPage({ data: { page: { totalCount: 0, totalPage: 0 } } }, 1),
     /data\.dataList/i
+  );
+});
+
+test('parses the real one-based pageIndex used by account, summary, and daily reports', () => {
+  for (const dataset of ['account', 'summary', 'daily']) {
+    const response = reportEnvelope([
+      reportRow(`fictional-${dataset}-note-001`, 12),
+    ], 1, 20, 12);
+
+    const parsed = parseJuguangPage(response, 1);
+    assert.equal(parsed.items.length, 1, dataset);
+    assert.equal(parsed.total, 1, dataset);
+    assert.equal(parsed.pageSize, 20, dataset);
+    assert.equal(parsed.hasNext, false, dataset);
+  }
+
+  const empty = reportEnvelope([], 1, 20, 0);
+  const parsedEmpty = parseJuguangPage(empty, 1);
+  assert.equal(parsedEmpty.total, 0);
+  assert.equal(parsedEmpty.hasNext, false);
+
+  const compatiblePageNum = reportEnvelope([], 1, 20, 0);
+  compatiblePageNum.data.page.pageNum = compatiblePageNum.data.page.pageIndex;
+  delete compatiblePageNum.data.page.pageIndex;
+  assert.equal(parseJuguangPage(compatiblePageNum, 1).hasNext, false);
+
+  const conflictingAliases = reportEnvelope([], 1, 20, 0);
+  conflictingAliases.data.page.pageNum = 2;
+  assert.throws(
+    () => parseJuguangPage(conflictingAliases, 1),
+    /pageIndex.*pageNum|conflict|mismatch/i,
+  );
+
+  const missingIndex = reportEnvelope([], 1, 20, 0);
+  delete missingIndex.data.page.pageIndex;
+  assert.throws(
+    () => parseJuguangPage(missingIndex, 1),
+    /pageIndex|pageNum/i,
+  );
+
+  const mismatchedIndex = reportEnvelope([], 2, 20, 0);
+  assert.throws(
+    () => parseJuguangPage(mismatchedIndex, 1),
+    (error) => error.schemaInvalid === true && /page mismatch/i.test(error.message),
+  );
+
+  const inconsistentTotal = reportEnvelope([], 1, 20, 0);
+  inconsistentTotal.data.page.totalPage = 1;
+  assert.throws(
+    () => parseJuguangPage(inconsistentTotal, 1),
+    (error) => error.schemaInvalid === true && /pagination is inconsistent/i.test(error.message),
+  );
+
+  const undocumentedListAlias = reportEnvelope([], 1, 20, 0);
+  undocumentedListAlias.data.list = undocumentedListAlias.data.dataList;
+  delete undocumentedListAlias.data.dataList;
+  assert.throws(
+    () => parseJuguangPage(undocumentedListAlias, 1),
+    /data\.dataList/i,
   );
 });
 
@@ -586,7 +663,8 @@ test('a main identity without vSellerId resolves to the listed account and is co
   assert.equal(new Set(result.accounts.map((unit) => unit.account.vSellerId)).size, 3);
   assert.equal(runtimeAccounts.switches.some((account) => account.accountType === 4), false,
     'main-account transitions must not use child URL navigation');
-  assert.ok(runtimeAccounts.returns.length >= 1, 'main collection/restoration must use the DOM return workflow');
+  assert.equal(runtimeAccounts.returns.length, 1,
+    'the DOM return workflow is only needed after the collector actually leaves the main account');
   assert.equal(pageClient.getCurrent().accountType, 4);
 });
 

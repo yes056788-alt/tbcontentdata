@@ -23,6 +23,8 @@
   if (!quality) throw new Error('XhsQuality must be loaded before XhsPgyCollector');
 
   const DEFAULT_PAGE_SIZE = 30;
+  const MONEY_TOLERANCE = 0.01;
+  const PLATFORM_FEE_ROW_DISPLAY_UNIT = 1;
 
   function isObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -133,7 +135,46 @@
   }
 
   function closeEnough(left, right) {
-    return Math.abs(Number(left) - Number(right)) <= 0.01;
+    return Math.abs(Number(left) - Number(right)) <= MONEY_TOLERANCE;
+  }
+
+  function stableMoney(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return 0;
+    return Math.round(number * 1e6) / 1e6;
+  }
+
+  function platformFeeReconciliation(summaryFee, detailFee, feeBearingCount) {
+    const expected = stableMoney(summaryFee);
+    const actual = stableMoney(detailFee);
+    const difference = stableMoney(expected - actual);
+    const count = Math.max(0, Math.floor(Number(feeBearingCount) || 0));
+    const tolerance = count * PLATFORM_FEE_ROW_DISPLAY_UNIT;
+    const exact = difference === 0;
+    const perRowTruncation = difference > 0 && difference < tolerance;
+    return {
+      expected,
+      actual,
+      difference,
+      tolerance,
+      feeBearingCount: count,
+      reconciliation: exact
+        ? 'exact'
+        : perRowTruncation
+          ? 'per_row_yuan_truncation'
+          : 'mismatch',
+    };
+  }
+
+  function platformFeeMismatchMessage(diagnostics) {
+    const detail = diagnostics || {};
+    if (detail.feeBearingCount === 0) {
+      return `PGY platform fee mismatch: summary ${detail.expected}, note rows ${detail.actual}, ` +
+        `difference ${detail.difference}; no fee-bearing note rows exist, so the allowed truncation gap is 0 yuan.`;
+    }
+    return `PGY platform fee mismatch: summary ${detail.expected}, note rows ${detail.actual}, ` +
+      `difference ${detail.difference}, allowed one-sided truncation gap must be at least 0 and strictly below ` +
+      `${detail.tolerance} yuan across ${detail.feeBearingCount} fee-bearing rows.`;
   }
 
   function reconcilePgyCollection(input) {
@@ -153,10 +194,25 @@
     }
     const uniqueCount = noteIds.size;
     const duplicateCount = Math.max(receivedCount - uniqueCount, duplicateSourceCount);
-    const cooperationCost = notes.reduce((sum, note) => sum + numberOrZero(note && note.costs && note.costs.cooperation), 0);
-    const platformFee = notes.reduce((sum, note) => sum + numberOrZero(note && note.costs && note.costs.platformFee), 0);
+    const cooperationCost = stableMoney(notes.reduce(
+      (sum, note) => sum + numberOrZero(note && note.costs && note.costs.cooperation),
+      0
+    ));
+    const platformFee = stableMoney(notes.reduce(
+      (sum, note) => sum + numberOrZero(note && note.costs && note.costs.platformFee),
+      0
+    ));
+    const feeBearingCount = notes.reduce((count, note) => (
+      numberOrZero(note && note.costs && note.costs.platformFee) > 0 ? count + 1 : count
+    ), 0);
+    const platformFeeDiagnostics = platformFeeReconciliation(
+      summary.platformFee,
+      platformFee,
+      feeBearingCount
+    );
     const expectedCount = optionalNumber(summary.expectedCount);
     const issues = [];
+    const warnings = [];
     if (duplicateSourceCount > 0) {
       issues.push({ code: 'duplicate_source_row', count: duplicateSourceCount });
     } else if (duplicateCount > 0) {
@@ -166,17 +222,40 @@
       issues.push({ code: 'row_count_mismatch', expected: expectedCount, actual: receivedCount });
     }
     if (!closeEnough(summary.cooperationCost, cooperationCost)) {
+      const expected = stableMoney(summary.cooperationCost);
+      const difference = stableMoney(expected - cooperationCost);
       issues.push({
         code: 'cooperation_cost_mismatch',
-        expected: numberOrZero(summary.cooperationCost),
+        message: `PGY cooperation cost mismatch: summary ${expected}, note rows ${cooperationCost}, ` +
+          `difference ${difference}, allowed absolute tolerance ${MONEY_TOLERANCE} yuan.`,
+        expected,
         actual: cooperationCost,
+        difference,
+        tolerance: MONEY_TOLERANCE,
       });
     }
-    if (!closeEnough(summary.platformFee, platformFee)) {
+    if (platformFeeDiagnostics.reconciliation === 'per_row_yuan_truncation') {
+      warnings.push({
+        code: 'platform_fee_rounding_reconciled',
+        message: `PGY summary platform fee ${platformFeeDiagnostics.expected} exceeds the note-row total ` +
+          `${platformFeeDiagnostics.actual} by ${platformFeeDiagnostics.difference}; accepted because ` +
+          `${platformFeeDiagnostics.feeBearingCount} fee-bearing rows permit a one-sided truncation gap ` +
+          `strictly below ${platformFeeDiagnostics.tolerance} yuan.`,
+        expected: platformFeeDiagnostics.expected,
+        actual: platformFeeDiagnostics.actual,
+        difference: platformFeeDiagnostics.difference,
+        tolerance: platformFeeDiagnostics.tolerance,
+        feeBearingCount: platformFeeDiagnostics.feeBearingCount,
+      });
+    } else if (platformFeeDiagnostics.reconciliation === 'mismatch') {
       issues.push({
         code: 'platform_fee_mismatch',
-        expected: numberOrZero(summary.platformFee),
-        actual: platformFee,
+        message: platformFeeMismatchMessage(platformFeeDiagnostics),
+        expected: platformFeeDiagnostics.expected,
+        actual: platformFeeDiagnostics.actual,
+        difference: platformFeeDiagnostics.difference,
+        tolerance: platformFeeDiagnostics.tolerance,
+        feeBearingCount: platformFeeDiagnostics.feeBearingCount,
       });
     }
     return {
@@ -187,6 +266,8 @@
       duplicateCount,
       cooperationCost,
       platformFee,
+      platformFeeDiagnostics,
+      warnings,
       issues,
     };
   }
@@ -384,7 +465,7 @@
         reconciled: reconciliation.reconciled,
         receivedCount: notesResult.receivedCount,
         truncation: { maxPages: Boolean(notesResult.truncated) },
-        warnings: (notesResult.warnings || []).concat(reconciliation.issues),
+        warnings: (notesResult.warnings || []).concat(reconciliation.warnings, reconciliation.issues),
         errors,
       });
       const status = reconciliation.reconciled && paginationComplete ? 'complete' : statusEvidence.status;

@@ -122,34 +122,84 @@
     return { dimensions, metrics: parseMetricObject(safe.dataValueJson) };
   }
 
-  function finiteNonNegative(value, field) {
+  function finiteNonNegativeInteger(value, field) {
     const number = Number(value);
-    if (!Number.isFinite(number) || number < 0) {
-      throw new Error(`Juguang response ${field} must be a finite non-negative number.`);
+    if (!Number.isFinite(number) || number < 0 || !Number.isInteger(number)) {
+      throw reportSchemaError(
+        `Juguang response ${field} must be a finite non-negative integer.`
+      );
+    }
+    return number;
+  }
+
+  function finitePositiveInteger(value, field) {
+    const number = finiteNonNegativeInteger(value, field);
+    if (number < 1) {
+      throw reportSchemaError(`Juguang response ${field} must be a positive integer.`);
     }
     return number;
   }
 
   function parseJuguangPage(response, page) {
-    if (!isObject(response) || !isObject(response.data)) throw new Error('Juguang response data is missing or invalid.');
-    const data = response.data;
-    if (!Array.isArray(data.dataList)) throw new Error('Juguang response data.dataList must be an array.');
-    if (!isObject(data.page)) throw new Error('Juguang response data.page is missing or invalid.');
-    const currentPage = Math.max(1, Number(page) || 1);
-    const pageNum = finiteNonNegative(data.page.pageNum, 'data.page.pageNum');
-    const pageSize = finiteNonNegative(data.page.pageSize, 'data.page.pageSize');
-    const total = finiteNonNegative(data.page.totalCount, 'data.page.totalCount');
-    const totalPage = finiteNonNegative(data.page.totalPage, 'data.page.totalPage');
-    if (pageNum > 0 && pageNum !== currentPage) {
-      throw new Error(`Juguang response page mismatch: expected ${currentPage}, received ${pageNum}.`);
+    if (!isObject(response) || !isObject(response.data)) {
+      throw reportSchemaError('Juguang response data is missing or invalid.');
     }
-    const hasNext = currentPage < totalPage;
+    const data = response.data;
+    if (!Array.isArray(data.dataList)) {
+      throw reportSchemaError('Juguang response data.dataList must be an array.');
+    }
+    if (!isObject(data.page)) {
+      throw reportSchemaError('Juguang response data.page is missing or invalid.');
+    }
+    const currentPage = Math.max(1, Number(page) || 1);
+    const hasPageIndex = Object.prototype.hasOwnProperty.call(data.page, 'pageIndex');
+    const hasPageNum = Object.prototype.hasOwnProperty.call(data.page, 'pageNum');
+    if (!hasPageIndex && !hasPageNum) {
+      throw reportSchemaError(
+        'Juguang response data.page.pageIndex (or compatible pageNum) is missing.'
+      );
+    }
+    const pageIndex = finitePositiveInteger(
+      hasPageIndex ? data.page.pageIndex : data.page.pageNum,
+      hasPageIndex ? 'data.page.pageIndex' : 'data.page.pageNum'
+    );
+    if (hasPageIndex && hasPageNum) {
+      const compatiblePageNum = finitePositiveInteger(data.page.pageNum, 'data.page.pageNum');
+      if (compatiblePageNum !== pageIndex) {
+        throw reportSchemaError(
+          `Juguang response data.page.pageIndex/pageNum conflict: ${pageIndex} versus ${compatiblePageNum}.`
+        );
+      }
+    }
+    const pageSize = finitePositiveInteger(data.page.pageSize, 'data.page.pageSize');
+    const total = finiteNonNegativeInteger(data.page.totalCount, 'data.page.totalCount');
+    const totalPage = finiteNonNegativeInteger(data.page.totalPage, 'data.page.totalPage');
+    if (pageIndex !== currentPage) {
+      throw reportSchemaError(
+        `Juguang response page mismatch: expected ${currentPage}, received ${pageIndex}.`
+      );
+    }
+    const expectedTotalPage = total === 0 ? 0 : Math.ceil(total / pageSize);
+    if (totalPage !== expectedTotalPage) {
+      throw reportSchemaError(
+        `Juguang response pagination is inconsistent: totalPage ${totalPage}, expected ${expectedTotalPage}.`
+      );
+    }
+    const expectedItems = total === 0
+      ? 0
+      : Math.max(0, Math.min(pageSize, total - ((pageIndex - 1) * pageSize)));
+    if (data.dataList.length !== expectedItems) {
+      throw reportSchemaError(
+        `Juguang response pagination row count mismatch: expected ${expectedItems}, received ${data.dataList.length}.`
+      );
+    }
+    const hasNext = pageIndex < totalPage;
     return {
       items: data.dataList,
       total,
       pageSize,
       hasNext,
-      nextPage: hasNext ? currentPage + 1 : null,
+      nextPage: hasNext ? pageIndex + 1 : null,
       totalData: normalizeReportTotal(data),
       unsupportedColumns: unsupportedColumnNames(data.unsupportedColumns),
     };
@@ -253,8 +303,13 @@
     }
 
     async function switchAccount(context, target) {
+      const current = await currentAccount(context);
+      try {
+        return accountTools.verifyAccount(current, target);
+      } catch (error) {
+        // A real transition is only needed when the verified current identity differs.
+      }
       if (Number(target && target.accountType) === 4 && typeof settings.returnToMainAccount === 'function') {
-        const current = await currentAccount(context);
         const actual = await returnToMainAccount(context, current);
         return accountTools.verifyAccount(actual, target);
       }

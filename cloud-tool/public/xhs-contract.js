@@ -41,6 +41,17 @@
     return false;
   }
 
+  function requireIntegerAtLeast(value, path, issues, minimum) {
+    const number = Number(value);
+    const lowerBound = Number(minimum) || 0;
+    if (Number.isFinite(number) && Number.isInteger(number) && number >= lowerBound) return true;
+    issues.push(issue(
+      path,
+      `${path} must be an integer greater than or equal to ${lowerBound}`
+    ));
+    return false;
+  }
+
   function validatePgyPage(response, issues) {
     if (!requireObject(response.data, 'data', issues)) return;
     requireArray(response.data.list, 'data.list', issues);
@@ -54,10 +65,38 @@
     if (!requireObject(response.data, 'data', issues)) return;
     requireArray(response.data.dataList, 'data.dataList', issues);
     if (!requireObject(response.data.page, 'data.page', issues)) return;
-    requireFiniteNumber(response.data.page.pageNum, 'data.page.pageNum', issues);
-    requireFiniteNumber(response.data.page.pageSize, 'data.page.pageSize', issues);
-    requireFiniteNumber(response.data.page.totalCount, 'data.page.totalCount', issues);
-    requireFiniteNumber(response.data.page.totalPage, 'data.page.totalPage', issues);
+    const page = response.data.page;
+    const hasPageIndex = Object.prototype.hasOwnProperty.call(page, 'pageIndex');
+    const hasPageNum = Object.prototype.hasOwnProperty.call(page, 'pageNum');
+    if (!hasPageIndex && !hasPageNum) {
+      issues.push(issue(
+        'data.page.pageIndex',
+        'data.page.pageIndex or compatible data.page.pageNum is required'
+      ));
+    } else {
+      const pageIndexValid = !hasPageIndex || requireIntegerAtLeast(
+        page.pageIndex,
+        'data.page.pageIndex',
+        issues,
+        1
+      );
+      const pageNumValid = !hasPageNum || requireIntegerAtLeast(
+        page.pageNum,
+        'data.page.pageNum',
+        issues,
+        1
+      );
+      if (hasPageIndex && hasPageNum && pageIndexValid && pageNumValid &&
+          Number(page.pageIndex) !== Number(page.pageNum)) {
+        issues.push(issue(
+          'data.page.pageNum',
+          'data.page.pageIndex and data.page.pageNum conflict'
+        ));
+      }
+    }
+    requireIntegerAtLeast(page.pageSize, 'data.page.pageSize', issues, 1);
+    requireIntegerAtLeast(page.totalCount, 'data.page.totalCount', issues, 0);
+    requireIntegerAtLeast(page.totalPage, 'data.page.totalPage', issues, 0);
   }
 
   function validateAdstarPage(response, issues) {

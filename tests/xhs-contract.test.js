@@ -83,6 +83,88 @@ test('validates the paginated response envelope used by each XHS platform', () =
   }
 });
 
+test('accepts Juguang pageIndex as the real pagination field and keeps pageNum compatibility', () => {
+  for (const page of [
+    { pageIndex: 1, pageSize: 20, totalCount: 1, totalPage: 1 },
+    { pageNum: 1, pageSize: 20, totalCount: 1, totalPage: 1 },
+    { pageIndex: 1, pageNum: 1, pageSize: 20, totalCount: 1, totalPage: 1 },
+  ]) {
+    const result = validateResponseEnvelope({
+      platform: 'juguang',
+      dataset: 'notes',
+      response: {
+        data: {
+          dataList: [{ noteId: 'fictional-juguang-real-page-shape' }],
+          page,
+        },
+      },
+    });
+
+    assert.equal(result.valid, true, JSON.stringify(result.issues));
+    assert.deepEqual(result.issues, []);
+  }
+});
+
+test('rejects missing, conflicting, or non-integer Juguang pagination fields', () => {
+  const cases = [
+    {
+      name: 'missing page index aliases',
+      page: { pageSize: 20, totalCount: 1, totalPage: 1 },
+      expected: /pageIndex|pageNum/i,
+    },
+    {
+      name: 'conflicting page index aliases',
+      page: { pageIndex: 1, pageNum: 2, pageSize: 20, totalCount: 1, totalPage: 1 },
+      expected: /conflict|mismatch|pageNum/i,
+    },
+    {
+      name: 'fractional pageIndex',
+      page: { pageIndex: 1.5, pageSize: 20, totalCount: 1, totalPage: 1 },
+      expected: /pageIndex/i,
+    },
+    {
+      name: 'fractional compatible pageNum',
+      page: { pageNum: 1.5, pageSize: 20, totalCount: 1, totalPage: 1 },
+      expected: /pageNum/i,
+    },
+    {
+      name: 'fractional pageSize',
+      page: { pageIndex: 1, pageSize: 20.5, totalCount: 1, totalPage: 1 },
+      expected: /pageSize/i,
+    },
+    {
+      name: 'fractional totalCount',
+      page: { pageIndex: 1, pageSize: 20, totalCount: 1.5, totalPage: 1 },
+      expected: /totalCount/i,
+    },
+    {
+      name: 'fractional totalPage',
+      page: { pageIndex: 1, pageSize: 20, totalCount: 1, totalPage: 1.5 },
+      expected: /totalPage/i,
+    },
+  ];
+
+  for (const scenario of cases) {
+    const result = validateResponseEnvelope({
+      platform: 'juguang',
+      dataset: 'notes',
+      response: {
+        data: {
+          dataList: [{ noteId: 'fictional-juguang-invalid-page-shape' }],
+          page: scenario.page,
+        },
+      },
+    });
+
+    assert.equal(result.valid, false, scenario.name);
+    assert.match(
+      result.issues.map((issue) => `${issue.path} ${issue.message}`).join(' '),
+      scenario.expected,
+      scenario.name,
+    );
+  }
+});
+
 test('rejects structure drift instead of treating missing list or page fields as an empty success', () => {
   const malformed = [
     {

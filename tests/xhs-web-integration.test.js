@@ -345,6 +345,33 @@ test('XHS report chapter shows three source states, quality gate and source time
   assertContains(combined, /聚光营销诉求/, 'XHS report must show Juguang objective breakdown');
 });
 
+test('XHS source cards prefer safe status account labels when analysis is unavailable', () => {
+  const harness = createReportHarness();
+  harness.api.setState({
+    status: {
+      status: 'partial',
+      platforms: {
+        adstar: {
+          status: 'complete',
+          collectedAt: '2030-02-01T00:00:00.000Z',
+          accountLabel: '虚构星河品牌',
+          accountCount: 1,
+        },
+        pgy: { status: 'failed' },
+        juguang: { status: 'failed' },
+      },
+    },
+    analysis: null,
+  });
+
+  harness.api.renderXhs();
+  const markup = harness.elements.get('xhsReport').innerHTML;
+  const adstarCard = markup.match(/<article[^>]*data-xhs-platform="adstar"[\s\S]*?<\/article>/);
+  assert.ok(adstarCard, 'missing Adstar source card');
+  assert.match(adstarCard[0], /2030\/2\/1[\s\S]*虚构星河品牌/);
+  assert.doesNotMatch(adstarCard[0], /账号待识别/);
+});
+
 test('XHS report renders an explicit failure instead of a report body for terminal status without analysis', () => {
   for (const [status, expected] of [
     ['failed', /失败/],
@@ -398,6 +425,10 @@ test('XHS failed and partial source cards expose only folded redacted code and m
         juguang: {
           status: 'complete',
           errors: [{ code: 'must_not_render', message: 'fictional-complete-source-secret' }],
+          warnings: [{
+            code: 'platform_fee_rounding_reconciled',
+            message: '汇总 42，明细 41，差额 1，严格容差 2 元。',
+          }],
         },
       },
     },
@@ -408,6 +439,11 @@ test('XHS failed and partial source cards expose only folded redacted code and m
   const liveMarkup = liveHarness.elements.get('xhsReport').innerHTML;
   assert.match(liveMarkup, /data-xhs-platform="adstar"[\s\S]*XHS_PLATFORM_TAB_MISSING[\s\S]*请刷新平台页/);
   assert.match(liveMarkup, /data-xhs-platform="pgy"[\s\S]*pagination_incomplete[\s\S]*分页中断/);
+  assert.match(
+    liveMarkup,
+    /data-xhs-platform="juguang"[\s\S]*platform_fee_rounding_reconciled[\s\S]*汇总 42，明细 41/,
+    'ready sources must retain folded non-blocking reconciliation evidence',
+  );
   assert.match(liveMarkup, /<details class="xhs-source-diagnostics">\s*<summary>/);
   assert.doesNotMatch(liveMarkup, /<details[^>]*\sopen(?:\s|>)/, 'technical details must be folded by default');
   for (const secret of [

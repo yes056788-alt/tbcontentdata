@@ -95,12 +95,59 @@
     return 'partial';
   }
 
+  function platformAccountSummary(platform, value) {
+    const collection = isObject(value) ? value : {};
+    if (platform === 'adstar') {
+      const identity = isObject(collection.identity) ? collection.identity : {};
+      const identified = Boolean(identity.memberId || identity.id || identity.memberName);
+      return {
+        accountLabel: identified
+          ? String(identity.memberName || '已识别淘宝星河账号').trim().slice(0, 128)
+          : '',
+        accountCount: identified ? 1 : 0,
+      };
+    }
+    if (platform === 'pgy') {
+      const identity = isObject(collection.identity) ? collection.identity : {};
+      const identified = Boolean(identity.brandUserId || identity.brandUserName);
+      return {
+        accountLabel: identified
+          ? String(identity.brandUserName || '已识别蒲公英品牌账号').trim().slice(0, 128)
+          : '',
+        accountCount: identified ? 1 : 0,
+      };
+    }
+    if (platform === 'juguang') {
+      const units = Array.isArray(collection.accounts) ? collection.accounts : [];
+      const accounts = units.map((unit) => isObject(unit && unit.account) ? unit.account : unit)
+        .filter(isObject);
+      const main = accounts.find((account) => Number(account.accountType) === 4) || null;
+      const brand = isObject(main && main.brand) ? main.brand : {};
+      const label = main && (
+        brand.brandUserName || main.brandUserName || main.name || main.accountName
+      );
+      return {
+        accountLabel: label
+          ? String(label).trim().slice(0, 128)
+          : accounts.length ? `已识别 ${accounts.length} 个聚光账户` : '',
+        accountCount: accounts.length,
+      };
+    }
+    return { accountLabel: '', accountCount: 0 };
+  }
+
   function platformStatusSnapshot(platforms) {
-    return Object.fromEntries(Object.entries(platforms).map(([id, value]) => [id, {
-      status: value.status,
-      warnings: value.warnings || [],
-      errors: value.errors || [],
-    }]));
+    return Object.fromEntries(Object.entries(platforms).map(([id, value]) => {
+      const account = platformAccountSummary(id, value);
+      return [id, contract.sanitizeSensitiveData({
+        status: value.status,
+        collectedAt: value.finishedAt || value.startedAt || null,
+        accountLabel: account.accountLabel,
+        accountCount: account.accountCount,
+        warnings: value.warnings || [],
+        errors: value.errors || [],
+      })];
+    }));
   }
 
   function senderAllowed(chromeApi, sender) {
@@ -138,6 +185,29 @@
       throw new Error('Juguang account identity vSellerId mismatch');
     }
     return compactValue(actual);
+  }
+
+  function juguangAccountDisplayNames(value) {
+    const source = isObject(value) ? value : {};
+    const candidates = [
+      source.name,
+      source.accountName,
+      source.brandUserName,
+      source.agentSubAccountName,
+      isObject(source.owner) ? source.owner.name : null,
+      isObject(source.brand) ? source.brand.brandUserName : null,
+      isObject(source.subAccount) ? source.subAccount.agentSubAccountName : null,
+    ];
+    const names = [];
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string') continue;
+      const safe = String(contract.sanitizeSensitiveData(candidate) || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!safe || safe.length > 128 || names.includes(safe)) continue;
+      names.push(safe);
+    }
+    return names;
   }
 
   function createXhsRuntime(options) {
@@ -222,48 +292,77 @@
         throw new Error('Juguang return-to-main requires chrome.scripting.executeScript.');
       }
 
-      const executions = await chromeApi.scripting.executeScript({
-        target: { tabId, frameIds: [0] },
-        func: async function clickJuguangReturnToMain() {
-          const normalizedText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-          const clickable = (element) => element && (
-            element.closest && element.closest('button,[role="button"],a,li,[role="menuitem"]') || element
-          );
-          const findReturnAction = () => Array.from(document.querySelectorAll(
-            'button,[role="button"],a,li,[role="menuitem"],span,div'
-          )).find((element) => normalizedText(element.textContent) === '返回主账户');
-          const clickReturnAction = () => {
-            const action = findReturnAction();
-            if (!action) return false;
-            const target = clickable(action);
-            if (!target || typeof target.click !== 'function') return false;
-            target.click();
-            return true;
-          };
+      const accountDisplayNames = juguangAccountDisplayNames(knownCurrent);
+      let actionError = null;
+      try {
+        const executions = await chromeApi.scripting.executeScript({
+          target: { tabId, frameIds: [0] },
+          args: [accountDisplayNames],
+          func: async function clickJuguangReturnToMain(displayNames) {
+            const normalizedText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+            const exactNames = new Set((Array.isArray(displayNames) ? displayNames : [])
+              .map(normalizedText)
+              .filter(Boolean));
+            const clickable = (element) => element && (
+              element.closest && element.closest('button,[role="button"],a,li,[role="menuitem"]') || element
+            );
+            const findReturnAction = () => Array.from(document.querySelectorAll(
+              'button,[role="button"],a,li,[role="menuitem"],span,div'
+            )).find((element) => normalizedText(element.textContent) === '返回主账户');
+            const clickReturnAction = () => {
+              const action = findReturnAction();
+              if (!action) return false;
+              const target = clickable(action);
+              if (!target || typeof target.click !== 'function') return false;
+              target.click();
+              return true;
+            };
 
-          if (clickReturnAction()) return true;
-          const triggers = Array.from(document.querySelectorAll(
-            'button,[role="button"],[aria-haspopup="menu"],[class*="account"],[class*="Account"]'
-          ));
-          const trigger = triggers.find((element) => {
-            const text = normalizedText(element.textContent);
-            const label = normalizedText(element.getAttribute && element.getAttribute('aria-label'));
-            return /账户|切换|广告主/.test(`${text} ${label}`);
-          });
-          if (trigger && typeof trigger.click === 'function') trigger.click();
+            const accountTriggerSelector = [
+              'button', '[role="button"]', 'a', '[aria-haspopup="menu"]',
+              '[class*="account"]', '[class*="Account"]',
+            ].join(',');
+            const findExactAccountTrigger = () => Array.from(document.querySelectorAll(
+              accountTriggerSelector
+            )).find((element) => {
+              const values = [
+                element.textContent,
+                element.getAttribute && element.getAttribute('aria-label'),
+                element.getAttribute && element.getAttribute('title'),
+              ].map(normalizedText).filter(Boolean);
+              return values.some((text) => exactNames.has(text));
+            });
 
-          const deadline = Date.now() + 3000;
-          while (Date.now() < deadline) {
             if (clickReturnAction()) return true;
-            await new Promise((resolve) => setTimeout(resolve, 100));
-          }
-          throw new Error('Juguang return-to-main action was not found.');
-        },
-      });
-      const executed = Array.isArray(executions) && executions.some((entry) => (
-        entry && (entry.result === true || entry.result && entry.result.ok === true)
-      ));
-      if (!executed) throw new Error('Juguang return-to-main action did not complete.');
+            const exactTrigger = findExactAccountTrigger();
+            const triggers = exactTrigger ? [] : Array.from(document.querySelectorAll(
+              accountTriggerSelector
+            ));
+            const trigger = exactTrigger || triggers.find((element) => {
+              const text = normalizedText(element.textContent);
+              const label = normalizedText(element.getAttribute && element.getAttribute('aria-label'));
+              return /账户|切换|广告主/.test(`${text} ${label}`);
+            });
+            const triggerTarget = clickable(trigger);
+            if (triggerTarget && typeof triggerTarget.click === 'function') triggerTarget.click();
+
+            const deadline = Date.now() + 3000;
+            while (Date.now() < deadline) {
+              if (clickReturnAction()) return true;
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+            throw new Error('Juguang return-to-main action was not found.');
+          },
+        });
+        const executed = Array.isArray(executions) && executions.some((entry) => (
+          entry && (entry.result === true || entry.result && entry.result.ok === true)
+        ));
+        if (!executed) actionError = new Error('Juguang return-to-main action did not complete.');
+      } catch (error) {
+        // Clicking the action navigates the tab and may destroy the execution context before
+        // Chrome can return the function result. The post-navigation identity is authoritative.
+        actionError = error;
+      }
 
       const attempts = Math.max(1, Math.floor(Number(bridgeRetry.attempts) || 1));
       let lastError = null;
@@ -281,7 +380,7 @@
           if (attempt < attempts) await wait(Math.max(0, Number(bridgeRetry.delayMs) || 0));
         }
       }
-      throw lastError || new Error('Juguang main-account identity could not be verified.');
+      throw lastError || actionError || new Error('Juguang main-account identity could not be verified.');
     }
 
     const collectorInstances = {};

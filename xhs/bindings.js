@@ -11,7 +11,10 @@
   if (!contract) throw new Error('XhsContract must be loaded before XhsBindings');
 
   const BINDING_SCHEMA = 'xhsStoreAccountBindingsV1';
+  const BINDING_SCHEMA_VERSION = 2;
   const PLATFORMS = Object.freeze(['adstar', 'pgy', 'juguang']);
+  const READY_STATUSES = new Set(['complete', 'verified_no_spend']);
+  const JUGUANG_ADVERTISER_ONLY = 'advertiser-only';
 
   function isObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -33,6 +36,90 @@
     return parts.every(Boolean) ? `${prefix}:${parts.join(':')}` : '';
   }
 
+  function juguangBrandId(account) {
+    const source = isObject(account) ? account : {};
+    const brand = isObject(source.brand) ? source.brand : {};
+    return text(brand.brandUserId || source.brandUserId, 180);
+  }
+
+  function juguangMainToken(brandUserId, advertiserId) {
+    return identityToken('juguang', [
+      text(brandUserId, 180) || JUGUANG_ADVERTISER_ONLY,
+      advertiserId,
+      4,
+      'main',
+    ]);
+  }
+
+  function juguangIdentityEvidence(collectionValue) {
+    const collection = isObject(collectionValue) ? collectionValue : {};
+    const accounts = [];
+    const units = Array.isArray(collection.accounts) ? collection.accounts : [];
+    for (const unit of units) {
+      const account = isObject(unit && unit.account) ? unit.account : unit;
+      if (isObject(account)) accounts.push(account);
+    }
+    if (isObject(collection.initialAccount)) accounts.push(collection.initialAccount);
+    if (isObject(collection.restoredAccount)) accounts.push(collection.restoredAccount);
+
+    const byAdvertiser = new Map();
+    for (const account of accounts) {
+      if (Number(account.accountType) !== 4) continue;
+      const advertiserId = text(account.advertiserId, 180);
+      if (!advertiserId) continue;
+      if (!byAdvertiser.has(advertiserId)) byAdvertiser.set(advertiserId, new Set());
+      const brandUserId = juguangBrandId(account);
+      if (brandUserId) byAdvertiser.get(advertiserId).add(brandUserId);
+    }
+
+    const tokens = [];
+    let ambiguous = byAdvertiser.size > 1;
+    for (const [advertiserId, brandIds] of byAdvertiser.entries()) {
+      if (brandIds.size > 1) ambiguous = true;
+      if (brandIds.size) {
+        for (const brandUserId of brandIds) {
+          tokens.push(juguangMainToken(brandUserId, advertiserId));
+        }
+      } else {
+        tokens.push(juguangMainToken('', advertiserId));
+      }
+    }
+    return { tokens: uniqueTokens(tokens), ambiguous };
+  }
+
+  function parseJuguangMainToken(value) {
+    const token = text(value, 320);
+    const parts = token.split(':');
+    if (parts.length !== 5 || parts[0] !== 'juguang') return null;
+    const rawBrandUserId = text(parts[1], 180);
+    const advertiserId = text(parts[2], 180);
+    const accountType = text(parts[3], 40);
+    const vSellerId = text(parts[4], 180);
+    if (!rawBrandUserId || !advertiserId || accountType !== '4' || vSellerId !== 'main') return null;
+    const advertiserOnly = rawBrandUserId === 'brand-unknown' ||
+      rawBrandUserId === JUGUANG_ADVERTISER_ONLY;
+    const brandUserId = advertiserOnly ? '' : rawBrandUserId;
+    return {
+      advertiserId,
+      advertiserOnly,
+      brandUserId,
+      token: juguangMainToken(brandUserId, advertiserId),
+    };
+  }
+
+  function normalizeJuguangTokens(value) {
+    const parsed = uniqueTokens(value)
+      .map(parseJuguangMainToken)
+      .filter(Boolean);
+    const advertiserIds = Array.from(new Set(parsed.map((item) => item.advertiserId)));
+    if (advertiserIds.length !== 1) return [];
+    const knownBrandIds = Array.from(new Set(parsed
+      .map((item) => item.brandUserId)
+      .filter(Boolean)));
+    if (knownBrandIds.length > 1) return [];
+    return [juguangMainToken(knownBrandIds[0] || '', advertiserIds[0])];
+  }
+
   function extractPlatformIdentity(platform, collectionValue) {
     const collection = isObject(collectionValue) ? collectionValue : {};
     if (platform === 'adstar') {
@@ -48,21 +135,7 @@
       ]);
     }
     if (platform === 'juguang') {
-      const units = Array.isArray(collection.accounts) && collection.accounts.length
-        ? collection.accounts
-        : [{ account: collection.initialAccount }];
-      return uniqueTokens(units.map((unit) => {
-        const account = isObject(unit && unit.account) ? unit.account : {};
-        const brand = isObject(account.brand) ? account.brand : {};
-        const advertiserId = account.advertiserId;
-        if (advertiserId === undefined || advertiserId === null || advertiserId === '') return '';
-        return identityToken('juguang', [
-          brand.brandUserId || 'brand-unknown',
-          advertiserId,
-          account.accountType == null ? 'type-unknown' : account.accountType,
-          account.vSellerId || 'main',
-        ]);
-      }));
+      return juguangIdentityEvidence(collection).tokens;
     }
     return [];
   }
@@ -77,7 +150,9 @@
       const platforms = {};
       const rawPlatforms = isObject(rawStore.platforms) ? rawStore.platforms : {};
       for (const platform of PLATFORMS) {
-        const tokens = uniqueTokens(rawPlatforms[platform]);
+        const tokens = platform === 'juguang'
+          ? normalizeJuguangTokens(rawPlatforms[platform])
+          : uniqueTokens(rawPlatforms[platform]);
         if (tokens.length) platforms[platform] = tokens;
       }
       stores[storeId] = {
@@ -85,13 +160,44 @@
         updatedAt: text(rawStore.updatedAt, 80),
       };
     }
-    return { schema: BINDING_SCHEMA, schemaVersion: 1, stores };
+    return { schema: BINDING_SCHEMA, schemaVersion: BINDING_SCHEMA_VERSION, stores };
   }
 
   function sameTokens(left, right) {
     const a = uniqueTokens(left);
     const b = uniqueTokens(right);
-    return a.length === b.length && a.every((value, index) => value === b[index]);
+    if (a.length === b.length && a.every((value, index) => value === b[index])) return true;
+    if (a.length !== 1 || b.length !== 1) return false;
+    const parsedA = parseJuguangMainToken(a[0]);
+    const parsedB = parseJuguangMainToken(b[0]);
+    return Boolean(parsedA && parsedB &&
+      parsedA.advertiserId === parsedB.advertiserId &&
+      (parsedA.advertiserOnly || parsedB.advertiserOnly ||
+        parsedA.brandUserId === parsedB.brandUserId));
+  }
+
+  function tokensOverlap(left, right) {
+    const a = uniqueTokens(left);
+    const b = uniqueTokens(right);
+    return a.some((leftToken) => b.some((rightToken) => (
+      sameTokens([leftToken], [rightToken])
+    )));
+  }
+
+  function shouldUpgradeJuguangIdentity(expected, actual) {
+    if (!sameTokens(expected, actual) || expected.length !== 1 || actual.length !== 1) return false;
+    const previous = parseJuguangMainToken(expected[0]);
+    const current = parseJuguangMainToken(actual[0]);
+    return Boolean(previous && current && previous.advertiserOnly && !current.advertiserOnly);
+  }
+
+  function registryWasNormalized(value, normalized) {
+    if (!isObject(value)) return false;
+    try {
+      return JSON.stringify(value) !== JSON.stringify(normalized);
+    } catch (_error) {
+      return true;
+    }
   }
 
   function bindingIssue(code, platform, message, fields) {
@@ -109,6 +215,7 @@
     ));
     if (!selectedPlatforms.length) throw new Error('XHS store binding requires selected platforms.');
     const registry = normalizeRegistry(source.registry);
+    const registryChangedByNormalization = registryWasNormalized(source.registry, registry);
     const current = registry.stores[storeId] || { platforms: {}, updatedAt: '' };
     const nextPlatforms = Object.assign({}, current.platforms);
     const bindings = {};
@@ -117,10 +224,26 @@
     let changed = false;
 
     for (const platform of selectedPlatforms) {
-      const actual = extractPlatformIdentity(platform, source.collections && source.collections[platform]);
+      const collection = source.collections && source.collections[platform];
+      const juguangEvidence = platform === 'juguang'
+        ? juguangIdentityEvidence(collection)
+        : null;
+      const actual = juguangEvidence
+        ? juguangEvidence.tokens
+        : extractPlatformIdentity(platform, collection);
       const expected = uniqueTokens(current.platforms[platform]);
+      const collectionReady = READY_STATUSES.has(String(collection && collection.status || 'missing'));
       actualIdentities[platform] = actual;
       bindings[platform] = (expected.length ? expected : actual).slice();
+      if (juguangEvidence && juguangEvidence.ambiguous) {
+        bindings[platform] = expected.slice();
+        issues.push(bindingIssue(
+          'account_identity_ambiguous', platform,
+          '无法唯一确认聚光主账户，禁止用于店铺决策。',
+          { actual },
+        ));
+        continue;
+      }
       if (!actual.length) {
         issues.push(bindingIssue(
           'account_identity_missing', platform,
@@ -136,11 +259,19 @@
         ));
         continue;
       }
+      if (expected.length && platform === 'juguang' && collectionReady &&
+          shouldUpgradeJuguangIdentity(expected, actual)) {
+        nextPlatforms[platform] = actual.slice();
+        bindings[platform] = actual.slice();
+        changed = true;
+      }
       if (!expected.length) {
         const collision = Object.entries(registry.stores).find(([otherStoreId, otherStore]) => (
           otherStoreId !== storeId &&
-          uniqueTokens(otherStore && otherStore.platforms && otherStore.platforms[platform])
-            .some((token) => actual.includes(token))
+          tokensOverlap(
+            otherStore && otherStore.platforms && otherStore.platforms[platform],
+            actual,
+          )
         ));
         if (collision) {
           bindings[platform] = [];
@@ -151,9 +282,11 @@
           ));
           continue;
         }
-        nextPlatforms[platform] = actual.slice();
-        bindings[platform] = actual.slice();
-        changed = true;
+        if (collectionReady) {
+          nextPlatforms[platform] = actual.slice();
+          bindings[platform] = actual.slice();
+          changed = true;
+        }
       }
     }
 
@@ -162,13 +295,15 @@
       const collection = source.collections && source.collections[issue.platform];
       return ['failed', 'cancelled'].includes(String(collection && collection.status || 'missing'));
     });
-    const shouldPersist = changed && (issues.length === 0 || issuesAllowSafePartialCommit);
-    if (shouldPersist) {
+    const shouldPersistBindingChanges = changed &&
+      (issues.length === 0 || issuesAllowSafePartialCommit);
+    if (shouldPersistBindingChanges) {
       registry.stores[storeId] = {
         platforms: nextPlatforms,
         updatedAt: text(source.updatedAt, 80) || new Date().toISOString(),
       };
     }
+    const shouldPersist = registryChangedByNormalization || shouldPersistBindingChanges;
     return contract.sanitizeSensitiveData({
       registry,
       storeId,
