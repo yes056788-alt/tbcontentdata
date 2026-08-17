@@ -152,6 +152,6 @@ assert.ok(bridgeContentScript);
 assert.ok(bridgeContentScript.matches.includes('http://127.0.0.1:3400/*'));
 assert.equal(bridgeContentScript.all_frames, true);
 assert.match(server, /frame-ancestors 'self'/);
-assert.equal(manifest.version, '2.37.8');
+assert.equal(manifest.version, '2.37.9');
 
 console.log('project and task page guards passed');

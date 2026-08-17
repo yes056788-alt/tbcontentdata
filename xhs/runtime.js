@@ -189,24 +189,38 @@
 
   function juguangAccountDisplayNames(value) {
     const source = isObject(value) ? value : {};
-    const candidates = [
-      source.name,
-      source.accountName,
-      source.brandUserName,
-      source.agentSubAccountName,
-      isObject(source.owner) ? source.owner.name : null,
-      isObject(source.brand) ? source.brand.brandUserName : null,
-      isObject(source.subAccount) ? source.subAccount.agentSubAccountName : null,
-    ];
-    const names = [];
-    for (const candidate of candidates) {
-      if (typeof candidate !== 'string') continue;
-      const safe = String(contract.sanitizeSensitiveData(candidate) || '')
+    const normalizeName = (candidate) => {
+      if (typeof candidate !== 'string') return '';
+      return String(contract.sanitizeSensitiveData(candidate) || '')
         .replace(/\s+/g, ' ')
         .trim();
-      if (!safe || safe.length > 128 || names.includes(safe)) continue;
+    };
+    const accountNames = [
+      source.name,
+      source.accountName,
+      source.agentSubAccountName,
+      isObject(source.owner) ? source.owner.name : null,
+      isObject(source.subAccount) ? source.subAccount.agentSubAccountName : null,
+    ].map(normalizeName).filter(Boolean);
+    const brandNames = [
+      source.brandUserName,
+      isObject(source.brand) ? source.brand.brandUserName : null,
+    ].map(normalizeName).filter(Boolean);
+    const names = [];
+    const addName = (safe) => {
+      if (!safe || safe.length > 128 || names.includes(safe)) return;
       names.push(safe);
+    };
+    if (Number(source.accountType) === 602) {
+      for (const brand of brandNames) {
+        for (const account of accountNames) {
+          if (brand === account || account.includes(brand)) continue;
+          addName(`${brand}-${account}`);
+        }
+      }
     }
+    for (const safe of accountNames) addName(safe);
+    for (const safe of brandNames) addName(safe);
     return names;
   }
 
@@ -300,9 +314,9 @@
           args: [accountDisplayNames],
           func: async function clickJuguangReturnToMain(displayNames) {
             const normalizedText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-            const exactNames = new Set((Array.isArray(displayNames) ? displayNames : [])
+            const exactNames = (Array.isArray(displayNames) ? displayNames : [])
               .map(normalizedText)
-              .filter(Boolean));
+              .filter(Boolean);
             const clickable = (element) => element && (
               element.closest && element.closest('button,[role="button"],a,li,[role="menuitem"]') || element
             );
@@ -322,19 +336,24 @@
               'button', '[role="button"]', 'a', '[aria-haspopup="menu"]',
               '[class*="account"]', '[class*="Account"]',
             ].join(',');
-            const findExactAccountTrigger = () => Array.from(document.querySelectorAll(
-              accountTriggerSelector
-            )).find((element) => {
-              if (!element || typeof element.getBoundingClientRect !== 'function') return false;
-              const rect = element.getBoundingClientRect();
-              if (Number(rect.width) <= 0 || Number(rect.height) <= 0) return false;
-              const values = [
-                element.textContent,
-                element.getAttribute && element.getAttribute('aria-label'),
-                element.getAttribute && element.getAttribute('title'),
-              ].map(normalizedText).filter(Boolean);
-              return values.some((text) => exactNames.has(text));
-            });
+            const findExactAccountTrigger = () => {
+              const elements = Array.from(document.querySelectorAll(accountTriggerSelector));
+              for (const exactName of exactNames) {
+                const match = elements.find((element) => {
+                  if (!element || typeof element.getBoundingClientRect !== 'function') return false;
+                  const rect = element.getBoundingClientRect();
+                  if (Number(rect.width) <= 0 || Number(rect.height) <= 0) return false;
+                  const values = [
+                    element.textContent,
+                    element.getAttribute && element.getAttribute('aria-label'),
+                    element.getAttribute && element.getAttribute('title'),
+                  ].map(normalizedText).filter(Boolean);
+                  return values.some((text) => text === exactName);
+                });
+                if (match) return match;
+              }
+              return null;
+            };
             const findVisibleHeaderAvatar = () => {
               const viewportWidth = Number(
                 document.documentElement && document.documentElement.clientWidth

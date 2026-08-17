@@ -122,6 +122,17 @@ async function executeInjectedFunction(details, document) {
   return [{ result: await injected(...clone(details.args || [])) }];
 }
 
+async function executeInjectedFunctionWithRealTimers(details, document) {
+  const context = vm.createContext({
+    Date,
+    document,
+    Promise,
+    setTimeout,
+  });
+  const injected = vm.runInContext(`(${details.func.toString()})`, context);
+  return [{ result: await injected(...clone(details.args || [])) }];
+}
+
 function allowedSender(overrides = {}) {
   return Object.assign({
     id: 'fixture-extension-id',
@@ -926,6 +937,96 @@ test('runtime executes the Juguang DOM workflow through the exact current accoun
   assert.equal(JSON.stringify(injectedArgs).includes(child.vSellerId), false);
   assert.deepEqual(clicked, [child.name, '返回主账户']);
   assert.equal(clicked.includes(nearMatch.textContent), false);
+});
+
+test('runtime composes the real Juguang brand-account trigger and waits for its asynchronously mounted return action', async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-composed-trigger',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '简墨',
+    brand: { brandUserName: 'BARF霸弗狗粮' },
+  };
+  const main = {
+    vSellerId: null,
+    advertiserId: 1001,
+    accountType: 4,
+    name: 'BARF霸弗狗粮',
+  };
+  const combinedDisplayName = `${child.brand.brandUserName}-${child.name}`;
+  const clicked = [];
+  let menuMounted = false;
+  let returnedToMain = false;
+  let menuTimer = null;
+  const element = (text, onClick) => ({
+    textContent: text,
+    closest() {
+      return this;
+    },
+    getBoundingClientRect() {
+      return { top: 12, left: 1080, right: 1260, bottom: 44, width: 180, height: 32 };
+    },
+    getAttribute() {
+      return null;
+    },
+    click() {
+      clicked.push(text);
+      if (onClick) onClick();
+    },
+  });
+  const combinedAccountButton = element(combinedDisplayName, () => {
+    menuTimer = setTimeout(() => { menuMounted = true; }, 150);
+  });
+  const separateBrandButton = element(child.brand.brandUserName);
+  const separateChildButton = element(child.name);
+  const nearMatchButton = element(`${combinedDisplayName}相关设置`);
+  const returnAction = element('返回主账户', () => { returnedToMain = true; });
+  const document = {
+    documentElement: { clientWidth: 1280 },
+    querySelectorAll(selector) {
+      const value = String(selector);
+      if (value.includes('img.avatar')) return [];
+      if (value.includes('span,div')) {
+        return menuMounted
+          ? [separateBrandButton, separateChildButton, nearMatchButton, combinedAccountButton, returnAction]
+          : [separateBrandButton, separateChildButton, nearMatchButton, combinedAccountButton];
+      }
+      return [separateBrandButton, separateChildButton, nearMatchButton, combinedAccountButton];
+    },
+  };
+  const chrome = createFakeChrome(PLATFORM_TABS, {
+    executeScript(details) {
+      if (typeof details.func !== 'function') return [{ result: { ok: true } }];
+      return executeInjectedFunctionWithRealTimers(details, document);
+    },
+  });
+  const fixture = createRuntimeOptions({
+    chrome,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        return clone(returnedToMain ? main : child);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      assert.equal(verified.accountType, 4, 'post-action identity must still be the verified main account');
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+  if (menuTimer) clearTimeout(menuTimer);
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.deepEqual(clicked, [combinedDisplayName, '返回主账户']);
+  assert.equal(returnedToMain, true);
 });
 
 test('runtime skips a hidden exact Juguang account-name trigger and opens the visible header avatar', async () => {
