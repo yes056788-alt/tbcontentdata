@@ -206,6 +206,16 @@
     }, fields || {}));
   }
 
+  function findIdentityCollision(registry, storeId, platform, actual) {
+    return Object.entries(registry.stores).find(([otherStoreId, otherStore]) => (
+      otherStoreId !== storeId &&
+      tokensOverlap(
+        otherStore && otherStore.platforms && otherStore.platforms[platform],
+        actual,
+      )
+    ));
+  }
+
   function reconcileStoreBindings(input) {
     const source = isObject(input) ? input : {};
     const storeId = text(source.storeId, 100);
@@ -237,11 +247,27 @@
       bindings[platform] = (expected.length ? expected : actual).slice();
       if (juguangEvidence && juguangEvidence.ambiguous) {
         bindings[platform] = expected.slice();
-        issues.push(bindingIssue(
-          'account_identity_ambiguous', platform,
-          '无法唯一确认聚光主账户，禁止用于店铺决策。',
-          { actual },
-        ));
+        const definiteMismatch = expected.length && !tokensOverlap(expected, actual);
+        const collision = findIdentityCollision(registry, storeId, platform, actual);
+        if (definiteMismatch) {
+          issues.push(bindingIssue(
+            'account_binding_mismatch', platform,
+            '当前 juguang 登录账号与所选店铺绑定不一致。',
+            { expected, actual },
+          ));
+        } else if (collision) {
+          issues.push(bindingIssue(
+            'account_identity_bound_to_other_store', platform,
+            '当前 juguang 登录账号已绑定到另一店铺，禁止重新归属。',
+            { otherStoreId: collision[0], actual },
+          ));
+        } else {
+          issues.push(bindingIssue(
+            'account_identity_ambiguous', platform,
+            '无法唯一确认聚光主账户，禁止用于店铺决策。',
+            { actual },
+          ));
+        }
         continue;
       }
       if (!actual.length) {
@@ -266,13 +292,7 @@
         changed = true;
       }
       if (!expected.length) {
-        const collision = Object.entries(registry.stores).find(([otherStoreId, otherStore]) => (
-          otherStoreId !== storeId &&
-          tokensOverlap(
-            otherStore && otherStore.platforms && otherStore.platforms[platform],
-            actual,
-          )
-        ));
+        const collision = findIdentityCollision(registry, storeId, platform, actual);
         if (collision) {
           bindings[platform] = [];
           issues.push(bindingIssue(
@@ -291,9 +311,14 @@
     }
 
     const issuesAllowSafePartialCommit = issues.every((issue) => {
-      if (!issue || issue.code !== 'account_identity_missing') return false;
+      if (!issue) return false;
       const collection = source.collections && source.collections[issue.platform];
-      return ['failed', 'cancelled'].includes(String(collection && collection.status || 'missing'));
+      const status = String(collection && collection.status || 'missing');
+      if (issue.code === 'account_identity_missing' &&
+          ['failed', 'cancelled'].includes(status)) return true;
+      return issue.platform === 'juguang' && status === 'partial' && [
+        'account_identity_missing', 'account_identity_ambiguous',
+      ].includes(issue.code);
     });
     const shouldPersistBindingChanges = changed &&
       (issues.length === 0 || issuesAllowSafePartialCommit);

@@ -3673,11 +3673,13 @@ async function runXhsAnalysisTask(options) {
   const blockingBindingIssues = bindingIssues.filter((issue) => {
     const platform = String(issue && issue.platform || '');
     const status = String(collections[platform] && collections[platform].status || 'missing');
-    return !(
-      issue && issue.code === 'account_identity_missing' &&
-      platforms.includes(platform) &&
-      ['failed', 'cancelled'].includes(status)
-    );
+    const unavailableIdentity = issue && issue.code === 'account_identity_missing' &&
+      platforms.includes(platform) && ['failed', 'cancelled'].includes(status);
+    const partialJuguangIdentity = issue && platform === 'juguang' &&
+      platforms.includes(platform) && status === 'partial' && [
+        'account_identity_missing', 'account_identity_ambiguous',
+      ].includes(issue.code);
+    return !(unavailableIdentity || partialJuguangIdentity);
   });
   const bindingGatePassed = bindingResult.ready === true || (
     bindingIssues.length > 0 && blockingBindingIssues.length === 0

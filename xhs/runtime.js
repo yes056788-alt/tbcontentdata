@@ -243,21 +243,193 @@
       ? settings.wait
       : (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
     const bridgeRetry = Object.assign({ attempts: 5, delayMs: 500 }, settings.bridgeRetry || {});
+    const navigationRetry = Object.assign({ attempts: 60, delayMs: 250 }, settings.navigationRetry || {});
+    const allowLegacyNavigationFallback = settings.allowLegacyNavigationFallback === true;
+    const monotonicNow = typeof settings.monotonicNow === 'function'
+      ? settings.monotonicNow
+      : () => Date.now();
+    const transitionTimeoutMs = Math.max(10, Number(settings.transitionTimeoutMs) || 15000);
+    const identityProbeTimeoutMs = Math.max(10, Number(settings.identityProbeTimeoutMs) || 1500);
 
-    async function requestJuguangCurrent(tabId) {
-      const attempts = Math.max(1, Math.floor(Number(bridgeRetry.attempts) || 1));
+    function bridgeRecoveryError(message, cause) {
+      const error = new Error(message || 'Juguang page bridge recovery failed.');
+      error.code = 'XHS_PAGE_BRIDGE_RECOVERY_FAILED';
+      error.retryable = true;
+      if (cause) error.cause = cause;
+      return error;
+    }
+
+    async function withinTransitionDeadline(operation, deadlineAt, message) {
+      const remaining = Number(deadlineAt) - monotonicNow();
+      if (!Number.isFinite(remaining) || remaining <= 0) {
+        throw bridgeRecoveryError(message || 'Juguang transition deadline expired.');
+      }
+      const pending = Promise.resolve().then(operation);
+      pending.catch(() => {});
+      let timer = null;
+      try {
+        return await Promise.race([
+          pending,
+          new Promise((_resolve, reject) => {
+            timer = setTimeout(() => reject(bridgeRecoveryError(
+              message || 'Juguang transition deadline expired.'
+            )), Math.max(1, remaining));
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
+    function juguangUrlMatches(value, expectation) {
+      let url;
+      try {
+        url = new URL(String(value || ''));
+      } catch (error) {
+        return false;
+      }
+      if (url.origin !== PLATFORM_CONFIG.juguang.origin) return false;
+      const expected = isObject(expectation) ? expectation : {};
+      if (!Object.prototype.hasOwnProperty.call(expected, 'vSellerId')) return true;
+      const actualVSellerId = url.searchParams.get('vSellerId');
+      return expected.vSellerId == null
+        ? !actualVSellerId
+        : String(actualVSellerId || '') === String(expected.vSellerId);
+    }
+
+    async function waitForJuguangDocument(tabId, expectation) {
+      if (!chromeApi.tabs || typeof chromeApi.tabs.get !== 'function') return;
+      const attempts = Math.max(1, Math.floor(Number(navigationRetry.attempts) || 1));
+      const expected = isObject(expectation) ? expectation : {};
       let lastError = null;
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
         try {
-          return await settings.pageClient.request({
+          const tab = await chromeApi.tabs.get(tabId);
+          if (tab && juguangUrlMatches(tab.url, expected) && tab.status === 'complete') return;
+        } catch (error) {
+          lastError = error;
+        }
+        if (attempt < attempts) {
+          await wait(Math.max(0, Number(navigationRetry.delayMs) || 0));
+        }
+      }
+      throw bridgeRecoveryError(
+        'Juguang navigation did not reach a complete platform document before bridge recovery.',
+        lastError,
+      );
+    }
+
+    async function armJuguangNavigation(tabId, expectation, deadlineAt) {
+      const navigation = chromeApi.webNavigation;
+      const committedEvent = navigation && navigation.onCommitted;
+      if (!navigation || typeof navigation.getFrame !== 'function' || !committedEvent ||
+          typeof committedEvent.addListener !== 'function' ||
+          typeof committedEvent.removeListener !== 'function') {
+        if (allowLegacyNavigationFallback) return null;
+        throw bridgeRecoveryError('Juguang document lifecycle tracking is unavailable.');
+      }
+
+      let baseline;
+      try {
+        baseline = await withinTransitionDeadline(
+          () => navigation.getFrame({ tabId: Number(tabId), frameId: 0 }),
+          deadlineAt,
+          'Juguang current document identity timed out.',
+        );
+      } catch (error) {
+        throw bridgeRecoveryError('Juguang current document identity could not be read.', error);
+      }
+      const previousDocumentId = String(baseline && baseline.documentId || '');
+      if (!previousDocumentId) {
+        throw bridgeRecoveryError('Juguang current documentId is unavailable.');
+      }
+
+      let settled = false;
+      let timer = null;
+      let listener = null;
+      let settleReject;
+      const cleanup = () => {
+        if (listener) committedEvent.removeListener(listener);
+        if (timer) clearTimeout(timer);
+        listener = null;
+        timer = null;
+      };
+      const promise = new Promise((resolve, reject) => {
+        settleReject = reject;
+        listener = (details) => {
+          if (settled || !details || Number(details.tabId) !== Number(tabId) ||
+              Number(details.frameId) !== 0 ||
+              (details.documentLifecycle && details.documentLifecycle !== 'active') ||
+              !details.documentId || String(details.documentId) === previousDocumentId ||
+              !juguangUrlMatches(details.url, expectation)) return;
+          settled = true;
+          cleanup();
+          resolve({
+            documentId: String(details.documentId),
+            url: String(details.url || ''),
+          });
+        };
+        committedEvent.addListener(listener);
+        const remaining = Math.max(1, Number(deadlineAt) - monotonicNow());
+        timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(bridgeRecoveryError('Juguang navigation did not commit a new platform document in time.'));
+        }, remaining);
+      });
+      // The navigation trigger may itself be pending while the lifecycle timer settles.
+      // Mark the promise observed immediately; callers still receive the same rejection when awaiting it.
+      promise.catch(() => {});
+      return {
+        promise,
+        cancel(error) {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          settleReject(error || bridgeRecoveryError('Juguang navigation was cancelled.'));
+        },
+      };
+    }
+
+    async function recoverJuguangBridgeAfterNavigation(tabId, expectation, lifecycle, deadlineAt) {
+      if (!lifecycle) {
+        await waitForJuguangDocument(tabId, expectation);
+        await recoverPlatformBridge(tabId, 'juguang', null, deadlineAt);
+        return null;
+      }
+      const committed = await lifecycle.promise;
+      await recoverPlatformBridge(tabId, 'juguang', committed.documentId, deadlineAt);
+      return committed;
+    }
+
+    async function requestJuguangCurrent(tabId, expectedIdentity, deadlineAt) {
+      const attempts = Math.max(1, Math.floor(Number(bridgeRetry.attempts) || 1));
+      let lastError = null;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const remaining = Number.isFinite(Number(deadlineAt))
+          ? Number(deadlineAt) - monotonicNow()
+          : identityProbeTimeoutMs;
+        if (remaining <= 0) break;
+        try {
+          const actual = await settings.pageClient.request({
             tabId,
             platform: 'juguang',
             endpoint: 'accounts.current',
             payload: {},
+            timeoutMs: Math.max(1, Math.min(identityProbeTimeoutMs, remaining)),
           });
+          return expectedIdentity ? validateIdentity(actual, expectedIdentity) : actual;
         } catch (error) {
           lastError = error;
-          if (attempt < attempts) await wait(Math.max(0, Number(bridgeRetry.delayMs) || 0));
+          if (attempt < attempts) {
+            const delayMs = Math.max(0, Number(bridgeRetry.delayMs) || 0);
+            const remainingAfter = Number.isFinite(Number(deadlineAt))
+              ? Number(deadlineAt) - monotonicNow()
+              : delayMs;
+            if (remainingAfter <= 0) break;
+            await wait(Math.min(delayMs, remainingAfter));
+          }
         }
       }
       throw lastError || new Error('Juguang page bridge unavailable after navigation.');
@@ -272,25 +444,24 @@
         : '/aurora/ad/datareports-basic/note';
       const url = new URL(safePath, PLATFORM_CONFIG.juguang.origin);
       if (target.vSellerId) url.searchParams.set('vSellerId', String(target.vSellerId));
-      await chromeApi.tabs.update(tabId, { url: url.toString() });
-
-      const attempts = Math.max(1, Math.floor(Number(bridgeRetry.attempts) || 1));
-      let lastError = null;
-      for (let attempt = 1; attempt <= attempts; attempt += 1) {
-        try {
-          const actual = await settings.pageClient.request({
-            tabId,
-            platform: 'juguang',
-            endpoint: 'accounts.current',
-            payload: {},
-          });
-          return validateIdentity(actual, target);
-        } catch (error) {
-          lastError = error;
-          if (attempt < attempts) await wait(Math.max(0, Number(bridgeRetry.delayMs) || 0));
+      const expectation = { vSellerId: target.vSellerId || null };
+      const deadlineAt = monotonicNow() + transitionTimeoutMs;
+      const lifecycle = await armJuguangNavigation(tabId, expectation, deadlineAt);
+      try {
+        await withinTransitionDeadline(
+          () => chromeApi.tabs.update(tabId, { url: url.toString() }),
+          deadlineAt,
+          'Juguang account navigation timed out.',
+        );
+      } catch (error) {
+        if (lifecycle) {
+          lifecycle.cancel(error);
+          await lifecycle.promise.catch(() => {});
         }
+        throw error;
       }
-      throw lastError || new Error('Juguang page bridge unavailable after navigation.');
+      await recoverJuguangBridgeAfterNavigation(tabId, expectation, lifecycle, deadlineAt);
+      return requestJuguangCurrent(tabId, target, deadlineAt);
     }
 
     async function returnToJuguangMainAccount(input) {
@@ -300,19 +471,24 @@
 
       const knownCurrent = isObject(source.current) ? source.current : null;
       if (knownCurrent && Number(knownCurrent.accountType) === 4) {
-        return validateIdentity(await requestJuguangCurrent(tabId), { accountType: 4 });
+        const deadlineAt = monotonicNow() + transitionTimeoutMs;
+        return requestJuguangCurrent(tabId, { accountType: 4 }, deadlineAt);
       }
       if (!chromeApi.scripting || typeof chromeApi.scripting.executeScript !== 'function') {
         throw new Error('Juguang return-to-main requires chrome.scripting.executeScript.');
       }
 
       const accountDisplayNames = juguangAccountDisplayNames(knownCurrent);
-      let actionError = null;
-      try {
-        const executions = await chromeApi.scripting.executeScript({
-          target: { tabId, frameIds: [0] },
-          args: [accountDisplayNames],
-          func: async function clickJuguangReturnToMain(displayNames) {
+      const expectation = { vSellerId: null };
+      const deadlineAt = monotonicNow() + transitionTimeoutMs;
+      const lifecycle = await armJuguangNavigation(tabId, expectation, deadlineAt);
+      let recoveryError = null;
+      const actionPromise = (async () => {
+        try {
+          await chromeApi.scripting.executeScript({
+            target: { tabId, frameIds: [0] },
+            args: [accountDisplayNames],
+            func: async function clickJuguangReturnToMain(displayNames) {
             const normalizedText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
             const exactNames = (Array.isArray(displayNames) ? displayNames : [])
               .map(normalizedText)
@@ -396,35 +572,28 @@
               await new Promise((resolve) => setTimeout(resolve, 100));
             }
             throw new Error('Juguang return-to-main action was not found.');
-          },
-        });
-        const executed = Array.isArray(executions) && executions.some((entry) => (
-          entry && (entry.result === true || entry.result && entry.result.ok === true)
-        ));
-        if (!executed) actionError = new Error('Juguang return-to-main action did not complete.');
-      } catch (error) {
-        // Clicking the action navigates the tab and may destroy the execution context before
-        // Chrome can return the function result. The post-navigation identity is authoritative.
-        actionError = error;
-      }
-
-      const attempts = Math.max(1, Math.floor(Number(bridgeRetry.attempts) || 1));
-      let lastError = null;
-      for (let attempt = 1; attempt <= attempts; attempt += 1) {
-        try {
-          const actual = await settings.pageClient.request({
-            tabId,
-            platform: 'juguang',
-            endpoint: 'accounts.current',
-            payload: {},
+            },
           });
-          return validateIdentity(actual, { accountType: 4 });
         } catch (error) {
-          lastError = error;
-          if (attempt < attempts) await wait(Math.max(0, Number(bridgeRetry.delayMs) || 0));
+          // Clicking the action navigates the tab and may destroy the execution context before
+          // Chrome can return the function result. The committed document and identity are authoritative.
+          if (!lifecycle) throw error;
+          if (lifecycle && !/frame.*removed|execution context|context.*invalidated|document.*unload/i.test(
+            String(error && error.message || error || '')
+          )) lifecycle.cancel(error);
         }
+      })();
+
+      try {
+        if (!lifecycle) await actionPromise;
+        await recoverJuguangBridgeAfterNavigation(tabId, expectation, lifecycle, deadlineAt);
+      } catch (error) {
+        recoveryError = error;
       }
-      throw lastError || actionError || new Error('Juguang main-account identity could not be verified.');
+      // Observe rejection without allowing a destroyed execution context to become unhandled.
+      actionPromise.catch(() => {});
+      if (recoveryError) throw recoveryError;
+      return requestJuguangCurrent(tabId, { accountType: 4 }, deadlineAt);
     }
 
     const collectorInstances = {};
@@ -445,7 +614,7 @@
       await chromeApi.storage.local.set({ [STATUS_KEY]: compactValue(value) });
     }
 
-    async function recoverPlatformBridge(tabId, platform) {
+    async function recoverPlatformBridge(tabId, platform, documentId, deadlineAt) {
       const config = PLATFORM_CONFIG[platform];
       if (!config || !config.hookFile || !chromeApi.scripting ||
           typeof chromeApi.scripting.executeScript !== 'function') {
@@ -455,15 +624,27 @@
         throw unavailable;
       }
       try {
-        await chromeApi.scripting.executeScript({
-          target: { tabId: Number(tabId), frameIds: [0] },
+        const target = documentId
+          ? { tabId: Number(tabId), documentIds: [String(documentId)] }
+          : { tabId: Number(tabId), frameIds: [0] };
+        const execute = (details) => Number.isFinite(Number(deadlineAt))
+          ? withinTransitionDeadline(
+            () => chromeApi.scripting.executeScript(details),
+            deadlineAt,
+            `${config.name}页面桥接注入超时。`,
+          )
+          : chromeApi.scripting.executeScript(details);
+        await execute({
+          target,
           world: 'MAIN',
           files: [config.hookFile],
+          injectImmediately: true,
         });
-        await chromeApi.scripting.executeScript({
-          target: { tabId: Number(tabId), frameIds: [0] },
+        await execute({
+          target,
           world: 'ISOLATED',
           files: [PLATFORM_CONTENT_FILE],
+          injectImmediately: true,
         });
       } catch (error) {
         const recoveryError = new Error(

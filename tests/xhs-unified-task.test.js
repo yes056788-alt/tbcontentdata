@@ -339,6 +339,73 @@ test('runXhsAnalysisTask keeps two successful sources when the failed or cancell
   }
 });
 
+test('runXhsAnalysisTask keeps two successful sources when a partial source identity is missing or ambiguous', async () => {
+  for (const code of ['account_identity_missing', 'account_identity_ambiguous']) {
+    const snapshot = {
+      schema: 'xhsAnalysisSnapshotV1',
+      notes: [{ noteId: `fictional-note-${code}` }],
+      quality: {
+        decisionReady: false,
+        issues: [{
+          severity: 'critical',
+          code,
+          platform: 'juguang',
+          message: `fictional partial source ${code}`,
+        }],
+      },
+    };
+    const harness = createRunXhsHarness({
+      collectionStatus: 'partial',
+      collections: {
+        adstar: { status: 'complete', identity: { memberId: 'fictional-star-partial' } },
+        pgy: { status: 'complete', identity: { brandUserId: 'fictional-pgy-partial' } },
+        juguang: {
+          status: 'partial',
+          errors: [
+            { code: 'account_switch_failed' },
+            { code: 'account_restore_failed' },
+          ],
+        },
+      },
+      bindingResult: {
+        registry: { schema: 'xhsStoreAccountBindingsV1', schemaVersion: 2, stores: {} },
+        bindings: {
+          adstar: ['adstar:fictional-star-partial'],
+          pgy: ['pgy:fictional-pgy-partial'],
+          juguang: [],
+        },
+        actualIdentities: {
+          adstar: ['adstar:fictional-star-partial'],
+          pgy: ['pgy:fictional-pgy-partial'],
+          juguang: [],
+        },
+        issues: [{
+          severity: 'critical', code, platform: 'juguang', message: `fictional ${code}`,
+        }],
+        ready: false,
+        changed: false,
+      },
+      snapshot,
+    });
+
+    const result = await harness.run({
+      runId: `fictional-xhs-partial-${code}`,
+      storeId: 'fictional-store-partial-source',
+      platforms: ['adstar', 'pgy', 'juguang'],
+      dateRange: { from: '2030-02-08', to: '2030-02-14', timezone: 'Asia/Shanghai' },
+    });
+
+    assert.equal(result.ok, true, `${code} must not discard two successful sources`);
+    assert.equal(result.partial, true, code);
+    assert.equal(result.code, '', code);
+    assert.deepEqual(result.snapshot, snapshot, code);
+    assert.ok(
+      harness.storageWrites.some((value) => value.xhsAnalysisSnapshotV1),
+      `${code} partial analysis snapshot must be saved`,
+    );
+  }
+});
+
 test('runXhsAnalysisTask still blocks real identity mismatches and cross-store collisions', async () => {
   for (const code of ['account_binding_mismatch', 'account_identity_bound_to_other_store']) {
     const harness = createRunXhsHarness({

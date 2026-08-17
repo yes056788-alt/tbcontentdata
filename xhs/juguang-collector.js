@@ -290,12 +290,11 @@
       if (typeof settings.returnToMainAccount !== 'function') {
         throw new Error('Juguang child account discovery requires the return-to-main workflow.');
       }
-      await settings.returnToMainAccount({
+      const actual = accountTools.normalizeListedAccount(await settings.returnToMainAccount({
         tabId: context.tabId,
         current: accountTools.normalizeListedAccount(current),
         reportPath: '/aurora/ad/datareports-basic/note',
-      });
-      const actual = await currentAccount(context);
+      }));
       if (Number(actual.accountType) !== 4) {
         throw new Error(`Juguang main account identity mismatch: expected accountType 4, got ${actual.accountType}`);
       }
@@ -314,7 +313,12 @@
         return accountTools.verifyAccount(actual, target);
       }
       if (typeof settings.switchAccount === 'function') {
-        await settings.switchAccount({ tabId: context.tabId, target, reportPath: '/aurora/ad/datareports-basic/note' });
+        const actual = accountTools.normalizeListedAccount(await settings.switchAccount({
+          tabId: context.tabId,
+          target,
+          reportPath: '/aurora/ad/datareports-basic/note',
+        }));
+        return accountTools.verifyAccount(actual, target);
       } else {
         // Test adapters may emulate navigation through the same injected page-client surface.
         await settings.pageClient.request({

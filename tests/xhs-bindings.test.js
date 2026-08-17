@@ -477,3 +477,128 @@ test('a failed source stays unbound while successful identities persist and prot
   ]);
   assert.deepEqual(second.registry, first.registry);
 });
+
+test('a partial source with missing or ambiguous identity does not discard confirmed sibling bindings', () => {
+  for (const evidence of ['missing', 'ambiguous']) {
+    const input = collections(`partial-${evidence}`);
+    input.juguang.status = 'partial';
+    input.juguang.initialAccount = {
+      advertiserId: 'fictional-initial-child-advertiser',
+      accountType: 602,
+      vSellerId: 'fictional-initial-child-seller',
+      brand: { brandUserId: `fictional-brand-partial-${evidence}` },
+    };
+    input.juguang.restoredAccount = null;
+    input.juguang.errors = [{ code: 'account_restore_failed' }];
+    input.juguang.accounts = evidence === 'missing'
+      ? [{
+        account: input.juguang.initialAccount,
+        status: 'failed',
+        errors: [{ code: 'account_switch_failed' }],
+      }]
+      : [{
+        account: {
+          advertiserId: 'fictional-main-one',
+          accountType: 4,
+          vSellerId: null,
+          brand: { brandUserId: `fictional-brand-partial-${evidence}` },
+        },
+        status: 'failed',
+        errors: [{ code: 'account_switch_failed' }],
+      }, {
+        account: {
+          advertiserId: 'fictional-main-two',
+          accountType: 4,
+          vSellerId: null,
+          brand: { brandUserId: `fictional-brand-partial-${evidence}` },
+        },
+        status: 'failed',
+        errors: [{ code: 'account_switch_failed' }],
+      }];
+
+    const result = reconcileStoreBindings({
+      storeId: `fictional-store-partial-${evidence}`,
+      selectedPlatforms: ['adstar', 'pgy', 'juguang'],
+      collections: input,
+      registry: null,
+      updatedAt: '2030-02-02T00:00:00.000Z',
+    });
+
+    assert.equal(result.ready, false, evidence);
+    assert.equal(result.changed, true, evidence);
+    assert.equal(result.issues.length, 1, evidence);
+    assert.equal(
+      result.issues[0].code,
+      evidence === 'missing' ? 'account_identity_missing' : 'account_identity_ambiguous',
+      evidence,
+    );
+    assert.deepEqual(
+      result.registry.stores[`fictional-store-partial-${evidence}`].platforms,
+      {
+        adstar: [`adstar:fictional-star-partial-${evidence}`],
+        pgy: [`pgy:fictional-brand-partial-${evidence}`],
+      },
+      evidence,
+    );
+  }
+});
+
+test('ambiguous Juguang evidence cannot hide a definite mismatch with the selected store binding', () => {
+  const first = reconcileStoreBindings({
+    storeId: 'fictional-store-ambiguous-mismatch',
+    selectedPlatforms: ['juguang'],
+    collections: collections('bound-main'),
+  });
+  const input = collections('different-main-one');
+  input.juguang.status = 'partial';
+  input.juguang.accounts.push({
+    account: {
+      advertiserId: 'fictional-different-main-two',
+      accountType: 4,
+      vSellerId: null,
+      brand: { brandUserId: 'fictional-brand-different-main-two' },
+    },
+  });
+
+  const result = reconcileStoreBindings({
+    storeId: 'fictional-store-ambiguous-mismatch',
+    selectedPlatforms: ['juguang'],
+    collections: input,
+    registry: first.registry,
+  });
+
+  assert.equal(result.ready, false);
+  assert.equal(result.changed, false);
+  assert.equal(result.issues[0].code, 'account_binding_mismatch');
+  assert.deepEqual(result.registry, first.registry);
+});
+
+test('ambiguous Juguang evidence cannot hide a main identity already bound to another store', () => {
+  const first = reconcileStoreBindings({
+    storeId: 'fictional-store-ambiguous-owner',
+    selectedPlatforms: ['juguang'],
+    collections: collections('owned-main'),
+  });
+  const input = collections('owned-main');
+  input.juguang.status = 'partial';
+  input.juguang.accounts.push({
+    account: {
+      advertiserId: 'fictional-unrelated-second-main',
+      accountType: 4,
+      vSellerId: null,
+      brand: { brandUserId: 'fictional-unrelated-second-brand' },
+    },
+  });
+
+  const result = reconcileStoreBindings({
+    storeId: 'fictional-store-ambiguous-candidate',
+    selectedPlatforms: ['juguang'],
+    collections: input,
+    registry: first.registry,
+  });
+
+  assert.equal(result.ready, false);
+  assert.equal(result.changed, false);
+  assert.equal(result.issues[0].code, 'account_identity_bound_to_other_store');
+  assert.equal(result.registry.stores['fictional-store-ambiguous-candidate'], undefined);
+});

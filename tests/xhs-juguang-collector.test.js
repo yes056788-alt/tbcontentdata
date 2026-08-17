@@ -276,6 +276,12 @@ function createCollector(pageClient, dependencies = {}) {
 function createRuntimeAccountDependencies(pageClient, options = {}) {
   const switches = [];
   const returns = [];
+  const identityForTransition = typeof options.identityForTransition === 'function'
+    ? options.identityForTransition
+    : (account) => account;
+  const afterTransition = typeof options.afterTransition === 'function'
+    ? options.afterTransition
+    : () => {};
   return {
     switches,
     returns,
@@ -289,14 +295,48 @@ function createRuntimeAccountDependencies(pageClient, options = {}) {
           throw new Error('main account must use the injected returnToMainAccount DOM workflow');
         }
         pageClient.setCurrent(target);
+        afterTransition({ kind: 'switch', target: clone(target) });
+        return clone(identityForTransition(clone(target), 'switch'));
       },
       async returnToMainAccount(input) {
         returns.push(clone(input));
         pageClient.events.push('return-main');
         if (options.returnFailure) throw new Error('fictional return-to-main failure');
         pageClient.setCurrent(ACCOUNTS[0]);
-        return clone(ACCOUNTS[0]);
+        afterTransition({ kind: 'return', target: clone(ACCOUNTS[0]) });
+        return clone(identityForTransition(clone(ACCOUNTS[0]), 'return'));
       },
+    },
+  };
+}
+
+function runtimeIdentity(account) {
+  return {
+    virtualSellerId: account.vSellerId,
+    advertiserId: String(account.advertiserId),
+    accountType: String(account.accountType),
+    owner: { name: account.name },
+  };
+}
+
+function rejectRedundantCurrentAfterTransition(pageClient) {
+  const request = pageClient.request;
+  const redundantProbes = [];
+  let pendingTransition = null;
+  pageClient.request = async (input) => {
+    if (pendingTransition && input.endpoint === 'accounts.current') {
+      redundantProbes.push(pendingTransition);
+      const error = new Error('XHS page request timeout after 45000 ms.');
+      error.code = 'XHS_PAGE_REQUEST_TIMEOUT';
+      throw error;
+    }
+    if (pendingTransition) pendingTransition = null;
+    return request(input);
+  };
+  return {
+    redundantProbes,
+    arm(transition) {
+      pendingTransition = `${transition.kind}:${transition.target.vSellerId}`;
     },
   };
 }
@@ -646,6 +686,55 @@ test('starting from a child returns to verified main before discovery and restor
     'finally must navigate back to the original child account');
 });
 
+test('reuses verified runtime transition identities without a redundant accounts.current probe', async () => {
+  const pageClient = createFakePageClient({
+    initialAccount: ACCOUNTS[1],
+    childListIsScoped: true,
+    mainIdentityWithoutVSeller: true,
+  });
+  const probeGuard = rejectRedundantCurrentAfterTransition(pageClient);
+  const runtimeAccounts = createRuntimeAccountDependencies(pageClient, {
+    afterTransition: (transition) => probeGuard.arm(transition),
+    identityForTransition: (account) => runtimeIdentity(account),
+  });
+
+  const result = await createCollector(pageClient, runtimeAccounts.dependencies).collect(collectionOptions({
+    runId: 'fictional-juguang-run-runtime-identity-reuse',
+  }));
+
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(probeGuard.redundantProbes, [],
+    'a verified runtime transition must not be followed by another 45-second identity request');
+  assert.ok(runtimeAccounts.returns.length >= 1, 'the return-to-main transition must be exercised');
+  assert.ok(runtimeAccounts.switches.length >= 1, 'the child-account transition must be exercised');
+  assert.equal(pageClient.getCurrent().vSellerId, 'fictional-child-spend');
+});
+
+test('rejects a wrong runtime return-to-main accountType before discovery or report requests', async () => {
+  const pageClient = createFakePageClient({
+    initialAccount: ACCOUNTS[1],
+    childListIsScoped: true,
+  });
+  const runtimeAccounts = createRuntimeAccountDependencies(pageClient, {
+    identityForTransition(account, kind) {
+      const identity = runtimeIdentity(account);
+      return kind === 'return' ? { ...identity, accountType: '602' } : identity;
+    },
+  });
+
+  const result = await createCollector(pageClient, runtimeAccounts.dependencies).collect(collectionOptions({
+    runId: 'fictional-juguang-run-wrong-return-identity',
+  }));
+
+  assert.equal(result.status, 'failed');
+  assert.ok(result.errors.some((error) => (
+    error.code === 'account_discovery_failed' &&
+    /identity mismatch.*accountType|accountType.*mismatch/i.test(error.message)
+  )));
+  assert.equal(pageClient.calls.some((call) => call.endpoint === 'accounts.list'), false);
+  assert.equal(pageClient.calls.some((call) => call.endpoint === 'reports.query'), false);
+});
+
 test('a main identity without vSellerId resolves to the listed account and is collected exactly once', async () => {
   const pageClient = createFakePageClient({
     initialAccount: ACCOUNTS[0],
@@ -718,6 +807,44 @@ test('blocks report requests for an account whose post-switch identity does not 
     call.endpoint === 'reports.query' && call.accountAtCall === 'fictional-child-spend'
   )).length, 0);
   assert.equal(pageClient.getCurrent().vSellerId, 'fictional-main-vseller');
+});
+
+test('rejects wrong advertiserId, accountType, or vSellerId returned by the runtime before target reports', async (t) => {
+  for (const scenario of [
+    { name: 'advertiserId', patch: { advertiserId: '9999' } },
+    { name: 'accountType', patch: { accountType: '4' } },
+    { name: 'vSellerId', patch: { virtualSellerId: 'fictional-wrong-vseller' } },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const pageClient = createFakePageClient();
+      const runtimeAccounts = createRuntimeAccountDependencies(pageClient, {
+        identityForTransition(account, kind) {
+          const identity = runtimeIdentity(account);
+          if (kind === 'switch' && account.vSellerId === 'fictional-child-spend') {
+            return { ...identity, ...scenario.patch };
+          }
+          return identity;
+        },
+      });
+
+      const result = await createCollector(pageClient, runtimeAccounts.dependencies).collect(collectionOptions({
+        runId: `fictional-juguang-run-wrong-runtime-${scenario.name}`,
+      }));
+      const mismatched = result.accounts.find((item) => (
+        item.account.vSellerId === 'fictional-child-spend'
+      ));
+
+      assert.equal(result.status, 'partial');
+      assert.equal(mismatched.status, 'failed');
+      assert.ok(mismatched.errors.some((error) => (
+        error.code === 'account_identity_mismatch' &&
+        new RegExp(`${scenario.name}.*mismatch`, 'i').test(error.message)
+      )));
+      assert.equal(pageClient.calls.filter((call) => (
+        call.endpoint === 'reports.query' && call.accountAtCall === 'fictional-child-spend'
+      )).length, 0, `${scenario.name} mismatch must fail before any report for that account`);
+    });
+  }
 });
 
 test('records a switch failure, continues the remaining account, and restores the initial account', async () => {

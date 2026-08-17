@@ -90,6 +90,7 @@ function createFakeChrome(tabs = PLATFORM_TABS, options = {}) {
           target: clone(details && details.target),
           world: details && details.world,
           args: clone(details && details.args),
+          injectImmediately: details && details.injectImmediately === true,
           hasFixedFunction: typeof (details && details.func) === 'function',
         });
         if (typeof options.executeScript === 'function') {
@@ -211,6 +212,10 @@ function createRuntimeOptions(overrides = {}) {
       createRunId: overrides.createRunId || (() => 'fixture-generated-run-id'),
       wait: overrides.wait || (async () => {}),
       bridgeRetry: overrides.bridgeRetry || { attempts: 3, delayMs: 1 },
+      allowLegacyNavigationFallback: overrides.allowLegacyNavigationFallback !== false,
+      transitionTimeoutMs: overrides.transitionTimeoutMs,
+      identityProbeTimeoutMs: overrides.identityProbeTimeoutMs,
+      monotonicNow: overrides.monotonicNow,
     },
     cache,
     dependencies,
@@ -493,6 +498,322 @@ test('runtime retries a stale Juguang identity after child-account navigation un
   assert.equal(result.platforms.juguang.status, 'complete');
   assert.equal(currentAttempts, 2);
   assert.equal(waitCalls, 1);
+});
+
+test('runtime waits for a new committed Juguang document even when tab metadata already claims complete', async () => {
+  const runtimeModule = loadRuntime();
+  const main = {
+    vSellerId: null,
+    advertiserId: 654321,
+    accountType: 4,
+    name: '虚构聚光原主账户',
+  };
+  const child = {
+    vSellerId: 'fictional-vseller-navigation-lifecycle',
+    advertiserId: 123456,
+    accountType: 602,
+    name: '虚构聚光子账户',
+  };
+  let current = clone(main);
+  let currentFrame = {
+    tabId: 13,
+    frameId: 0,
+    documentId: 'fixture-doc-old',
+    documentLifecycle: 'active',
+    url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+  };
+  let tabMetadataUrl = currentFrame.url;
+  const committedListeners = new Set();
+  const switchTriggered = deferred();
+  const returnTriggered = deferred();
+  const identityCalls = [];
+  const chrome = createFakeChrome();
+  const originalUpdate = chrome.tabs.update;
+  chrome.tabs.update = async (tabId, update) => {
+    const result = await originalUpdate(tabId, update);
+    tabMetadataUrl = update.url;
+    switchTriggered.resolve();
+    return result;
+  };
+  chrome.tabs.get = async (tabId) => {
+    assert.equal(tabId, 13);
+    return {
+      id: tabId,
+      status: 'complete',
+      url: tabMetadataUrl,
+    };
+  };
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return clone(currentFrame);
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const emitCommitted = (details) => {
+    currentFrame = Object.assign({}, currentFrame, details);
+    for (const listener of Array.from(committedListeners)) listener(clone(details));
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (details) => {
+    if (typeof details.func === 'function') {
+      tabMetadataUrl = 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note';
+      returnTriggered.resolve();
+      throw new Error('Frame removed while the Juguang main-account navigation committed.');
+    }
+    return originalExecuteScript(details);
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        identityCalls.push(clone(input));
+        return clone(current);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const switched = await dependencies.switchAccount({
+        tabId: input.tabId,
+        target: child,
+        reportPath: '/aurora/ad/datareports-basic/note',
+      });
+      assert.equal(switched.vSellerId, child.vSellerId);
+      const restored = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      assert.equal(restored.accountType, 4);
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+  const runPromise = runtime.run(runInput({ platforms: ['juguang'] }));
+
+  await switchTriggered.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(identityCalls.length, 0, 'target URL + complete metadata must not unlock the old document');
+  assert.equal(
+    chrome.fixture.scriptExecutions.filter((entry) => entry.target && entry.target.documentIds).length,
+    0,
+    'bridge injection must wait for the matching committed document',
+  );
+
+  emitCommitted({
+    tabId: 13, frameId: 1, documentId: 'fixture-doc-child-frame', documentLifecycle: 'active',
+    url: tabMetadataUrl,
+  });
+  emitCommitted({
+    tabId: 13, frameId: 0, documentId: 'fixture-doc-old', documentLifecycle: 'active',
+    url: tabMetadataUrl,
+  });
+  emitCommitted({
+    tabId: 13, frameId: 0, documentId: 'fixture-doc-wrong-seller', documentLifecycle: 'active',
+    url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=fictional-wrong',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(identityCalls.length, 0, 'subframe, old-document, and wrong-account commits must be ignored');
+
+  current = clone(child);
+  emitCommitted({
+    tabId: 13, frameId: 0, documentId: 'fixture-doc-child', documentLifecycle: 'active',
+    url: tabMetadataUrl,
+  });
+  await returnTriggered.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(identityCalls.length, 1, 'only the committed child document may be probed');
+
+  current = clone(main);
+  emitCommitted({
+    tabId: 13, frameId: 0, documentId: 'fixture-doc-main', documentLifecycle: 'active',
+    url: tabMetadataUrl,
+  });
+  const result = await runPromise;
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.ok(identityCalls.length >= 2);
+  assert.ok(identityCalls.every((call) => (
+    Number(call.timeoutMs) > 0 && Number(call.timeoutMs) <= 1500
+  )), 'post-navigation identity probes must be short and bounded');
+  assert.equal(committedListeners.size, 0, 'navigation listeners must always be cleaned up');
+  const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+    entry.target && Array.isArray(entry.target.documentIds)
+  ));
+  assert.deepEqual(documentInjections.map((entry) => ({
+    documentIds: entry.target.documentIds,
+    world: entry.world,
+  })), [
+    { documentIds: ['fixture-doc-child'], world: 'MAIN' },
+    { documentIds: ['fixture-doc-child'], world: 'ISOLATED' },
+    { documentIds: ['fixture-doc-main'], world: 'MAIN' },
+    { documentIds: ['fixture-doc-main'], world: 'ISOLATED' },
+  ]);
+  for (const injection of documentInjections) {
+    assert.equal(Object.prototype.hasOwnProperty.call(injection.target, 'frameIds'), false);
+  }
+});
+
+test('runtime fails closed and removes the Juguang lifecycle listener when no new document commits', async () => {
+  const runtimeModule = loadRuntime();
+  const target = {
+    vSellerId: 'fictional-vseller-no-commit',
+    advertiserId: 123456,
+    accountType: 602,
+    name: '虚构未提交子账户',
+  };
+  const committedListeners = new Set();
+  let identityCalls = 0;
+  const chrome = createFakeChrome();
+  chrome.tabs.get = async () => ({
+    id: 13,
+    status: 'complete',
+    url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${target.vSellerId}`,
+  });
+  chrome.webNavigation = {
+    async getFrame() {
+      return {
+        tabId: 13,
+        frameId: 0,
+        documentId: 'fixture-doc-never-replaced',
+        documentLifecycle: 'active',
+        url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+      };
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 20,
+    pageClient: {
+      async request() {
+        identityCalls += 1;
+        return clone(target);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      await dependencies.switchAccount({
+        tabId: input.tabId,
+        target,
+        reportPath: '/aurora/ad/datareports-basic/note',
+      });
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'failed');
+  assert.match(result.platforms.juguang.errors[0].message, /commit|document|navigation/i);
+  assert.equal(identityCalls, 0, 'an uncommitted document must never be probed');
+  assert.equal(committedListeners.size, 0, 'timed-out lifecycle listeners must be removed');
+  assert.equal(
+    chrome.fixture.scriptExecutions.filter((entry) => entry.target && entry.target.documentIds).length,
+    0,
+  );
+});
+
+test('runtime keeps bridge injection inside the Juguang transition budget and requests immediate execution', async () => {
+  const runtimeModule = loadRuntime();
+  const target = {
+    vSellerId: 'fictional-vseller-stalled-injection',
+    advertiserId: 123456,
+    accountType: 602,
+    name: '虚构注入超时子账户',
+  };
+  const committedListeners = new Set();
+  let identityCalls = 0;
+  const chrome = createFakeChrome();
+  chrome.webNavigation = {
+    async getFrame() {
+      return {
+        tabId: 13,
+        frameId: 0,
+        documentId: 'fixture-doc-before-stalled-injection',
+        documentLifecycle: 'active',
+        url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+      };
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const originalUpdate = chrome.tabs.update;
+  chrome.tabs.update = async (tabId, update) => {
+    const result = await originalUpdate(tabId, update);
+    for (const listener of Array.from(committedListeners)) {
+      listener({
+        tabId,
+        frameId: 0,
+        documentId: 'fixture-doc-stalled-injection',
+        documentLifecycle: 'active',
+        url: update.url,
+      });
+    }
+    return result;
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = (details) => {
+    const recorded = originalExecuteScript(details);
+    if (details.target && Array.isArray(details.target.documentIds)) {
+      return new Promise(() => {});
+    }
+    return recorded;
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 200,
+    pageClient: {
+      async request() {
+        identityCalls += 1;
+        return clone(target);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      await dependencies.switchAccount({
+        tabId: input.tabId,
+        target,
+        reportPath: '/aurora/ad/datareports-basic/note',
+      });
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+  const startedAt = Date.now();
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'failed');
+  assert.ok(Date.now() - startedAt < 1500, 'a stalled script injection must not escape the transition budget');
+  assert.equal(identityCalls, 0);
+  assert.equal(committedListeners.size, 0);
+  const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+    entry.target && Array.isArray(entry.target.documentIds)
+  ));
+  assert.equal(documentInjections.length, 1);
+  assert.equal(documentInjections[0].injectImmediately, true);
 });
 
 test('runtime marks juguang failed when post-navigation account identity does not match', async () => {

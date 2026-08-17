@@ -259,10 +259,10 @@ test("generates the exact protected page and download allowlists around one ZIP"
     assert.equal((generated.LEGACY_PAGE_HTML[filename].match(/id="lockVaultBtn"/g) ?? []).length, 0);
   }
 
-  assert.equal(generated.EXTENSION_PACKAGE_VERSION, "2.37.9");
+  assert.equal(generated.EXTENSION_PACKAGE_VERSION, "2.37.10");
   assert.deepEqual(Array.from(generated.EXTENSION_PACKAGE_FILENAMES), [
     "taobao-data-assistant.zip",
-    "taobao-data-assistant-2.37.9.zip",
+    "taobao-data-assistant-2.37.10.zip",
   ]);
   const archive = Buffer.from(generated.EXTENSION_PACKAGE_BASE64, "base64");
   assert.ok(archive.length > 100_000);
