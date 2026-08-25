@@ -1,6 +1,6 @@
 # 淘宝经营数据协作平台与数据助手
 
-本仓库保存生产站点 [tbdata.aizicheng.com](https://tbdata.aizicheng.com) 对应的网页工具源码，以及配套的 Chrome 数据助手扩展源码。当前扩展版本为 `2.37.34`。
+本仓库保存生产站点 [tbdata.aizicheng.com](https://tbdata.aizicheng.com) 对应的网页工具源码，以及配套的 Chrome 数据助手扩展源码。当前扩展版本为 `2.37.36`。
 
 ## 目录说明
 

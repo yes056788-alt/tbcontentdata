@@ -65,7 +65,7 @@
     const manifest = snapshot && typeof snapshot === 'object' && snapshot.detailArchive;
     if (!manifest || manifest.schema !== 'xhsAnalysisDetailManifestV1' ||
         !Array.isArray(manifest.chunks)) return [];
-    return manifest.chunks.slice(0, 4096).map((chunk) => String(chunk && chunk.key || ''))
+    return manifest.chunks.map((chunk) => String(chunk && chunk.key || ''))
       .filter((key, index, keys) => isXhsDetailKey(key) && keys.indexOf(key) === index);
   }
 
@@ -112,7 +112,7 @@
     const failures = Object.fromEntries(knownKinds.map((kind) => [kind, false]));
     const missingKeys = [];
     const invalidKeys = [];
-    manifest.chunks.slice(0, 4096).sort((left, right) => (
+    manifest.chunks.slice().sort((left, right) => (
       Number(left && left.index) - Number(right && right.index)
     )).forEach((descriptor) => {
       const key = String(descriptor && descriptor.key || '');
@@ -1305,7 +1305,7 @@
     xhsStarExpanded = { project: false, task: false };
   }
 
-  function buildXhsPgyDateControls(view, staticExport) {
+  function buildXhsPgyDateControls(view, staticExport, interactiveExport) {
     const disabled = Boolean(
       staticExport || !view.factsAvailable || !view.modelAvailable
     );
@@ -1334,19 +1334,24 @@
       ? '<p class="xhs-control-note" role="note">超期判定日期：今日 ' + escapeHtml(asOf) +
         '；任务结束日期早于今日即计为超期。</p>'
       : '';
+    const status = interactiveExport
+      ? '<p class="xhs-filter-status" role="status" aria-live="polite" data-xhs-export-filter-status="pgy"></p>'
+      : '';
     return notices.join('') + collectionNote + '<div class="xhs-control-grid xhs-pgy-controls">' +
       '<label><span>SPU 筛选</span><select data-xhs-pgy-spu aria-label="SPU 筛选"' + disabledAttribute + '>' +
       spuMarkup + '</select></label>' +
       '<label><span>发布日期从</span><input type="date" data-xhs-pgy-date="from" aria-label="发布日期从" value="' +
       escapeHtml(view.dateRange.from) + '"' + disabledAttribute + '></label>' +
       '<label><span>发布日期至</span><input type="date" data-xhs-pgy-date="to" aria-label="发布日期至" value="' +
-      escapeHtml(view.dateRange.to) + '"' + disabledAttribute + '></label></div>';
+      escapeHtml(view.dateRange.to) + '"' + disabledAttribute + '></label></div>' + status;
   }
 
   function xhsKpiMarkup(items, extraClass) {
     return '<div class="xhs-metric-grid ' + escapeHtml(extraClass || '') + '">' + items.map((item) => (
       '<div class="xhs-metric-card"><span>' + escapeHtml(item[0]) + '</span><strong>' +
-      escapeHtml(item[1]) + '</strong>' + (item[2] ? '<small>' + escapeHtml(item[2]) + '</small>' : '') + '</div>'
+      (item[3] ? '<span data-xhs-export-metric="' + escapeHtml(item[3]) + '">' : '') +
+      escapeHtml(item[1]) + (item[3] ? '</span>' : '') + '</strong>' +
+      (item[2] ? '<small>' + escapeHtml(item[2]) + '</small>' : '') + '</div>'
     )).join('') + '</div>';
   }
 
@@ -1366,7 +1371,7 @@
         Math.max(count ? 3 : 0, count / maximum * 100).toFixed(2) + '%"></i></div><strong class="xhs-chart-value">' +
         formatInteger(count) + ' 篇</strong></div>';
     }).join('') : '<p class="xhs-empty-state">当前日期范围暂无发布笔记。</p>';
-    return '<figure class="xhs-bar-chart xhs-monthly-chart" role="list" aria-label="按月发布笔记数"><figcaption>按月发布笔记</figcaption>' +
+    return '<figure class="xhs-bar-chart xhs-monthly-chart" data-xhs-export-pgy-chart="monthly" role="list" aria-label="按月发布笔记数"><figcaption>按月发布笔记</figcaption>' +
       bars + '</figure>';
   }
 
@@ -1381,11 +1386,11 @@
         Math.max(count ? 3 : 0, count / maximum * 100).toFixed(2) + '%"></i></div><strong class="xhs-chart-value">' +
         formatInteger(count) + ' 篇 <small>平均合作费用 ' + escapeHtml(average) + '</small></strong></div>';
     }).join('') : '<p class="xhs-empty-state">暂无可用的达人粉丝量级数据。</p>';
-    return '<figure class="xhs-bar-chart xhs-follower-chart" role="list" aria-label="达人粉丝量级分布，包含笔记数和平均合作费用"><figcaption>达人粉丝量级</figcaption>' +
+    return '<figure class="xhs-bar-chart xhs-follower-chart" data-xhs-export-pgy-chart="followers" role="list" aria-label="达人粉丝量级分布，包含笔记数和平均合作费用"><figcaption>达人粉丝量级</figcaption>' +
       bars + '<span class="xhs-sr-only">平均合作费用仅包含合作金额，不包含平台服务费。</span></figure>';
   }
 
-  function buildXhsPgyNoteAnalysis(view, staticExport) {
+  function buildXhsPgyNoteAnalysis(view, staticExport, interactiveExport) {
     if (!view.factsAvailable) return '';
     const facts = xhsArray(view.summary && view.summary.facts);
     const projects = [...new Set(facts.map((fact) => String(
@@ -1457,19 +1462,22 @@
       '</td><td>' + formatInteger(taobao15d.dealUv) + '</td><td>' + formatInteger(taobao15d.addCartUv) +
       '</td><td>' + formatPercent(taobao15d.addCartRate, 2) + '</td><td>' +
       formatPercent(taobao15d.purchaseRate, 2) + '</td></tr>' : '';
-    const disabled = staticExport ? ' disabled aria-disabled="true"' : '';
-    const expanded = staticExport || xhsPgyNoteExpanded;
+    const controlDisabled = staticExport && !interactiveExport ? ' disabled aria-disabled="true"' : '';
+    const disclosureDisabled = staticExport && !interactiveExport
+      ? ' disabled aria-disabled="true"'
+      : '';
+    const expanded = staticExport ? !interactiveExport : xhsPgyNoteExpanded;
     return '<section class="xhs-pgy-note-analysis"><button type="button" data-xhs-pgy-note-toggle aria-expanded="' +
-      String(expanded) + '" aria-controls="xhsPgyNoteAnalysis"' + disabled + '>笔记分析 <span>' +
+      String(expanded) + '" aria-controls="xhsPgyNoteAnalysis"' + disclosureDisabled + '>笔记分析 <span data-xhs-export-pgy-note-count>' +
       formatInteger(filtered.length) + ' 篇</span></button><div id="xhsPgyNoteAnalysis"' +
       (expanded ? '' : ' hidden') + '><div class="xhs-control-grid xhs-pgy-note-controls"><label><span>跨域项目名称</span>' +
-      '<select data-xhs-pgy-project aria-label="按跨域项目名称筛选"' + disabled + '>' + projectOptions +
+      '<select data-xhs-pgy-project aria-label="按跨域项目名称筛选"' + controlDisabled + '>' + projectOptions +
       '</select></label></div><div class="report-table-block xhs-wide-table"><table><thead><tr>' +
       '<th>发布日期</th><th>笔记</th><th>跨域项目名称</th><th>SPU名称</th><th>淘宝任务ID</th>' +
       '<th>任务结束日期</th><th>达人</th><th>粉丝数</th><th>合作金额</th><th>平台服务费</th><th>达人花费</th>' +
       '<th>曝光量</th><th>阅读量</th><th>互动量</th><th>淘宝站外活跃行为UV(15天)</th>' +
       '<th>淘宝站外活跃成本(15天)</th><th>淘宝成交UV(15天)</th><th>淘宝加购UV(15天)</th>' +
-      '<th>淘宝加购率(15天)</th><th>淘宝购买率(15天)</th></tr></thead><tbody>' + totalRow + rows +
+      '<th>淘宝加购率(15天)</th><th>淘宝购买率(15天)</th></tr></thead><tbody data-xhs-export-pgy-note-body>' + totalRow + rows +
       '</tbody></table></div></div></section>';
   }
 
@@ -1558,7 +1566,7 @@
   }
 
   function buildXhsJuguangControls(rows, staticView, factsUnavailable, modelUnavailable,
-    placementUnavailable) {
+    placementUnavailable, interactiveExport) {
     const groupBy = normalizedXhsGroupBy(placementUnavailable);
     const controlsDisabled = staticView || factsUnavailable || modelUnavailable;
     const disabledAttribute = controlsDisabled
@@ -1595,7 +1603,9 @@
       buildXhsFilterSelect(rows, 'placementType', 'placementTypes', '按投放位置筛选',
         controlsDisabled || placementUnavailable) +
       '<fieldset><legend>分组维度（最多 3 层）</legend><div class="xhs-check-list">' + groups +
-      '</div></fieldset></div>';
+      '</div></fieldset></div>' + (interactiveExport
+        ? '<p class="xhs-filter-status" role="status" aria-live="polite" data-xhs-export-filter-status="juguang"></p>'
+        : '');
   }
 
   function xhsLegacyJuguangSummary(value) {
@@ -1770,7 +1780,7 @@
       '<th>新增种草人群</th><th>新增深度种草人群</th>' +
       '<th>产品种草15日站外活跃UV</th><th>站外行为成本</th>' +
       '<th>外链进店数</th><th>15日成交订单数</th>' +
-      '<th>15日成交 GMV</th><th>计算 ROI</th><th>平台原始 ROI</th></tr></thead><tbody>' +
+      '<th>15日成交 GMV</th><th>计算 ROI</th><th>平台原始 ROI</th></tr></thead><tbody data-xhs-export-juguang-body>' +
       '<tr class="xhs-total-row"><th scope="row">筛选后总计</th>' + xhsJuguangMetricCells(aggregation.summary) + '</tr>' +
       (groupRows || '<tr><td colspan="17">当前筛选条件暂无聚光投放数据。</td></tr>') +
       '</tbody></table></div>';
@@ -1860,29 +1870,30 @@
     };
   }
 
-  function xhsStarMetricCards(metrics, costs, roiOverrides) {
+  function xhsStarMetricCards(metrics, costs, roiOverrides, markerPrefix) {
     const values = xhsObject(metrics);
     const costValues = xhsObject(costs);
     const derived = xhsStarDerivedMetrics(values, costValues,
       roiOverrides && typeof roiOverrides === 'object' ? roiOverrides : { storeRoi: roiOverrides });
+    const marker = (path) => markerPrefix ? markerPrefix + '.' + path : '';
     return xhsKpiMarkup([
-      ['花费', formatMoney(costValues.total)],
-      ['达人花费', formatMoney(costValues.creator)],
-      ['广告花费（任务期内）', formatMoney(costValues.adInTask)],
-      ['阅读UV', formatInteger(values.readUv)],
-      ['搜索曝光UV', formatInteger(values.searchImpressionUv)],
-      ['进店UV', formatInteger(values.storeVisitUv)],
-      ['进店率', formatPercent(derived.visitRate, 2)],
-      ['进店成本', formatMoney(derived.visitCost)],
-      ['加购率', formatPercent(derived.addCartRate, 2)],
-      ['转化率', formatPercent(derived.conversionRate, 2)],
-      ['成交UV', formatInteger(values.orderUv)],
-      ['全店GMV', formatMoney(values.gmv)],
-      ['种草商品GMV', formatMoney(values.seededProductGmv)],
-      ['种草成交占比', formatPercent(derived.seededProductShare, 2)],
-      ['全店ROI', formatDecimal(derived.storeRoi, 2)],
-      ['任务ROI', formatDecimal(derived.taskRoi, 2)],
-      ['投流ROI', formatDecimal(derived.trafficRoi, 2)],
+      ['花费', formatMoney(costValues.total), '', marker('costs.total')],
+      ['达人花费', formatMoney(costValues.creator), '', marker('costs.creator')],
+      ['广告花费（任务期内）', formatMoney(costValues.adInTask), '', marker('costs.adInTask')],
+      ['阅读UV', formatInteger(values.readUv), '', marker('metrics.readUv')],
+      ['搜索曝光UV', formatInteger(values.searchImpressionUv), '', marker('metrics.searchImpressionUv')],
+      ['进店UV', formatInteger(values.storeVisitUv), '', marker('metrics.storeVisitUv')],
+      ['进店率', formatPercent(derived.visitRate, 2), '', marker('derived.visitRate')],
+      ['进店成本', formatMoney(derived.visitCost), '', marker('derived.visitCost')],
+      ['加购率', formatPercent(derived.addCartRate, 2), '', marker('derived.addCartRate')],
+      ['转化率', formatPercent(derived.conversionRate, 2), '', marker('derived.conversionRate')],
+      ['成交UV', formatInteger(values.orderUv), '', marker('metrics.orderUv')],
+      ['全店GMV', formatMoney(values.gmv), '', marker('metrics.gmv')],
+      ['种草商品GMV', formatMoney(values.seededProductGmv), '', marker('metrics.seededProductGmv')],
+      ['种草成交占比', formatPercent(derived.seededProductShare, 2), '', marker('derived.seededProductShare')],
+      ['全店ROI', formatDecimal(derived.storeRoi, 2), '', marker('derived.storeRoi')],
+      ['任务ROI', formatDecimal(derived.taskRoi, 2), '', marker('derived.taskRoi')],
+      ['投流ROI', formatDecimal(derived.trafficRoi, 2), '', marker('derived.trafficRoi')],
     ], 'xhs-star-metrics');
   }
 
@@ -2050,6 +2061,7 @@
   function xhsStarSelect(label, kind, value, choices, disabled) {
     const options = [{ id: '', label: '全部' }].concat(choices).map((choice) => (
       '<option value="' + escapeHtml(choice.id) + '"' +
+      (choice.projectId ? ' data-xhs-star-project-id="' + escapeHtml(choice.projectId) + '"' : '') +
       (String(choice.id) === String(value || '') ? ' selected' : '') + '>' +
       escapeHtml(choice.label) + '</option>'
     )).join('');
@@ -2082,19 +2094,19 @@
       formatDecimal(derived.trafficRoi, 2) + '</td>';
   }
 
-  function xhsStarDetailToggle(kind, expanded, count, staticExport) {
+  function xhsStarDetailToggle(kind, expanded, count, staticExport, interactiveExport) {
     const detailId = kind === 'project' ? 'xhsStarProjectReport' : 'xhsStarTaskReport';
     const countLabel = kind === 'project' ? '个项目' : '个任务';
     return '<button type="button" class="xhs-star-detail-toggle" data-xhs-star-toggle="' + kind +
       '" aria-expanded="' + String(expanded) + '" aria-controls="' + detailId + '"' +
-      (staticExport ? ' disabled aria-disabled="true"' : '') + '>' +
+      (staticExport && !interactiveExport ? ' disabled aria-disabled="true"' : '') + '>' +
       (expanded ? '收起报表' : '查看更多') + '<span>' + formatInteger(count) + ' ' + countLabel +
       '</span></button>';
   }
 
-  function buildXhsProjectSummary(star, filters, staticExport, expanded) {
+  function buildXhsProjectSummary(star, filters, staticExport, expanded, interactiveExport) {
     const safe = xhsObject(star);
-    const detailExpanded = Boolean(staticExport || expanded !== false);
+    const detailExpanded = staticExport ? !interactiveExport : expanded !== false;
     const selectedProject = String(filters && filters.projectId || '');
     const selectedTask = String(filters && filters.taskId || '');
     const orders = xhsStarOrders(safe);
@@ -2118,7 +2130,9 @@
     });
     const tableRows = displayRows.map(({ project, taskCount }) => {
       const id = String(project && project.id || '');
-      return '<tr data-xhs-star-project="' + escapeHtml(id) + '"><th scope="row"><strong>' +
+      return '<tr data-xhs-star-project="' + escapeHtml(id) + '" data-xhs-star-project-id="' +
+        escapeHtml(id) + '" data-xhs-star-task-count="' + taskCount + '" data-xhs-star-values="' +
+        escapeHtml(JSON.stringify({ costs: project.costs, metrics: project.metrics })) + '"><th scope="row"><strong>' +
         escapeHtml(project && project.name || id || '未命名项目') + '</strong><small>' +
         escapeHtml(id || '—') + '</small></th><td>' + escapeHtml(xhsStatusLabel(project && project.status)) +
         '</td><td>' + formatInteger(taskCount) + '</td>' + xhsStarSummaryCells(project) + '</tr>';
@@ -2132,21 +2146,22 @@
     const totalUnit = { costs: total.costs, metrics: total.metrics };
     const totalTaskCount = displayRows.reduce((sum, row) => sum + row.taskCount, 0);
     const totalRow = displayRows.length
-      ? '<tr class="xhs-total-row"><th colspan="3" scope="row">筛选后汇总</th>' +
+      ? '<tr class="xhs-total-row" data-xhs-star-total><th colspan="3" scope="row">筛选后汇总</th>' +
         xhsStarSummaryCells(totalUnit) + '</tr>' : '';
     const emptyRow = displayRows.length
-      ? '' : '<tr><td colspan="20">当前筛选条件暂无星河项目汇总。</td></tr>';
+      ? '' : '<tr data-xhs-star-empty><td colspan="20">当前筛选条件暂无星河项目汇总。</td></tr>';
     return xhsKpiMarkup([
-      ['项目数', formatInteger(displayRows.length)],
-      ['任务数', formatInteger(totalTaskCount)],
+      ['项目数', formatInteger(displayRows.length), '', interactiveExport ? 'star.project.count' : ''],
+      ['任务数', formatInteger(totalTaskCount), '', interactiveExport ? 'star.project.taskCount' : ''],
     ], 'xhs-star-project-metrics') +
       xhsStarMetricCards(total.metrics, total.costs, {
         storeRoi: total.storeRoi,
         taskRoi: total.taskRoi,
         trafficRoi: total.trafficRoi,
-      }) + xhsStarDetailToggle('project', detailExpanded, displayRows.length, staticExport) +
+      }, interactiveExport ? 'star.project' : '') + xhsStarDetailToggle('project', detailExpanded, displayRows.length, staticExport, interactiveExport) +
       '<div class="xhs-star-detail-report" id="xhsStarProjectReport"' +
       (detailExpanded ? '' : ' hidden') + '>' + buildXhsStarSummaryControls(safe, filters, staticExport) +
+      (interactiveExport ? '<p class="xhs-filter-status" role="status" aria-live="polite" data-xhs-export-filter-status="star-project"></p>' : '') +
       '<div class="report-table-block xhs-wide-table"><table><thead><tr><th>项目</th><th>状态</th><th>任务数</th>' +
       '<th>总花费</th><th>达人花费</th><th>任务期内广告花费</th><th>阅读UV</th>' +
       '<th>搜索曝光UV</th><th>进店UV</th><th>进店率</th><th>进店成本</th>' +
@@ -2155,9 +2170,9 @@
       '</tr></thead><tbody>' + totalRow + tableRows + emptyRow + '</tbody></table></div></div>';
   }
 
-  function buildXhsTaskSummary(star, filters, staticExport, expanded) {
+  function buildXhsTaskSummary(star, filters, staticExport, expanded, interactiveExport) {
     const safe = xhsObject(star);
-    const detailExpanded = Boolean(staticExport || expanded !== false);
+    const detailExpanded = staticExport ? !interactiveExport : expanded !== false;
     const selectedProject = String(filters && filters.projectId || '');
     const selectedTask = String(filters && filters.taskId || '');
     const projectNames = new Map(xhsArray(safe.projects).map((project) => [
@@ -2171,7 +2186,9 @@
     const tableRows = rows.map((task) => {
       const identity = xhsStarOrderPublicIdentity(task);
       const projectId = String(task.projectId || '');
-      return '<tr data-xhs-star-task="' + escapeHtml(identity.publicId || '') + '"><th scope="row"><strong>' +
+      return '<tr data-xhs-star-task="' + escapeHtml(identity.publicId || '') + '" data-xhs-star-project-id="' +
+        escapeHtml(projectId) + '" data-xhs-star-values="' +
+        escapeHtml(JSON.stringify({ costs: task.costs, metrics: task.metrics })) + '"><th scope="row"><strong>' +
         escapeHtml(task.name || '未命名任务') + '</strong><small>' + escapeHtml(identity.publicId || '—') +
         (identity.verified ? '' : '<em>' + escapeHtml(identity.label) + '</em>') +
         '</small></th><td>' + escapeHtml(projectNames.get(projectId) || (projectId || '未关联项目')) +
@@ -2182,13 +2199,14 @@
     const total = xhsStarAggregateUnits(rows.filter((task) => task.businessIdentityVerified !== false));
     const totalUnit = { costs: total.costs, metrics: total.metrics };
     const totalRow = rows.length
-      ? '<tr class="xhs-total-row"><th colspan="4" scope="row">筛选后汇总</th>' +
+      ? '<tr class="xhs-total-row" data-xhs-star-total><th colspan="4" scope="row">筛选后汇总</th>' +
         xhsStarSummaryCells(totalUnit) + '</tr>' : '';
     const emptyRow = rows.length
-      ? '' : '<tr><td colspan="21">当前筛选条件暂无星河任务汇总。</td></tr>';
-    return xhsStarDetailToggle('task', detailExpanded, rows.length, staticExport) +
+      ? '' : '<tr data-xhs-star-empty><td colspan="21">当前筛选条件暂无星河任务汇总。</td></tr>';
+    return xhsStarDetailToggle('task', detailExpanded, rows.length, staticExport, interactiveExport) +
       '<div class="xhs-star-detail-report" id="xhsStarTaskReport"' +
       (detailExpanded ? '' : ' hidden') + '>' + buildXhsStarSummaryControls(safe, filters, staticExport) +
+      (interactiveExport ? '<p class="xhs-filter-status" role="status" aria-live="polite" data-xhs-export-filter-status="star-task"></p>' : '') +
       '<div class="report-table-block xhs-wide-table"><table><thead><tr><th>任务</th><th>项目</th><th>状态</th>' +
       '<th>任务周期</th><th>总花费</th><th>达人花费</th><th>任务期内广告花费</th><th>阅读UV</th>' +
       '<th>搜索曝光UV</th><th>进店UV</th><th>进店率</th><th>进店成本</th>' +
@@ -2334,6 +2352,7 @@
   function xhsNoteSelect(label, attribute, value, choices, disabled) {
     const options = [{ id: '', label: '全部' }].concat(choices).map((choice) => (
       '<option value="' + escapeHtml(choice.id) + '"' +
+      (choice.projectId ? ' data-xhs-note-project-id="' + escapeHtml(choice.projectId) + '"' : '') +
       (String(choice.id) === String(value || '') ? ' selected' : '') + '>' +
       escapeHtml(choice.label) + '</option>'
     )).join('');
@@ -2374,9 +2393,24 @@
         return left.index - right.index;
       });
     const expandedView = view.expanded === true;
+    const interactiveExport = view.interactiveExport === true;
     const visible = filtered.slice(0, expandedView ? filtered.length : 20);
-    const filterOptions = xhsNoteFilterOptions(analysis, notes, filters);
-    const disabled = view.staticView === true;
+    const allRanked = notes.map((note, index) => ({ note, index, facts: xhsNoteCostFacts(note) }))
+      .sort((left, right) => {
+        const leftSpend = left.facts.total;
+        const rightSpend = right.facts.total;
+        if (leftSpend === null && rightSpend !== null) return 1;
+        if (leftSpend !== null && rightSpend === null) return -1;
+        if (leftSpend !== rightSpend) return Number(rightSpend || 0) - Number(leftSpend || 0);
+        return left.index - right.index;
+      });
+    // The standalone export must retain every hydrated note. Its runtime applies
+    // the initial controls after load, so exporting a filtered online view never
+    // makes the other projects, tasks, SPUs, or dates impossible to select.
+    const rendered = interactiveExport ? allRanked : visible;
+    const filterOptions = xhsNoteFilterOptions(analysis, notes,
+      interactiveExport ? Object.assign({}, filters, { projectId: '' }) : filters);
+    const disabled = view.staticView === true && !interactiveExport;
     const controls = '<div class="xhs-control-grid xhs-note-controls">' +
       xhsNoteSelect('按项目筛选', 'data-xhs-note-filter="project"', filters.projectId, filterOptions.projects, disabled) +
       xhsNoteSelect('按任务筛选', 'data-xhs-note-filter="task"', filters.taskId, filterOptions.tasks, disabled) +
@@ -2385,7 +2419,7 @@
       escapeHtml(filters.from) + '"' + (disabled ? ' disabled' : '') + '></label>' +
       '<label><span>发布日期至</span><input type="date" data-xhs-note-date="to" aria-label="发布日期至" value="' +
       escapeHtml(filters.to) + '"' + (disabled ? ' disabled' : '') + '></label></div>';
-    const rows = visible.length ? visible.map(({ note, facts }) => {
+    const rows = rendered.length ? rendered.map(({ note, facts }, renderedIndex) => {
       const pgy = xhsObject(note && note.pgy);
       const pgyMetrics = xhsObject(pgy.metrics);
       const star = xhsObject(note && note.star);
@@ -2411,7 +2445,28 @@
         ? '<a class="xhs-note-detail-link" href="' + escapeHtml(noteUrl) +
           '" target="_blank" rel="noopener noreferrer">' + title + '</a>'
         : title;
-      return '<tr data-xhs-note-id="' + escapeHtml(note && note.noteId || '') +
+      const exportOverflow = interactiveExport && renderedIndex >= 20
+        ? ' hidden data-xhs-export-note-overflow'
+        : '';
+      const exportValues = interactiveExport ? escapeHtml(JSON.stringify({
+        creator: facts.creator,
+        allJuguang: facts.allJuguang,
+        total: facts.total,
+        periodTotal: facts.periodTotal,
+        inTaskJuguang: facts.inTaskJuguang,
+        outsideTaskJuguang: facts.outsideTaskJuguang,
+        pgyImpressions: pgyMetrics.impressions,
+        pgyReads: pgyMetrics.reads,
+        pgyInteractions: pgyMetrics.interactions,
+        starReadUv: starMetrics.readUv,
+        storeVisitUv: starMetrics.storeVisitUv,
+        cartUv: starMetrics.cartUv,
+        orderUv: starMetrics.orderUv,
+        storeGmv: starMetrics.gmv,
+        seededProductGmv,
+      })) : '';
+      return '<tr' + exportOverflow + (interactiveExport ? ' data-xhs-export-note-row data-xhs-note-values="' +
+        exportValues + '"' : '') + ' data-xhs-note-id="' + escapeHtml(note && note.noteId || '') +
         '" data-xhs-note-project="' + escapeHtml(xhsArray(task.projectIds).join(',')) +
         '" data-xhs-note-task="' + escapeHtml(xhsArray(task.orderIds).join(',')) +
         '" data-xhs-note-spu="' + escapeHtml(pgy.spuName || '') +
@@ -2469,35 +2524,53 @@
       gmv: totals.storeGmv,
       seededProductGmv: totals.seededProductGmv,
     }, { total: totals.periodTotal, adInTask: totals.inTaskJuguang });
-    const totalRow = filtered.length
-      ? '<tr class="xhs-total-row" data-xhs-note-total><th colspan="4" scope="row">筛选后汇总</th><td>' +
-        formatMoney(totals.creator) + '</td><td>' + formatMoney(totals.allJuguang) + '</td><td>' +
-        formatMoney(totals.total) + '</td><td>' + formatMoney(totals.periodTotal) + '</td><td>' +
-        formatMoney(totals.outsideTaskJuguang) + '</td><td>' + formatMoney(totalDerived.visitCost) + '</td><td>' +
-        formatInteger(totals.pgyImpressions) + '</td><td>' + formatInteger(totals.pgyReads) + '</td><td>' +
-        formatInteger(totals.pgyInteractions) + '</td><td>' + formatInteger(totals.starReadUv) + '</td><td>' +
-        formatInteger(totals.storeVisitUv) + '</td><td>' + formatPercent(totalDerived.visitRate, 2) +
-        '</td><td>' + formatPercent(totalDerived.addCartRate, 2) + '</td><td>' +
-        formatPercent(totalDerived.conversionRate, 2) + '</td><td>' + formatInteger(totals.orderUv) +
-        '</td><td>' + formatMoney(totals.storeGmv) + '</td><td>' + formatMoney(totals.seededProductGmv) +
-        '</td><td>' + formatPercent(totalDerived.seededProductShare, 2) + '</td><td>' +
-        formatDecimal(totalDerived.storeRoi, 2) + '</td><td>' + formatDecimal(totalDerived.taskRoi, 2) +
-        '</td><td>' + formatDecimal(totalDerived.trafficRoi, 2) + '</td></tr>' : '';
-    const toggle = filtered.length > 20
-      ? '<button type="button" data-xhs-note-toggle aria-expanded="' + String(expandedView) + '"' +
-        (disabled ? ' disabled' : '') + '>' + (expandedView ? '收起' : '查看更多') + '</button>' : '';
-    return controls + '<div class="report-table-block xhs-wide-table"><div class="xhs-note-browser-summary">显示 ' +
-      visible.length + ' / ' + filtered.length + toggle + '</div><table><thead><tr><th>蒲公英计入本期</th><th>发布日期</th>' +
+    const totalCell = (key, value) => '<td data-xhs-note-total-value="' + key + '">' + value + '</td>';
+    const totalRow = filtered.length || interactiveExport
+      ? '<tr class="xhs-total-row" data-xhs-note-total><th colspan="4" scope="row">筛选后汇总</th>' +
+        totalCell('creator', formatMoney(totals.creator)) +
+        totalCell('allJuguang', formatMoney(totals.allJuguang)) +
+        totalCell('total', formatMoney(totals.total)) +
+        totalCell('periodTotal', formatMoney(totals.periodTotal)) +
+        totalCell('outsideTaskJuguang', formatMoney(totals.outsideTaskJuguang)) +
+        totalCell('visitCost', formatMoney(totalDerived.visitCost)) +
+        totalCell('pgyImpressions', formatInteger(totals.pgyImpressions)) +
+        totalCell('pgyReads', formatInteger(totals.pgyReads)) +
+        totalCell('pgyInteractions', formatInteger(totals.pgyInteractions)) +
+        totalCell('starReadUv', formatInteger(totals.starReadUv)) +
+        totalCell('storeVisitUv', formatInteger(totals.storeVisitUv)) +
+        totalCell('visitRate', formatPercent(totalDerived.visitRate, 2)) +
+        totalCell('addCartRate', formatPercent(totalDerived.addCartRate, 2)) +
+        totalCell('conversionRate', formatPercent(totalDerived.conversionRate, 2)) +
+        totalCell('orderUv', formatInteger(totals.orderUv)) +
+        totalCell('storeGmv', formatMoney(totals.storeGmv)) +
+        totalCell('seededProductGmv', formatMoney(totals.seededProductGmv)) +
+        totalCell('seededProductShare', formatPercent(totalDerived.seededProductShare, 2)) +
+        totalCell('storeRoi', formatDecimal(totalDerived.storeRoi, 2)) +
+        totalCell('taskRoi', formatDecimal(totalDerived.taskRoi, 2)) +
+        totalCell('trafficRoi', formatDecimal(totalDerived.trafficRoi, 2)) + '</tr>' : '';
+    const toggle = (interactiveExport ? rendered.length : filtered.length) > 20
+      ? '<button type="button" data-xhs-note-toggle aria-expanded="' + String(expandedView) +
+        '" aria-controls="xhsNoteFullPathTable"' +
+        (disabled && !interactiveExport ? ' disabled' : '') + '>' + (expandedView ? '收起' : '查看更多') + '</button>' : '';
+    return controls + (interactiveExport
+      ? '<p class="xhs-filter-status" role="status" aria-live="polite" data-xhs-export-filter-status="notes"></p>'
+      : '') + '<div class="report-table-block xhs-wide-table"><div class="xhs-note-browser-summary"' +
+      ' data-xhs-note-visible-count="' + visible.length + '" data-xhs-note-total-count="' + filtered.length + '">显示 ' +
+      visible.length + ' / ' + filtered.length + toggle + '</div><table id="xhsNoteFullPathTable"><thead><tr>' +
+      '<th>蒲公英计入本期</th><th>发布日期</th>' +
       '<th>笔记</th><th>SPU名称</th><th>达人花费</th><th>全部聚光</th><th>总花费</th><th>任务期内花费</th>' +
       '<th>任务期外花费</th><th>进店成本</th><th>蒲公英曝光</th>' +
       '<th>蒲公英阅读</th><th>蒲公英互动</th><th>星河阅读UV</th><th>星河进店UV</th>' +
       '<th>进店率</th><th>加购率</th><th>转化率</th><th>成交UV</th><th>全店GMV</th>' +
       '<th>种草商品GMV（任务GMV）</th><th>种草成交占比</th><th>全店ROI</th><th>任务ROI</th><th>投流ROI</th>' +
-      '</tr></thead><tbody>' + totalRow + rows + '</tbody></table></div>';
+      '</tr></thead><tbody>' + totalRow +
+      (interactiveExport ? '<tr hidden data-xhs-export-note-empty><td colspan="25">当前筛选条件暂无星河数据的笔记。</td></tr>' : '') +
+      rows + '</tbody></table></div>';
   }
 
   function buildXhsMarkup(options) {
     const staticExport = Boolean(options && options.staticExport);
+    const interactiveExport = staticExport && Boolean(options && options.interactiveExport);
     const platform = XHS_REPORT_SECTION_KEYS.includes(options && options.platform)
       ? options.platform : '';
     const analysis = xhsObject(xhsAnalysis);
@@ -2571,30 +2644,31 @@
     const pgyMetrics = xhsObject(pgy.metrics);
     const pgyCosts = xhsObject(pgy.costs);
     const pgyTaobao15d = xhsObject(pgy.taobao15d);
+    const pgyExportMetric = (path) => interactiveExport ? path : '';
     const pgyPanel = '<section class="xhs-report-panel" data-xhs-panel="pgy-analysis">' +
       xhsPanelHeading('PUGONGYING', '蒲公英分析', '仅统计所选时间内发布的笔记；合作金额与平台服务费分开展示', '发布日期口径') +
-      buildXhsPgyDateControls(pgyView, staticExport) +
+      buildXhsPgyDateControls(pgyView, staticExport && !interactiveExport, interactiveExport) +
       xhsKpiMarkup([
-        ['时间筛选内笔记数', formatInteger(xhsFirstValue(pgy.noteCount, pgy.reportedNoteCount))],
-        ['星河任务笔记数', formatInteger(pgy.starTaskNoteCount)],
-        ['超期笔记数', formatInteger(pgy.overdueNoteCount)],
-        ['合作金额', formatMoney(pgyCosts.cooperation)],
-        ['平台服务费', formatMoney(pgyCosts.platformFee)],
-        ['达人花费', formatMoney(pgyCosts.total)],
-        ['曝光量', formatInteger(pgyMetrics.impressions)],
-        ['阅读量', formatInteger(pgyMetrics.reads)],
-        ['互动量', formatInteger(pgyMetrics.interactions)],
-        ['阅读率', formatPercent(pgyMetrics.readRate)],
-        ['互动率', formatPercent(pgyMetrics.engagementRate)],
-        ['淘宝站外活跃行为UV(15天)', formatInteger(pgyTaobao15d.offsiteActiveUv)],
-        ['淘宝站外活跃成本(15天)', formatMoney(pgyTaobao15d.offsiteActiveCost)],
-        ['淘宝成交UV(15天)', formatInteger(pgyTaobao15d.dealUv)],
-        ['淘宝加购UV(15天)', formatInteger(pgyTaobao15d.addCartUv)],
-        ['淘宝加购率(15天)', formatPercent(pgyTaobao15d.addCartRate, 2)],
-        ['淘宝购买率(15天)', formatPercent(pgyTaobao15d.purchaseRate, 2)],
+        ['时间筛选内笔记数', formatInteger(xhsFirstValue(pgy.noteCount, pgy.reportedNoteCount)), '', pgyExportMetric('pgy.noteCount')],
+        ['星河任务笔记数', formatInteger(pgy.starTaskNoteCount), '', pgyExportMetric('pgy.starTaskNoteCount')],
+        ['超期笔记数', formatInteger(pgy.overdueNoteCount), '', pgyExportMetric('pgy.overdueNoteCount')],
+        ['合作金额', formatMoney(pgyCosts.cooperation), '', pgyExportMetric('pgy.costs.cooperation')],
+        ['平台服务费', formatMoney(pgyCosts.platformFee), '', pgyExportMetric('pgy.costs.platformFee')],
+        ['达人花费', formatMoney(pgyCosts.total), '', pgyExportMetric('pgy.costs.total')],
+        ['曝光量', formatInteger(pgyMetrics.impressions), '', pgyExportMetric('pgy.metrics.impressions')],
+        ['阅读量', formatInteger(pgyMetrics.reads), '', pgyExportMetric('pgy.metrics.reads')],
+        ['互动量', formatInteger(pgyMetrics.interactions), '', pgyExportMetric('pgy.metrics.interactions')],
+        ['阅读率', formatPercent(pgyMetrics.readRate), '', pgyExportMetric('pgy.metrics.readRate')],
+        ['互动率', formatPercent(pgyMetrics.engagementRate), '', pgyExportMetric('pgy.metrics.engagementRate')],
+        ['淘宝站外活跃行为UV(15天)', formatInteger(pgyTaobao15d.offsiteActiveUv), '', pgyExportMetric('pgy.taobao15d.offsiteActiveUv')],
+        ['淘宝站外活跃成本(15天)', formatMoney(pgyTaobao15d.offsiteActiveCost), '', pgyExportMetric('pgy.taobao15d.offsiteActiveCost')],
+        ['淘宝成交UV(15天)', formatInteger(pgyTaobao15d.dealUv), '', pgyExportMetric('pgy.taobao15d.dealUv')],
+        ['淘宝加购UV(15天)', formatInteger(pgyTaobao15d.addCartUv), '', pgyExportMetric('pgy.taobao15d.addCartUv')],
+        ['淘宝加购率(15天)', formatPercent(pgyTaobao15d.addCartRate, 2), '', pgyExportMetric('pgy.taobao15d.addCartRate')],
+        ['淘宝购买率(15天)', formatPercent(pgyTaobao15d.purchaseRate, 2), '', pgyExportMetric('pgy.taobao15d.purchaseRate')],
       ], 'xhs-pgy-metrics') + '<div class="xhs-chart-grid">' + buildXhsMonthlyChart(pgy.monthly) +
       buildXhsFollowerChart(pgy.followerTiers) + '</div>' +
-      buildXhsPgyNoteAnalysis(pgyView, staticExport) + '</section>';
+      buildXhsPgyNoteAnalysis(pgyView, staticExport, interactiveExport) + '</section>';
 
     const spotlight = xhsObject(analysis.spotlight);
     const aggregation = aggregateXhsJuguang(spotlight);
@@ -2614,8 +2688,9 @@
       xhsPanelHeading('JUGUANG', '聚光投放分析',
         '任务期按笔记关联的星河任务起止日期逐日判定；周期证据不完整的消耗单列为未知',
         '账户 → 营销诉求 → 投放位置') +
-      buildXhsJuguangControls(spotlightDaily, staticExport, legacySpotlightFactsUnavailable,
-        spotlightModelUnavailable, spotlightPlacementUnavailable) +
+      buildXhsJuguangControls(spotlightDaily, staticExport && !interactiveExport,
+        legacySpotlightFactsUnavailable, spotlightModelUnavailable, spotlightPlacementUnavailable,
+        interactiveExport) +
       buildXhsJuguangTable(spotlight, aggregation) + '</section>';
 
     const star = xhsObject(analysis.star);
@@ -2671,29 +2746,32 @@
     const taskMetricValues = Object.assign({}, taskMetrics, {
       seededProductGmv: xhsOwnOrFallback(taskMetrics, 'seededProductGmv', taskGmv),
     });
+    const starSummaryFilters = interactiveExport ? { projectId: '', taskId: '' } : xhsStarFilters;
     const starPanel = '<section class="xhs-report-panel" data-xhs-panel="star-analysis">' +
       xhsPanelHeading('TAOBAO STAR', '星河分析', '指标保留各层星河原生汇总；花费从唯一归属笔记向上汇总到任务和项目，不均摊', '店铺 → 项目 → 任务') +
       '<section class="xhs-star-summary"><div class="xhs-subsection-heading"><h4>星河全店汇总</h4><span>全店 GMV 口径</span></div>' +
       xhsStarMetricCards(storeMetrics, storeCosts, { storeRoi, taskRoi: storeTaskRoi }) +
       '<div class="xhs-subsection-heading xhs-star-investment-heading"><h5>投入与投放拆分</h5><span>已合并账户总投入及任务期内外广告数据</span></div>' +
       accountKpis + adSpendBreakdownMarkup + '</section>' +
-      '<section class="xhs-star-summary"><div class="xhs-subsection-heading"><h4>星河任务汇总</h4><span>' +
+      '<section class="xhs-star-summary" data-xhs-star-summary-kind="task"><div class="xhs-subsection-heading"><h4>星河任务汇总</h4><span>' +
       formatInteger(taskNoteCount) + ' 篇任务笔记</span></div>' +
       xhsKpiMarkup([
         ['任务笔记数', formatInteger(taskNoteCount)],
-        ['任务GMV', formatMoney(taskGmv)],
-      ], 'xhs-star-task-metrics') + xhsStarMetricCards(taskMetricValues, taskCosts, { taskRoi }) +
-      buildXhsTaskSummary(star, xhsStarFilters, staticExport, xhsStarExpanded.task) + '</section>' +
-      '<section class="xhs-star-projects"><div class="xhs-subsection-heading"><h4>项目汇总</h4><span>默认展示项目级汇总数据</span></div>' +
-      buildXhsProjectSummary(star, xhsStarFilters, staticExport, xhsStarExpanded.project) +
+        ['任务GMV', formatMoney(taskGmv), '', interactiveExport ? 'star.task.metrics.seededProductGmv' : ''],
+      ], 'xhs-star-task-metrics') + xhsStarMetricCards(taskMetricValues, taskCosts, { taskRoi },
+        interactiveExport ? 'star.task' : '') +
+      buildXhsTaskSummary(star, starSummaryFilters, staticExport, xhsStarExpanded.task, interactiveExport) + '</section>' +
+      '<section class="xhs-star-projects" data-xhs-star-summary-kind="project"><div class="xhs-subsection-heading"><h4>项目汇总</h4><span>默认展示项目级汇总数据</span></div>' +
+      buildXhsProjectSummary(star, starSummaryFilters, staticExport, xhsStarExpanded.project, interactiveExport) +
       '</section></section>';
 
     const notePanel = '<section class="xhs-report-panel" data-xhs-panel="note-join">' +
       xhsPanelHeading('NOTE JOIN', '笔记全链路', '展示星河有数据的笔记；蒲公英期外笔记仍保留达人花费，并可按 SPU 筛选',
         xhsArray(analysis.notes).length + ' 篇') + buildXhsNotesTable(analysis, {
         filters: xhsNoteFilters,
-        expanded: staticExport || xhsNoteExpanded,
-        staticView: staticExport,
+        expanded: staticExport ? false : xhsNoteExpanded,
+        staticView: staticExport && !interactiveExport,
+        interactiveExport,
       }) + '</section>';
 
     if (platform === 'adstar') {
@@ -3099,6 +3177,670 @@
     });
   }
 
+  function safeInlineJson(value) {
+    return JSON.stringify(value)
+      .replace(/</g, '\\u003c')
+      .replace(/>/g, '\\u003e')
+      .replace(/&/g, '\\u0026')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
+  }
+
+  function buildXhsInteractiveExportPayload() {
+    const analysis = xhsObject(xhsAnalysis);
+    const pgy = xhsObject(analysis.pgy);
+    const spotlight = xhsObject(analysis.spotlight);
+    return {
+      schema: 'xhsInteractiveExportV1',
+      schemaVersion: 1,
+      pgy: {
+        facts: xhsArray(pgy.facts),
+        dateRange: currentXhsPgyDateRange(analysis, pgy),
+        spuName: xhsPgySpuName,
+        projectName: xhsPgyProjectName,
+        asOf: currentShanghaiDate(),
+        coverage: String(pgy.coverage || ''),
+      },
+      spotlight: {
+        daily: xhsArray(spotlight.daily),
+        byAccount: xhsArray(spotlight.byAccount),
+        mode: xhsJuguangMode,
+        groupBy: normalizedXhsGroupBy(xhsPlacementFactsUnavailable(spotlight.daily)),
+        filters: {
+          accountIds: xhsArray(xhsJuguangFilters.accountIds),
+          marketingObjectives: xhsArray(xhsJuguangFilters.marketingObjectives),
+          placementTypes: xhsArray(xhsJuguangFilters.placementTypes),
+        },
+      },
+      star: { filters: { ...xhsStarFilters } },
+      notes: { filters: { ...xhsNoteFilters }, previewLimit: 20 },
+    };
+  }
+
+  // Serialized into the standalone HTML export. Keep this function completely
+  // self-contained: exported reports have a restrictive CSP and make no network
+  // requests, so every filter operates only on the hydrated snapshot below.
+  function xhsInteractiveExportRuntime() {
+    var snapshotNode = document.querySelector && document.querySelector('#xhs-export-snapshot');
+    if (!snapshotNode || typeof window === 'undefined' || !window.XhsReportModel) return;
+    var snapshot;
+    try {
+      snapshot = JSON.parse(snapshotNode.textContent || '{}');
+    } catch (error) {
+      return;
+    }
+    if (!snapshot || snapshot.schema !== 'xhsInteractiveExportV1') return;
+    var model = window.XhsReportModel;
+    var pgyProjectName = String(snapshot.pgy && snapshot.pgy.projectName || '');
+    var list = function (value) { return Array.isArray(value) ? value : []; };
+    var object = function (value) {
+      return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    };
+    var number = function (value) {
+      if (value === null || value === undefined || value === '') return null;
+      var parsed = Number(String(value).replace(/[,，¥￥\s]/g, '').replace(/%$/, ''));
+      if (!Number.isFinite(parsed)) return null;
+      return /%$/.test(String(value)) ? parsed / 100 : parsed;
+    };
+    var divide = function (top, bottom) {
+      var numerator = number(top);
+      var denominator = number(bottom);
+      return numerator === null || denominator === null || denominator === 0 ? null : numerator / denominator;
+    };
+    var integer = function (value) {
+      var parsed = number(value);
+      return parsed === null ? '—' : Math.round(parsed).toLocaleString('zh-CN');
+    };
+    var money = function (value) {
+      var parsed = number(value);
+      return parsed === null ? '—' : '¥' + parsed.toLocaleString('zh-CN', {
+        minimumFractionDigits: 0, maximumFractionDigits: 2,
+      });
+    };
+    var percent = function (value, digits) {
+      var parsed = number(value);
+      var precision = digits == null ? 1 : Number(digits);
+      return parsed === null ? '—' : (parsed * 100).toLocaleString('zh-CN', {
+        minimumFractionDigits: precision, maximumFractionDigits: precision,
+      }) + '%';
+    };
+    var decimal = function (value, digits) {
+      var parsed = number(value);
+      var precision = digits == null ? 2 : Number(digits);
+      return parsed === null ? '—' : parsed.toLocaleString('zh-CN', {
+        minimumFractionDigits: precision, maximumFractionDigits: precision,
+      });
+    };
+    var escape = function (value) {
+      return String(value == null ? '' : value).replace(/[&<>"']/g, function (character) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character];
+      });
+    };
+    var status = function (kind, copy) {
+      var node = document.querySelector('[data-xhs-export-filter-status="' + kind + '"]');
+      if (node) node.textContent = copy;
+    };
+    var nested = function (source, path) {
+      return String(path || '').split('.').reduce(function (value, key) {
+        return value == null ? null : value[key];
+      }, source);
+    };
+    var setMetric = function (path, value, formatter) {
+      Array.from(document.querySelectorAll('[data-xhs-export-metric="' + path + '"]')).forEach(function (node) {
+        node.textContent = formatter(value);
+      });
+    };
+    var safeNoteUrl = function (fact) {
+      var explicit = String(fact && fact.noteUrl || '').trim();
+      if (/^https:\/\/([a-z0-9-]+\.)*xiaohongshu\.com\//i.test(explicit)) return explicit;
+      var noteId = String(fact && fact.noteId || '').trim();
+      return noteId ? 'https://www.xiaohongshu.com/explore/' + encodeURIComponent(noteId) : '';
+    };
+
+    function renderPgyChart(kind, rows) {
+      var root = document.querySelector('[data-xhs-export-pgy-chart="' + kind + '"]');
+      if (!root) return;
+      var source = list(rows);
+      var maximum = Math.max.apply(Math, [1].concat(source.map(function (row) {
+        return Math.max(0, number(row && row.noteCount) || 0);
+      })));
+      var heading = kind === 'monthly' ? '按月发布笔记' : '达人粉丝量级';
+      var empty = kind === 'monthly' ? '当前日期范围暂无发布笔记。' : '暂无可用的达人粉丝量级数据。';
+      root.innerHTML = '<figcaption>' + heading + '</figcaption>' + (source.length
+        ? source.map(function (row) {
+          var count = Math.max(0, number(row && row.noteCount) || 0);
+          var label = kind === 'monthly' ? row && row.month : row && row.label;
+          var suffix = kind === 'followers'
+            ? ' <small>平均合作费用 ' + escape(money(row && row.averageCooperationCost)) + '</small>' : '';
+          return '<div class="xhs-bar-row" role="listitem"><span class="xhs-bar-label">' +
+            escape(label || '未知') + '</span><div class="xhs-bar-track" aria-hidden="true"><i class="xhs-bar-fill" style="--xhs-bar:' +
+            Math.max(count ? 3 : 0, count / maximum * 100).toFixed(2) + '%"></i></div><strong class="xhs-chart-value">' +
+            escape(integer(count)) + ' 篇' + suffix + '</strong></div>';
+        }).join('') : '<p class="xhs-empty-state">' + empty + '</p>');
+    }
+
+    function renderPgyNoteRows(summary, dateRange) {
+      var body = document.querySelector('[data-xhs-export-pgy-note-body]');
+      var projectSelect = document.querySelector('[data-xhs-pgy-project]');
+      if (!body || !projectSelect) return;
+      var facts = list(summary && summary.facts);
+      var projects = Array.from(new Set(facts.map(function (fact) {
+        return String(fact && fact.crossDomainProjectName || '');
+      }).filter(Boolean))).sort(function (left, right) { return left.localeCompare(right, 'zh-CN'); });
+      var requested = pgyProjectName;
+      projectSelect.replaceChildren();
+      var allOption = document.createElement('option');
+      allOption.value = '';
+      allOption.textContent = '全部跨域项目';
+      projectSelect.appendChild(allOption);
+      projects.forEach(function (name) {
+        var option = document.createElement('option');
+        option.value = name;
+        option.textContent = name;
+        projectSelect.appendChild(option);
+      });
+      projectSelect.value = projects.includes(requested) ? requested : '';
+      pgyProjectName = String(projectSelect.value || '');
+      var selectedProject = String(projectSelect.value || '');
+      var filtered = facts.filter(function (fact) {
+        return !selectedProject || String(fact && fact.crossDomainProjectName || '') === selectedProject;
+      });
+      var total = null;
+      try {
+        total = model.aggregatePgyFacts({
+          facts: filtered, dateRange: dateRange, spuName: '', asOf: summary && summary.asOf,
+        });
+        if (['partial', 'unavailable'].includes(String(snapshot.pgy.coverage || ''))) {
+          total.costs = { cooperation: null, platformFee: null, total: null };
+        }
+      } catch (error) {
+        total = null;
+      }
+      var totalCosts = object(total && total.costs);
+      var totalMetrics = object(total && total.metrics);
+      var totalTaobao = object(total && total.taobao15d);
+      var totalRow = total ? '<tr class="xhs-total-row" data-xhs-pgy-note-total><th colspan="8" scope="row">筛选后汇总</th><td>' +
+        money(totalCosts.cooperation) + '</td><td>' + money(totalCosts.platformFee) + '</td><td>' + money(totalCosts.total) +
+        '</td><td>' + integer(totalMetrics.impressions) + '</td><td>' + integer(totalMetrics.reads) + '</td><td>' +
+        integer(totalMetrics.interactions) + '</td><td>' + integer(totalTaobao.offsiteActiveUv) + '</td><td>' +
+        money(totalTaobao.offsiteActiveCost) + '</td><td>' + integer(totalTaobao.dealUv) + '</td><td>' +
+        integer(totalTaobao.addCartUv) + '</td><td>' + percent(totalTaobao.addCartRate, 2) + '</td><td>' +
+        percent(totalTaobao.purchaseRate, 2) + '</td></tr>' : '';
+      var rows = filtered.length ? filtered.map(function (fact) {
+        var author = object(fact && fact.author);
+        var costs = object(fact && fact.costs);
+        var metrics = object(fact && fact.metrics);
+        var noteUrl = safeNoteUrl(fact);
+        var title = escape(fact && fact.title || '未命名笔记');
+        var titleMarkup = noteUrl ? '<a class="xhs-note-detail-link" href="' + escape(noteUrl) +
+          '" target="_blank" rel="noopener noreferrer">' + title + '</a>' : title;
+        return '<tr data-xhs-pgy-note-id="' + escape(fact && fact.noteId || '') + '"><td>' +
+          escape(fact && fact.publishDate || '—') + '</td><td><strong>' + titleMarkup + '</strong><small>' +
+          escape(fact && fact.noteId || '—') + '</small></td><td>' + escape(fact && fact.crossDomainProjectName || '—') +
+          '</td><td>' + escape(fact && fact.spuName || '—') + '</td><td>' + escape(fact && fact.taobaoTaskId || '—') +
+          '</td><td>' + escape(fact && fact.taskEndDate || '—') + '</td><td>' + escape(author.name || '—') +
+          '</td><td>' + integer(author.followerCount) + '</td><td>' + money(costs.cooperation) + '</td><td>' +
+          money(costs.platformFee) + '</td><td>' + money(costs.total) + '</td><td>' + integer(metrics.impressions) +
+          '</td><td>' + integer(metrics.reads) + '</td><td>' + integer(metrics.interactions) + '</td><td>' +
+          integer(metrics.taobaoOffsiteActiveUv15d) + '</td><td>' + money(metrics.taobaoOffsiteActiveCost15d) +
+          '</td><td>' + integer(metrics.taobaoDealUv15d) + '</td><td>' + integer(metrics.taobaoAddCartUv15d) +
+          '</td><td>' + percent(metrics.taobaoAddCartRate15d, 2) + '</td><td>' +
+          percent(metrics.taobaoPurchaseRate15d, 2) + '</td></tr>';
+      }).join('') : '<tr><td colspan="20">当前筛选条件暂无蒲公英笔记数据。</td></tr>';
+      body.innerHTML = totalRow + rows;
+      var count = document.querySelector('[data-xhs-export-pgy-note-count]');
+      if (count) count.textContent = integer(filtered.length) + ' 篇';
+    }
+
+    function renderPgy() {
+      var source = object(snapshot.pgy);
+      var facts = list(source.facts);
+      var spu = document.querySelector('[data-xhs-pgy-spu]');
+      var from = document.querySelector('[data-xhs-pgy-date="from"]');
+      var to = document.querySelector('[data-xhs-pgy-date="to"]');
+      if (!facts.length || !spu || !from || !to || typeof model.aggregatePgyFacts !== 'function') return;
+      var dateRange = { from: String(from.value || ''), to: String(to.value || '') };
+      var summary;
+      try {
+        summary = model.aggregatePgyFacts({
+          facts: facts, dateRange: dateRange, spuName: String(spu.value || ''), asOf: source.asOf,
+        });
+      } catch (error) {
+        status('pgy', '日期范围无效：' + String(error && error.message || error));
+        return;
+      }
+      if (['partial', 'unavailable'].includes(String(source.coverage || ''))) {
+        summary.costs = { cooperation: null, platformFee: null, total: null };
+      }
+      var formatters = {
+        'pgy.noteCount': integer,
+        'pgy.starTaskNoteCount': integer,
+        'pgy.overdueNoteCount': integer,
+        'pgy.costs.cooperation': money,
+        'pgy.costs.platformFee': money,
+        'pgy.costs.total': money,
+        'pgy.metrics.impressions': integer,
+        'pgy.metrics.reads': integer,
+        'pgy.metrics.interactions': integer,
+        'pgy.metrics.readRate': percent,
+        'pgy.metrics.engagementRate': percent,
+        'pgy.taobao15d.offsiteActiveUv': integer,
+        'pgy.taobao15d.offsiteActiveCost': money,
+        'pgy.taobao15d.dealUv': integer,
+        'pgy.taobao15d.addCartUv': integer,
+        'pgy.taobao15d.addCartRate': function (value) { return percent(value, 2); },
+        'pgy.taobao15d.purchaseRate': function (value) { return percent(value, 2); },
+      };
+      Object.keys(formatters).forEach(function (path) {
+        setMetric(path, nested(summary, path.replace(/^pgy\./, '')), formatters[path]);
+      });
+      renderPgyChart('monthly', summary.monthly);
+      renderPgyChart('followers', summary.followerTiers);
+      renderPgyNoteRows(summary, dateRange);
+      status('pgy', '已显示 ' + integer(summary.noteCount) + ' 篇笔记。');
+    }
+
+    var pgySpu = document.querySelector('[data-xhs-pgy-spu]');
+    var pgyFrom = document.querySelector('[data-xhs-pgy-date="from"]');
+    var pgyTo = document.querySelector('[data-xhs-pgy-date="to"]');
+    var pgyProject = document.querySelector('[data-xhs-pgy-project]');
+    [pgySpu, pgyFrom, pgyTo].forEach(function (control) {
+      if (!control || control.disabled) return;
+      control.addEventListener('change', function () {
+        if (control === pgySpu && pgyProject) {
+          pgyProjectName = '';
+          pgyProject.value = '';
+        }
+        renderPgy();
+      });
+    });
+    if (pgyProject && !pgyProject.disabled) pgyProject.addEventListener('change', function () {
+      pgyProjectName = String(pgyProject.value || '');
+      renderPgy();
+    });
+
+    var spotlight = object(snapshot.spotlight);
+    var modeControl = document.querySelector('[data-xhs-juguang-mode]');
+    var groupingControls = Array.from(document.querySelectorAll('[data-xhs-juguang-group-by]'));
+    var multiGroupBy = list(spotlight.groupBy).slice(0, 3);
+    var filterKeys = {
+      account: 'accountIds', marketingObjective: 'marketingObjectives', placementType: 'placementTypes',
+    };
+    function juguangMetricCells(summary, platformRoi) {
+      var values = object(summary);
+      var spend = object(values.spend);
+      var external = object(values.seedingExternal15);
+      var conversion = object(values.conversion15);
+      return '<td>' + money(spend.total) + '</td><td>' + money(spend.inTask) + '</td><td>' +
+        money(spend.outsideTask) + '</td><td>' + money(spend.unknown) + '</td><td>' + integer(values.impressions) +
+        '</td><td>' + integer(values.clicks) + '</td><td>' + integer(values.interactions) + '</td><td>' +
+        integer(values.seedUsers) + '</td><td>' + integer(values.deepSeedUsers) + '</td><td>' +
+        integer(external.activeUv) + '</td><td>' + money(external.calculatedCost) + '</td><td>' +
+        integer(conversion.storeVisits) + '</td><td>' + integer(conversion.orders) + '</td><td>' +
+        money(conversion.gmv) + '</td><td>' + decimal(conversion.calculatedRoi15, 2) + '</td><td>' +
+        decimal(platformRoi == null ? conversion.platformRoi15 : platformRoi, 2) + '</td>';
+    }
+    function renderJuguang() {
+      var body = document.querySelector('[data-xhs-export-juguang-body]');
+      if (!body || !modeControl || modeControl.disabled || typeof model.aggregateSpotlight !== 'function') return;
+      var checked = groupingControls.filter(function (control) { return control.checked && !control.disabled; })
+        .map(function (control) { return control.value; });
+      if (!checked.length) {
+        var fallback = groupingControls.find(function (control) { return !control.disabled; });
+        if (fallback) { fallback.checked = true; checked = [fallback.value]; }
+      }
+      var groupBy = modeControl.value === 'single' ? checked.slice(0, 1) : checked.slice(0, 3);
+      var filters = { accountIds: [], marketingObjectives: [], placementTypes: [] };
+      Array.from(document.querySelectorAll('[data-xhs-juguang-filter]')).forEach(function (control) {
+        var key = filterKeys[control.getAttribute('data-xhs-juguang-filter')];
+        if (key && control.value) filters[key] = [control.value];
+      });
+      var aggregation;
+      try {
+        aggregation = model.aggregateSpotlight({ rows: list(spotlight.daily), groupBy: groupBy, filters: filters });
+      } catch (error) {
+        status('juguang', '分组条件无效：' + String(error && error.message || error));
+        return;
+      }
+      var dimensionLabels = { account: '广告账户', marketingObjective: '营销诉求', placementType: '投放位置' };
+      var rows = [];
+      var fullAccountScope = groupBy[0] === 'account' && !filters.marketingObjectives.length &&
+        !filters.placementTypes.length;
+      var visit = function (nodes) {
+        list(nodes).forEach(function (node) {
+          var level = Math.max(1, number(node && node.level) || 1);
+          var platformRoi = null;
+          if (fullAccountScope && level === 1 && node && node.dimension === 'account') {
+            var account = list(spotlight.byAccount).find(function (row) {
+              return String(row && row.key) === String(node && node.key);
+            });
+            platformRoi = account && account.platformRoi15;
+          }
+          rows.push('<tr data-xhs-juguang-level="' + level + '"><th scope="row"><span class="xhs-tree-label" style="--xhs-level:' +
+            level + '"><small>' + escape(dimensionLabels[node && node.dimension] || '分组') + '</small>' +
+            escape(node && (node.label || node.key) || '未知') + '</span></th>' +
+            juguangMetricCells(node && node.summary, platformRoi) + '</tr>');
+          visit(node && node.children);
+        });
+      };
+      visit(aggregation.groups);
+      body.innerHTML = '<tr class="xhs-total-row"><th scope="row">筛选后总计</th>' +
+        juguangMetricCells(aggregation.summary, null) + '</tr>' + (rows.join('') ||
+        '<tr><td colspan="17">当前筛选条件暂无聚光投放数据。</td></tr>');
+      status('juguang', '已按 ' + groupBy.map(function (key) { return dimensionLabels[key] || key; }).join(' → ') +
+        ' 展示。');
+    }
+    if (modeControl && !modeControl.disabled) modeControl.addEventListener('change', function () {
+      if (modeControl.value === 'single') {
+        multiGroupBy = groupingControls.filter(function (control) { return control.checked; })
+          .map(function (control) { return control.value; });
+        var first = multiGroupBy[0] || 'account';
+        groupingControls.forEach(function (control) { control.checked = control.value === first; });
+      } else {
+        groupingControls.forEach(function (control) { control.checked = multiGroupBy.includes(control.value); });
+      }
+      renderJuguang();
+    });
+    Array.from(document.querySelectorAll('[data-xhs-juguang-filter]')).forEach(function (control) {
+      if (!control.disabled) control.addEventListener('change', renderJuguang);
+    });
+    groupingControls.forEach(function (control) {
+      if (control.disabled) return;
+      control.addEventListener('change', function () {
+        var checked = groupingControls.filter(function (item) { return item.checked && !item.disabled; });
+        if (!checked.length) control.checked = true;
+        if (modeControl && modeControl.value === 'single') {
+          groupingControls.forEach(function (item) { item.checked = item === control; });
+        } else {
+          multiGroupBy = groupingControls.filter(function (item) { return item.checked && !item.disabled; })
+            .slice(0, 3).map(function (item) { return item.value; });
+          groupingControls.forEach(function (item) {
+            if (!multiGroupBy.includes(item.value)) item.checked = false;
+          });
+        }
+        renderJuguang();
+      });
+    });
+
+    var starState = Object.assign({ projectId: '', taskId: '' }, object(snapshot.star && snapshot.star.filters));
+    var starControls = Array.from(document.querySelectorAll('[data-xhs-star-filter]'));
+    var starValue = function (row) {
+      try { return JSON.parse(row.getAttribute('data-xhs-star-values') || '{}'); } catch (error) { return {}; }
+    };
+    var starSum = function (rows, path, available) {
+      if (!rows.length) return null;
+      var total = 0;
+      var observed = false;
+      for (var index = 0; index < rows.length; index += 1) {
+        var value = number(nested(starValue(rows[index]), path));
+        if (value === null) {
+          if (!available) return null;
+          continue;
+        }
+        observed = true;
+        total += value;
+      }
+      return observed ? total : null;
+    };
+    var starAggregate = function (rows, available) {
+      var costs = {
+        total: starSum(rows, 'costs.total', available),
+        creator: starSum(rows, 'costs.creator', available),
+        adInTask: starSum(rows, 'costs.adInTask', available),
+      };
+      var metrics = {};
+      ['readUv', 'searchImpressionUv', 'storeVisitUv', 'cartUv', 'orderUv', 'gmv', 'seededProductGmv']
+        .forEach(function (key) { metrics[key] = starSum(rows, 'metrics.' + key, available); });
+      var derived = {
+        visitRate: divide(metrics.storeVisitUv, metrics.readUv),
+        visitCost: divide(costs.total, metrics.storeVisitUv),
+        addCartRate: divide(metrics.cartUv, metrics.storeVisitUv),
+        conversionRate: divide(metrics.orderUv, metrics.storeVisitUv),
+        seededProductShare: divide(metrics.seededProductGmv, metrics.gmv),
+        storeRoi: divide(metrics.gmv, costs.total),
+        taskRoi: divide(metrics.seededProductGmv, costs.total),
+        trafficRoi: divide(metrics.gmv, costs.adInTask),
+      };
+      return { costs: costs, metrics: metrics, derived: derived };
+    };
+    var starCells = function (aggregate) {
+      return [
+        money(aggregate.costs.total), money(aggregate.costs.creator), money(aggregate.costs.adInTask),
+        integer(aggregate.metrics.readUv), integer(aggregate.metrics.searchImpressionUv),
+        integer(aggregate.metrics.storeVisitUv), percent(aggregate.derived.visitRate, 2),
+        money(aggregate.derived.visitCost), percent(aggregate.derived.addCartRate, 2),
+        percent(aggregate.derived.conversionRate, 2), integer(aggregate.metrics.orderUv),
+        money(aggregate.metrics.gmv), money(aggregate.metrics.seededProductGmv),
+        percent(aggregate.derived.seededProductShare, 2), decimal(aggregate.derived.storeRoi, 2),
+        decimal(aggregate.derived.taskRoi, 2), decimal(aggregate.derived.trafficRoi, 2),
+      ];
+    };
+    var setStarMetrics = function (kind, aggregate) {
+      var prefix = 'star.' + kind;
+      var formatters = {
+        'costs.total': money, 'costs.creator': money, 'costs.adInTask': money,
+        'metrics.readUv': integer, 'metrics.searchImpressionUv': integer, 'metrics.storeVisitUv': integer,
+        'metrics.orderUv': integer, 'metrics.gmv': money, 'metrics.seededProductGmv': money,
+        'derived.visitRate': function (value) { return percent(value, 2); },
+        'derived.visitCost': money,
+        'derived.addCartRate': function (value) { return percent(value, 2); },
+        'derived.conversionRate': function (value) { return percent(value, 2); },
+        'derived.seededProductShare': function (value) { return percent(value, 2); },
+        'derived.storeRoi': decimal, 'derived.taskRoi': decimal, 'derived.trafficRoi': decimal,
+      };
+      Object.keys(formatters).forEach(function (path) {
+        setMetric(prefix + '.' + path, nested(aggregate, path), formatters[path]);
+      });
+    };
+    var syncStarControls = function () {
+      starControls.forEach(function (control) {
+        var kind = control.getAttribute('data-xhs-star-filter');
+        control.value = kind === 'project' ? starState.projectId : starState.taskId;
+        if (kind !== 'task') return;
+        Array.from(control.options).forEach(function (option) {
+          var projectId = String(option.getAttribute('data-xhs-star-project-id') || '');
+          var available = !option.value || !starState.projectId || !projectId || projectId === starState.projectId;
+          option.hidden = !available;
+          option.disabled = !available;
+        });
+        if (control.selectedOptions[0] && control.selectedOptions[0].disabled) {
+          starState.taskId = '';
+          control.value = '';
+        }
+      });
+    };
+    function applyStarFilters() {
+      if (!starControls.length) return;
+      syncStarControls();
+      var taskProjectId = '';
+      if (starState.taskId) {
+        var taskOption = starControls.flatMap(function (control) {
+          return control.getAttribute('data-xhs-star-filter') === 'task' ? Array.from(control.options) : [];
+        }).find(function (option) { return String(option.value) === String(starState.taskId); });
+        taskProjectId = String(taskOption && taskOption.getAttribute('data-xhs-star-project-id') || '');
+      }
+      ['task', 'project'].forEach(function (kind) {
+        var root = document.querySelector('[data-xhs-star-summary-kind="' + kind + '"]');
+        if (!root) return;
+        var selector = kind === 'task' ? '[data-xhs-star-task][data-xhs-star-values]'
+          : '[data-xhs-star-project][data-xhs-star-values]';
+        var rows = Array.from(root.querySelectorAll(selector));
+        var matches = rows.filter(function (row) {
+          var projectId = String(row.getAttribute('data-xhs-star-project-id') || '');
+          var identity = String(row.getAttribute(kind === 'task' ? 'data-xhs-star-task' : 'data-xhs-star-project') || '');
+          return (!starState.projectId || projectId === starState.projectId) &&
+            (!starState.taskId || (kind === 'task' ? identity === starState.taskId : projectId === taskProjectId));
+        });
+        var matchSet = new Set(matches);
+        rows.forEach(function (row) { row.hidden = !matchSet.has(row); });
+        var totalRow = root.querySelector('[data-xhs-star-total]');
+        var emptyRow = root.querySelector('[data-xhs-star-empty]');
+        var aggregate = starAggregate(matches, kind === 'project');
+        if (totalRow) {
+          totalRow.hidden = matches.length === 0;
+          Array.from(totalRow.querySelectorAll('td')).forEach(function (cell, index) {
+            cell.textContent = starCells(aggregate)[index] || '—';
+          });
+        }
+        if (emptyRow) emptyRow.hidden = matches.length !== 0;
+        setStarMetrics(kind, aggregate);
+        if (kind === 'project') {
+          setMetric('star.project.count', matches.length, integer);
+          setMetric('star.project.taskCount', matches.reduce(function (total, row) {
+            return total + (number(row.getAttribute('data-xhs-star-task-count')) || 0);
+          }, 0), integer);
+        }
+        var toggle = root.querySelector('[data-xhs-star-toggle="' + kind + '"]');
+        var count = toggle && toggle.querySelector('span');
+        if (count) count.textContent = integer(matches.length) + (kind === 'project' ? ' 个项目' : ' 个任务');
+        status('star-' + kind, '已筛选 ' + integer(matches.length) + (kind === 'project' ? ' 个项目。' : ' 个任务。'));
+      });
+    }
+    starControls.forEach(function (control) {
+      if (control.disabled) return;
+      control.addEventListener('change', function () {
+        var kind = control.getAttribute('data-xhs-star-filter');
+        if (kind === 'project') {
+          starState.projectId = String(control.value || '');
+          starState.taskId = '';
+        } else if (kind === 'task') {
+          starState.taskId = String(control.value || '');
+        }
+        applyStarFilters();
+      });
+    });
+
+    var noteRows = Array.from(document.querySelectorAll('[data-xhs-export-note-row]'));
+    var noteControls = Array.from(document.querySelectorAll('[data-xhs-note-filter],[data-xhs-note-date]'));
+    var noteToggle = document.querySelector('[data-xhs-note-toggle]');
+    var noteSummary = document.querySelector('.xhs-note-browser-summary');
+    var noteTotalRow = document.querySelector('[data-xhs-note-total]');
+    var noteEmptyRow = document.querySelector('[data-xhs-export-note-empty]');
+    var notesExpanded = false;
+    var noteValues = function (row) {
+      try { return JSON.parse(row.getAttribute('data-xhs-note-values') || '{}'); } catch (error) { return {}; }
+    };
+    var sumKnown = function (rows, key) {
+      if (!rows.length) return null;
+      var total = 0;
+      for (var index = 0; index < rows.length; index += 1) {
+        var value = number(noteValues(rows[index])[key]);
+        if (value === null) return null;
+        total += value;
+      }
+      return total;
+    };
+    var updateNoteTotal = function (rows) {
+      if (!noteTotalRow) return;
+      var totals = {};
+      ['creator', 'allJuguang', 'total', 'periodTotal', 'inTaskJuguang', 'outsideTaskJuguang',
+        'pgyImpressions', 'pgyReads', 'pgyInteractions', 'starReadUv', 'storeVisitUv', 'cartUv',
+        'orderUv', 'storeGmv', 'seededProductGmv'].forEach(function (key) {
+        totals[key] = sumKnown(rows, key);
+      });
+      var derived = {
+        visitCost: divide(totals.periodTotal, totals.storeVisitUv),
+        visitRate: divide(totals.storeVisitUv, totals.starReadUv),
+        addCartRate: divide(totals.cartUv, totals.storeVisitUv),
+        conversionRate: divide(totals.orderUv, totals.storeVisitUv),
+        seededProductShare: divide(totals.seededProductGmv, totals.storeGmv),
+        storeRoi: divide(totals.storeGmv, totals.periodTotal),
+        taskRoi: divide(totals.seededProductGmv, totals.periodTotal),
+        trafficRoi: divide(totals.storeGmv, totals.inTaskJuguang),
+      };
+      var display = {
+        creator: money, allJuguang: money, total: money, periodTotal: money,
+        outsideTaskJuguang: money, visitCost: money,
+        pgyImpressions: integer, pgyReads: integer, pgyInteractions: integer,
+        starReadUv: integer, storeVisitUv: integer,
+        visitRate: function (value) { return percent(value, 2); },
+        addCartRate: function (value) { return percent(value, 2); },
+        conversionRate: function (value) { return percent(value, 2); },
+        orderUv: integer, storeGmv: money, seededProductGmv: money,
+        seededProductShare: function (value) { return percent(value, 2); },
+        storeRoi: decimal, taskRoi: decimal, trafficRoi: decimal,
+      };
+      Object.keys(display).forEach(function (key) {
+        var cell = noteTotalRow.querySelector('[data-xhs-note-total-value="' + key + '"]');
+        if (cell) cell.textContent = display[key](Object.prototype.hasOwnProperty.call(derived, key) ? derived[key] : totals[key]);
+      });
+    };
+    var updateTaskOptions = function () {
+      var project = document.querySelector('[data-xhs-note-filter="project"]');
+      var task = document.querySelector('[data-xhs-note-filter="task"]');
+      if (!project || !task) return;
+      var selectedProject = String(project.value || '');
+      Array.from(task.options).forEach(function (option) {
+        var projectId = String(option.getAttribute('data-xhs-note-project-id') || '');
+        var available = !option.value || !selectedProject || !projectId || projectId === selectedProject;
+        option.hidden = !available;
+        option.disabled = !available;
+      });
+      if (task.selectedOptions[0] && task.selectedOptions[0].disabled) task.value = '';
+    };
+    function applyNoteFilters() {
+      if (!noteRows.length) return;
+      var project = document.querySelector('[data-xhs-note-filter="project"]');
+      var task = document.querySelector('[data-xhs-note-filter="task"]');
+      var spu = document.querySelector('[data-xhs-note-filter="spu"]');
+      var from = document.querySelector('[data-xhs-note-date="from"]');
+      var to = document.querySelector('[data-xhs-note-date="to"]');
+      var matches = noteRows.filter(function (row) {
+        var projects = String(row.getAttribute('data-xhs-note-project') || '').split(',').filter(Boolean);
+        var tasks = String(row.getAttribute('data-xhs-note-task') || '').split(',').filter(Boolean);
+        var publishDate = String(row.getAttribute('data-xhs-note-publish-date') || '');
+        return (!project || !project.value || projects.includes(String(project.value))) &&
+          (!task || !task.value || tasks.includes(String(task.value))) &&
+          (!spu || !spu.value || String(row.getAttribute('data-xhs-note-spu') || '') === String(spu.value)) &&
+          (!from || !from.value || publishDate && publishDate >= String(from.value)) &&
+          (!to || !to.value || publishDate && publishDate <= String(to.value));
+      });
+      var previewLimit = Number(snapshot.notes && snapshot.notes.previewLimit) || 20;
+      var visibleLimit = notesExpanded ? matches.length : Math.min(previewLimit, matches.length);
+      var visibleSet = new Set(matches.slice(0, visibleLimit));
+      noteRows.forEach(function (row) { row.hidden = !visibleSet.has(row); });
+      if (noteTotalRow) noteTotalRow.hidden = matches.length === 0;
+      if (noteEmptyRow) noteEmptyRow.hidden = matches.length !== 0;
+      if (noteToggle) {
+        noteToggle.hidden = matches.length <= previewLimit;
+        noteToggle.textContent = notesExpanded ? '收起' : '查看更多';
+        noteToggle.setAttribute('aria-expanded', String(notesExpanded));
+      }
+      if (noteSummary) {
+        if (noteSummary.firstChild && noteSummary.firstChild.nodeType === 3) {
+          noteSummary.firstChild.nodeValue = '显示 ' + visibleLimit + ' / ' + matches.length;
+        }
+        noteSummary.setAttribute('data-xhs-note-visible-count', String(visibleLimit));
+        noteSummary.setAttribute('data-xhs-note-total-count', String(matches.length));
+      }
+      updateNoteTotal(matches);
+      status('notes', '已筛选 ' + integer(matches.length) + ' 篇笔记。');
+    }
+    noteControls.forEach(function (control) {
+      if (control.disabled) return;
+      control.addEventListener('change', function () {
+        if (control.getAttribute('data-xhs-note-filter') === 'project') {
+          var task = document.querySelector('[data-xhs-note-filter="task"]');
+          if (task) task.value = '';
+          updateTaskOptions();
+        }
+        notesExpanded = false;
+        applyNoteFilters();
+      });
+    });
+    Array.from(document.querySelectorAll("[data-xhs-note-toggle]")).forEach(function (button) {
+      button.addEventListener('click', function () {
+        notesExpanded = button.getAttribute('aria-expanded') !== 'true';
+        applyNoteFilters();
+      });
+    });
+    updateTaskOptions();
+    renderPgy();
+    renderJuguang();
+    applyStarFilters();
+    applyNoteFilters();
+  }
+
   function buildExportReportDocument(metadata) {
     const meta = metadata && typeof metadata === 'object' ? metadata : {};
     const normalizeEmbeddedBody = (markup, options) => {
@@ -3179,27 +3921,24 @@
         subtitle: '店铺 → 项目 → 任务汇总 · 笔记独立筛选',
         hasData: sectionHasData('adstar'),
         content: sectionHasData('adstar')
-          ? applyExportTableLimits(buildXhsMarkup({ staticExport: true, platform: 'adstar' }), {
-            tableIdPrefix: 'adstar',
-          }) : missingSection('adstar'),
+          ? buildXhsMarkup({ staticExport: true, interactiveExport: true, platform: 'adstar' })
+          : missingSection('adstar'),
       },
       {
         key: 'pgy', index: 7, label: '蒲公英', title: '蒲公英分析报告',
         subtitle: '报备笔记、合作金额、平台服务费与内容表现',
         hasData: sectionHasData('pgy'),
         content: sectionHasData('pgy')
-          ? applyExportTableLimits(buildXhsMarkup({ staticExport: true, platform: 'pgy' }), {
-            tableIdPrefix: 'pgy',
-          }) : missingSection('pgy'),
+          ? buildXhsMarkup({ staticExport: true, interactiveExport: true, platform: 'pgy' })
+          : missingSection('pgy'),
       },
       {
         key: 'juguang', index: 8, label: '聚光', title: '聚光分析报告',
         subtitle: '账户 → 营销诉求 → 投放位置 · 星河任务期对齐',
         hasData: sectionHasData('juguang'),
         content: sectionHasData('juguang')
-          ? applyExportTableLimits(buildXhsMarkup({ staticExport: true, platform: 'juguang' }), {
-            tableIdPrefix: 'juguang',
-          }) : missingSection('juguang'),
+          ? buildXhsMarkup({ staticExport: true, interactiveExport: true, platform: 'juguang' })
+          : missingSection('juguang'),
       },
     ];
     const firstAvailable = sections.find((section) => section.hasData);
@@ -3308,9 +4047,29 @@
       'setTableExpanded(button.getAttribute("aria-expanded")!=="true");',
       '});',
       '});',
+      'function disclosureTarget(button){var id=button.getAttribute("aria-controls")||"";return id?document.getElementById(id):null;}',
+      'function setDisclosure(button,expanded){var target=disclosureTarget(button);if(!target)return;target.hidden=!expanded;button.setAttribute("aria-expanded",String(expanded));}',
+      'Array.from(document.querySelectorAll("[data-xhs-pgy-note-toggle]")).forEach(function(button){',
+      'var target=disclosureTarget(button);if(!target)return;setDisclosure(button,button.getAttribute("aria-expanded")==="true");',
+      'button.addEventListener("click",function(){setDisclosure(button,button.getAttribute("aria-expanded")!=="true");});',
+      '});',
+      'function setStarDisclosure(button,expanded){setDisclosure(button,expanded);if(button.firstChild&&button.firstChild.nodeType===3){button.firstChild.nodeValue=expanded?"收起报表":"查看更多";}}',
+      'Array.from(document.querySelectorAll("[data-xhs-star-toggle]")).forEach(function(button){',
+      'var target=disclosureTarget(button);if(!target)return;setStarDisclosure(button,button.getAttribute("aria-expanded")==="true");',
+      'button.addEventListener("click",function(){setStarDisclosure(button,button.getAttribute("aria-expanded")!=="true");});',
+      '});',
+      '(' + xhsInteractiveExportRuntime.toString() + ')();',
       '})();'
     ].join('');
     const script = '<script nonce="' + exportScriptNonce + '">' + exportScriptBody + '<\/script>';
+    const xhsExportPayload = buildXhsInteractiveExportPayload();
+    const xhsPayloadScript = '<script id="xhs-export-snapshot" type="application/json" nonce="' +
+      exportScriptNonce + '">' + safeInlineJson(xhsExportPayload) + '<\/script>';
+    const xhsModelSource = String(window.XhsReportModel && window.XhsReportModel.standaloneSource || '')
+      .replace(/<\/script/gi, '<\\/script');
+    const xhsModelScript = xhsModelSource
+      ? '<script nonce="' + exportScriptNonce + '">window.XhsReportModel=' + xhsModelSource + ';<\/script>'
+      : '';
     const storeName = String(meta.storeName || archiveRun && archiveRun.account && archiveRun.account.storeName || '');
     const accountName = String(meta.accountName || archiveRun && archiveRun.account && (
       archiveRun.account.name || archiveRun.account.usernameMasked
@@ -3328,7 +4087,8 @@
       '</h1><p>交互式单页报告 · 点击模块查看对应内容</p></div><time>' +
       escapeHtml(contextCopy || '生成于 ' + generatedAt) + '</time></header>' +
       '<main class="export-shell"><nav class="export-index" role="tablist" aria-label="报告模块">' + tabs +
-      '</nav><div class="export-stage">' + panels + '</div></main>' + script + '</body></html>';
+      '</nav><div class="export-stage">' + panels + '</div></main>' + xhsPayloadScript + xhsModelScript + script +
+      '</body></html>';
     const datePart = new Date(finishedAt).toISOString().slice(0, 10);
     return {
       html,

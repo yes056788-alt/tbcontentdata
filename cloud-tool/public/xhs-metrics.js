@@ -567,7 +567,7 @@
   function analysisDetailKeys(snapshot) {
     const manifest = isObject(snapshot && snapshot.detailArchive) ? snapshot.detailArchive : {};
     if (manifest.schema !== XHS_DETAIL_MANIFEST_SCHEMA || !Array.isArray(manifest.chunks)) return [];
-    return manifest.chunks.slice(0, 4096).map((chunk) => String(chunk && chunk.key || ''))
+    return manifest.chunks.map((chunk) => String(chunk && chunk.key || ''))
       .filter((key, index, values) => isXhsAnalysisDetailKey(key) && values.indexOf(key) === index);
   }
 
@@ -584,7 +584,7 @@
     const missingKeys = [];
     const invalidKeys = [];
     let loadedRows = 0;
-    const descriptors = manifest.chunks.slice(0, 4096).sort((left, right) => (
+    const descriptors = manifest.chunks.slice().sort((left, right) => (
       Number(left && left.index) - Number(right && right.index)
     ));
     for (const descriptor of descriptors) {

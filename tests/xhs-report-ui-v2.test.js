@@ -82,6 +82,7 @@ function createReportHarness(options) {
 })();`;
   const aggregateCalls = [];
   const reportModel = {
+    standaloneSource: realXhsReportModel.standaloneSource,
     aggregateSpotlight(input) {
       aggregateCalls.push(structuredClone(input));
       return {
@@ -967,7 +968,7 @@ test('PGY legacy spend keeps full creator cost while period cost follows the exp
     'creator spend remains observable even when period inclusion is unknown');
 });
 
-test('standalone HTML export marks Juguang as a static view and disables every fake control', () => {
+test('standalone HTML export keeps Juguang controls interactive with the complete offline payload', () => {
   const harness = createReportHarness();
   harness.api.setState({ status: collectionStatus(), analysis: uiSnapshot() });
 
@@ -979,17 +980,125 @@ test('standalone HTML export marks Juguang as a static view and disables every f
     finishedAt: Date.parse('2030-04-01T00:00:00.000Z'),
   }).html;
   const xhsPanel = exported.slice(exported.indexOf('data-xhs-panel="juguang-analysis"'));
-  assert.match(xhsPanel, /导出静态视图（筛选请在在线报告操作）/);
+  assert.doesNotMatch(xhsPanel, /导出静态视图/);
   const controls = [...xhsPanel.matchAll(
     /<(?:select|input)\b[^>]*data-xhs-juguang-(?:mode|filter|group-by)=[^>]*>/g,
   )].map((match) => match[0]);
   assert.ok(controls.length >= 7, 'expected mode, three filters and three grouping controls');
-  controls.forEach((control) => assert.match(control, /\sdisabled(?:\s|>)/,
-    `exported control must be disabled: ${control}`));
+  controls.forEach((control) => assert.doesNotMatch(control, /\sdisabled(?:\s|>)/,
+    `exported control must remain interactive: ${control}`));
+  assert.match(exported, /id="xhs-export-snapshot"/);
+  assert.match(exported, /"schema":"xhsInteractiveExportV1"/);
+  assert.match(exported, /window\.XhsReportModel=/);
+  assert.match(exported, /data-xhs-export-juguang-body/);
+  assert.match(exported, /function renderJuguang\(/);
+  assert.match(exported, /role="status"[^>]*data-xhs-export-filter-status="juguang"/);
   assert.match(exported, /\.xhs-unit-costs\s*\{/,
     'standalone export must style rolled-up Star costs');
   assert.match(exported, /\.xhs-note-node\s*\{/,
     'standalone export must preserve the project > order > note hierarchy styling');
+});
+
+test('standalone HTML export keeps the XHS web disclosures folded and clickable', () => {
+  const harness = createReportHarness();
+  const snapshot = uiSnapshot();
+  snapshot.pgy.facts = [{
+    noteId: 'fictional-export-pgy-note',
+    title: '虚构导出蒲公英笔记',
+    publishDate: '2030-01-05',
+    crossDomainProjectName: '虚构跨域项目',
+    spuName: '虚构 SPU',
+    costs: { cooperation: 100, platformFee: 10, total: 110 },
+    metrics: {},
+  }];
+  const seedNote = snapshot.notes[0] || {};
+  snapshot.notes = Array.from({ length: 22 }, (_, index) => ({
+    ...seedNote,
+    noteId: `fictional-export-note-${index + 1}`,
+    title: `虚构导出笔记 ${index + 1}`,
+    noteUrl: `https://www.xiaohongshu.com/explore/fictional-export-note-${index + 1}`,
+  }));
+  harness.api.setState({ status: collectionStatus(), analysis: snapshot });
+
+  const exported = harness.api.buildExportReportDocument({
+    finishedAt: Date.parse('2030-04-01T00:00:00.000Z'),
+  }).html;
+
+  const pgyToggle = exported.match(/<button[^>]*data-xhs-pgy-note-toggle[^>]*>/);
+  assert.ok(pgyToggle, '导出报告应保留蒲公英笔记分析按钮');
+  assert.match(pgyToggle[0], /aria-expanded="false"/);
+  assert.match(pgyToggle[0], /aria-controls="xhsPgyNoteAnalysis"/);
+  assert.doesNotMatch(pgyToggle[0], /\sdisabled(?:\s|>)/);
+  assert.match(exported, /id="xhsPgyNoteAnalysis" hidden/);
+  for (const [kind, target] of [['task', 'xhsStarTaskReport'], ['project', 'xhsStarProjectReport']]) {
+    const starToggle = exported.match(new RegExp(`<button[^>]*data-xhs-star-toggle="${kind}"[^>]*>`));
+    assert.ok(starToggle, `导出报告应保留星河 ${kind} 披露按钮`);
+    assert.match(starToggle[0], /aria-expanded="false"/);
+    assert.match(starToggle[0], new RegExp(`aria-controls="${target}"`));
+    assert.doesNotMatch(starToggle[0], /\sdisabled(?:\s|>)/);
+    assert.match(exported, new RegExp(`id="${target}" hidden`));
+  }
+  const noteToggle = exported.match(/<button[^>]*data-xhs-note-toggle[^>]*>/);
+  assert.ok(noteToggle, '导出报告应保留笔记 Top20 查看更多按钮');
+  assert.match(noteToggle[0], /aria-expanded="false"/);
+  assert.match(noteToggle[0], /aria-controls="xhsNoteFullPathTable"/);
+  assert.doesNotMatch(noteToggle[0], /\sdisabled(?:\s|>)/);
+  assert.equal((exported.match(/<tr[^>]*data-xhs-export-note-overflow/g) || []).length, 2,
+    'Top20 之外的笔记应保留在导出文档并默认折叠');
+  assert.match(exported,
+    /href="https:\/\/www\.xiaohongshu\.com\/explore\/fictional-export-note-1" target="_blank" rel="noopener noreferrer"/);
+  assert.match(exported, /querySelectorAll\("\[data-xhs-pgy-note-toggle\]"\)/);
+  assert.match(exported, /querySelectorAll\("\[data-xhs-star-toggle\]"\)/);
+  assert.match(exported, /querySelectorAll\("\[data-xhs-note-toggle\]"\)/);
+});
+
+test('standalone HTML export enables PGY dates and Star full-path filters over every hydrated row', () => {
+  const harness = createReportHarness({ reportModel: realXhsReportModel });
+  const snapshot = uiSnapshot();
+  snapshot.pgy.defaultDateRange = { from: '2030-01-01', to: '2030-01-31' };
+  snapshot.pgy.facts = [
+    {
+      noteId: 'fictional-export-pgy-january', title: '虚构一月笔记', publishDate: '2030-01-05',
+      spuName: '虚构 SPU A', crossDomainProjectName: '虚构跨域项目 A',
+      costs: { cooperation: 100, platformFee: 10, total: 110 }, metrics: {},
+    },
+    {
+      noteId: 'fictional-export-pgy-february', title: '虚构二月笔记', publishDate: '2030-02-05',
+      spuName: '虚构 SPU B', crossDomainProjectName: '虚构跨域项目 B',
+      costs: { cooperation: 200, platformFee: 20, total: 220 }, metrics: {},
+    },
+  ];
+  snapshot.spotlight.daily = Array.from({ length: 27 }, (_, index) => ({
+    date: `2030-01-${String(index + 1).padStart(2, '0')}`,
+    accountId: 'fictional-account-a', accountName: '虚构聚光账户 A',
+    marketingObjective: index % 2 ? 'direct' : 'product_seeding',
+    placementType: index % 2 ? 'fixture-search' : 'fixture-feed', spend: index + 1,
+  }));
+  const seedNote = snapshot.notes[0] || {};
+  snapshot.notes = Array.from({ length: 45 }, (_, index) => ({
+    ...seedNote,
+    noteId: `fictional-complete-export-note-${index + 1}`,
+    title: `虚构完整快照笔记 ${index + 1}`,
+    publishDate: index < 20 ? '2030-01-05' : '2030-02-05',
+  }));
+  harness.api.setState({ status: collectionStatus(), analysis: snapshot });
+
+  const exported = harness.api.buildExportReportDocument({
+    finishedAt: Date.parse('2030-04-01T00:00:00.000Z'),
+  }).html;
+  const payloadMatch = exported.match(/<script[^>]*id="xhs-export-snapshot"[^>]*>([\s\S]*?)<\/script>/);
+  assert.ok(payloadMatch, '导出报告必须携带完整离线筛选快照');
+  const payload = JSON.parse(payloadMatch[1]);
+  assert.equal(payload.pgy.facts.length, 2,
+    '默认一月视图不能删除二月蒲公英事实');
+  assert.equal(payload.spotlight.daily.length, 27);
+  assert.equal((exported.match(/<tr[^>]*data-xhs-export-note-row/g) || []).length, 45,
+    '星河 Top20 只控制初始可见行，不能截断导出快照');
+  for (const control of exported.match(/<(?:select|input)[^>]*(?:data-xhs-pgy-(?:spu|date)|data-xhs-note-(?:filter|date))[^>]*>/g) || []) {
+    assert.doesNotMatch(control, /\sdisabled(?:\s|>)/);
+  }
+  assert.match(exported, /function renderPgy\(/);
+  assert.match(exported, /function applyNoteFilters\(/);
 });
 
 test('legacy xiaohongshu active section opens the first available platform report in exported HTML', () => {

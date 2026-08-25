@@ -129,6 +129,16 @@ test('an analysis larger than 8 MiB is stored as one safe summary plus <=500-row
   assert.equal(hydrated.detailArchive.load.complete, true);
 });
 
+test('detail manifest enumeration has no fixed 4096-chunk content cap', () => {
+  const chunks = Array.from({ length: 4105 }, (_, index) => ({
+    key: `xhsAnalysisDetailChunkV1:${String(index).padStart(4, '0')}`,
+  }));
+  const snapshot = {
+    detailArchive: { schema: 'xhsAnalysisDetailManifestV1', chunks },
+  };
+  assert.equal(analysisDetailKeys(snapshot).length, chunks.length);
+});
+
 test('local detail sharding preserves every section when the combined detail exceeds 22 MiB', () => {
   const padding = '本地完整分片'.repeat(48 * 1024);
   const rows = (kind) => Array.from({ length: 7 }, (_, index) => ({

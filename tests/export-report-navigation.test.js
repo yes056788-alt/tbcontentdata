@@ -11,9 +11,13 @@ assert.ok(scriptStart >= 0, 'expected export script body');
 assert.ok(scriptAssignStart >= 0, 'expected export script wrapper');
 const scriptTagEnd = reportSource.indexOf(';', scriptAssignStart);
 assert.ok(scriptTagEnd >= 0, 'expected script assignment terminator');
+const runtimeStart = reportSource.indexOf('function xhsInteractiveExportRuntime() {');
+const runtimeEnd = reportSource.indexOf('\n  function buildExportReportDocument(metadata) {', runtimeStart);
+assert.ok(runtimeStart >= 0 && runtimeEnd > runtimeStart, 'expected standalone XHS export runtime');
+const runtimeSource = reportSource.slice(runtimeStart, runtimeEnd);
 const scriptSourceSnippet = reportSource.slice(scriptStart, scriptTagEnd + 1);
 const context = { exportScriptNonce: 'taobao-report-export-v1', __script: '' };
-vm.runInNewContext(scriptSourceSnippet + ';__script = script;', context);
+vm.runInNewContext(runtimeSource + '\n' + scriptSourceSnippet + ';__script = script;', context);
 const scriptTag = context.__script;
 const scriptSource = scriptTag.slice(scriptTag.indexOf('>') + 1, -'</script>'.length);
 
@@ -172,6 +176,65 @@ test('查看更多按钮精确控制对应表格并可再次收起', () => {
   assert.equal(rowsByTable['export-table-flow-2'].every((row) => row.hidden), true);
   assert.equal(buttons[1].textContent, '查看更多');
   assert.equal(buttons[1].getAttribute('aria-expanded'), 'false');
+});
+
+test('导出的蒲公英和星河披露按钮可离线展开并再次收起', () => {
+  function disclosureButton(targetId, label) {
+    const attributes = new Map([
+      ['aria-controls', targetId],
+      ['aria-expanded', 'false'],
+    ]);
+    return {
+      firstChild: { nodeType: 3, nodeValue: label },
+      listeners: new Map(),
+      addEventListener(type, listener) {
+        this.listeners.set(type, listener);
+      },
+      getAttribute(name) {
+        return attributes.get(name);
+      },
+      setAttribute(name, value) {
+        attributes.set(name, value);
+      },
+    };
+  }
+  const pgyTarget = { hidden: true };
+  const starTarget = { hidden: true };
+  const pgyButton = disclosureButton('xhsPgyNoteAnalysis', '笔记分析 ');
+  const starButton = disclosureButton('xhsStarProjectReport', '查看更多');
+  const targets = {
+    xhsPgyNoteAnalysis: pgyTarget,
+    xhsStarProjectReport: starTarget,
+  };
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '[data-xhs-pgy-note-toggle]') return [pgyButton];
+      if (selector === '[data-xhs-star-toggle]') return [starButton];
+      return [];
+    },
+    getElementById(id) {
+      return targets[id] || null;
+    },
+    addEventListener() {},
+  };
+
+  vm.runInNewContext(scriptSource, { document, Array });
+  assert.equal(pgyTarget.hidden, true);
+  assert.equal(starTarget.hidden, true);
+
+  pgyButton.listeners.get('click')();
+  starButton.listeners.get('click')();
+  assert.equal(pgyTarget.hidden, false);
+  assert.equal(starTarget.hidden, false);
+  assert.equal(pgyButton.getAttribute('aria-expanded'), 'true');
+  assert.equal(starButton.getAttribute('aria-expanded'), 'true');
+  assert.equal(starButton.firstChild.nodeValue, '收起报表');
+
+  pgyButton.listeners.get('click')();
+  starButton.listeners.get('click')();
+  assert.equal(pgyTarget.hidden, true);
+  assert.equal(starTarget.hidden, true);
+  assert.equal(starButton.firstChild.nodeValue, '查看更多');
 });
 
 test('导出表格构建默认只展示十行并建立可访问的精确关联', () => {

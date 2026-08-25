@@ -1,5 +1,10 @@
 (function initXhsReportModel(root, factory) {
   const api = factory();
+  Object.defineProperty(api, 'standaloneSource', {
+    value: '(' + factory.toString() + ')()',
+    enumerable: false,
+  });
+  Object.freeze(api);
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.XhsReportModel = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createXhsReportModelApi() {
@@ -569,9 +574,9 @@
     };
   }
 
-  return Object.freeze({
+  return {
     DIMENSIONS,
     aggregatePgyFacts,
     aggregateSpotlight,
-  });
+  };
 });
