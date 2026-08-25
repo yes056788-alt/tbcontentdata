@@ -135,6 +135,7 @@ function createReportHarness(options) {
   const document = {
     documentElement: { classList: { add() {} } },
     getElementById() { return null; },
+    styleSheets: Array.isArray(config.styleSheets) ? config.styleSheets : [],
   };
   vm.runInNewContext(instrumented, {
     Array,
@@ -997,6 +998,41 @@ test('standalone HTML export keeps Juguang controls interactive with the complet
     'standalone export must style rolled-up Star costs');
   assert.match(exported, /\.xhs-note-node\s*\{/,
     'standalone export must preserve the project > order > note hierarchy styling');
+});
+
+test('standalone HTML export embeds the same report stylesheet used by the web viewer', () => {
+  const harness = createReportHarness({
+    styleSheets: [
+      {
+        href: 'https://tbdata.example/app.css?v=fixture',
+        cssRules: [{ cssText: '.fixture-app-rule { color: rgb(24, 34, 48); }' }],
+      },
+      {
+        href: 'https://tbdata.example/report.css?v=fixture',
+        cssRules: [
+          { cssText: '.xhs-wide-table table { min-width: 1560px; font-size: 11px; }' },
+          { cssText: '.xhs-control-grid select { width: 100%; height: 36px; border: 1px solid rgb(207, 216, 229); }' },
+        ],
+      },
+      {
+        href: 'https://tbdata.example/portal.css?v=fixture',
+        cssRules: [{ cssText: '.fixture-portal-rule { display: block; }' }],
+      },
+    ],
+  });
+  harness.api.setState({ status: collectionStatus(), analysis: uiSnapshot() });
+
+  const exported = harness.api.buildExportReportDocument({
+    finishedAt: Date.parse('2030-04-01T00:00:00.000Z'),
+  }).html;
+
+  assert.match(exported, /\.fixture-app-rule \{ color: rgb\(24, 34, 48\); \}/);
+  assert.match(exported, /\.xhs-wide-table table \{ min-width: 1560px; font-size: 11px; \}/);
+  assert.match(exported, /\.xhs-control-grid select \{ width: 100%; height: 36px; border: 1px solid rgb\(207, 216, 229\); \}/);
+  assert.doesNotMatch(exported, /fixture-portal-rule/,
+    'portal navigation styles must not leak into the standalone report');
+  assert.match(exported, /\.export-section-body\{padding:0\}/,
+    'the export wrapper must not add a second layer of padding around the shared report body');
 });
 
 test('standalone HTML export keeps the XHS web disclosures folded and clickable', () => {
