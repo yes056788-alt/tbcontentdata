@@ -1086,6 +1086,10 @@ test('standalone HTML export keeps the XHS web disclosures folded and clickable'
   assert.match(exported, /querySelectorAll\("\[data-xhs-pgy-note-toggle\]"\)/);
   assert.match(exported, /querySelectorAll\("\[data-xhs-star-toggle\]"\)/);
   assert.match(exported, /querySelectorAll\("\[data-xhs-note-toggle\]"\)/);
+  assert.match(exported, /\.xhs-star-detail-toggle\{display:flex;width:100%/,
+    '样式表不可读时，导出报告仍应保留任务与项目披露按钮的完整样式');
+  assert.match(exported, /\.xhs-star-detail-report\[hidden\]\{display:none\}/,
+    '样式表不可读时，导出报告仍应默认折叠任务与项目明细');
 });
 
 test('standalone HTML export enables PGY dates and Star full-path filters over every hydrated row', () => {

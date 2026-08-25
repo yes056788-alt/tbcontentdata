@@ -2985,6 +2985,7 @@
     '.xhs-chart-grid{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:14px;margin:0 16px 16px}.xhs-bar-chart{margin:0;padding:14px;border:1px solid #dfe4ea;background:#fff}.xhs-bar-chart figcaption{margin-bottom:12px;font-weight:750}.xhs-bar-row{display:grid;min-height:32px;grid-template-columns:82px minmax(80px,1fr) auto;align-items:center;gap:9px}.xhs-bar-track{height:9px;overflow:hidden;border-radius:9px;background:#e9eef5}.xhs-bar-fill{display:block;width:var(--xhs-bar,0%);height:100%;background:#0b67d1}.xhs-chart-value{font-size:10px;text-align:right}.xhs-chart-value small{display:block;color:#667085;font-size:8px}' +
     '.xhs-control-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 16px 16px;padding:12px;border:1px solid #dfe4ea;background:#fff}.xhs-control-grid label>span,.xhs-control-grid legend{display:block;margin-bottom:5px;color:#667085;font-size:9px}.xhs-control-grid select{width:100%;height:32px}.xhs-control-grid fieldset{grid-column:1/-1}.xhs-check-list{display:flex;gap:8px}.xhs-check-option>span{padding:4px 7px;border:1px solid #cfd8e5;border-radius:10px}' +
     '.xhs-star-summary,.xhs-star-projects{margin:0 16px 16px;border:1px solid #dfe4ea;background:#fff}.xhs-subsection-heading{display:flex;justify-content:space-between;padding:12px 14px}.xhs-subsection-heading h4{margin:0}.xhs-project-tree{padding:0 12px 12px}.xhs-project-node{margin-top:10px;padding:12px;border:1px solid #cdd9ea;border-left:4px solid #0b67d1;background:#f8fbff}.xhs-project-node>header,.xhs-order-node>header{display:flex;justify-content:space-between}.xhs-project-node h4,.xhs-order-node h5{margin:3px 0}.xhs-unit-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}.xhs-unit-metrics div{padding:6px;border:1px solid #e3e8ef;background:#fff}.xhs-unit-metrics dt{color:#667085;font-size:8px}.xhs-unit-metrics dd{margin:2px 0 0;font-size:10px;font-weight:700}.xhs-order-list{margin:12px 0 0 12px;padding-left:12px;border-left:2px solid #cdd9ea}.xhs-order-node{margin-top:7px;padding:10px;border:1px solid #dfe4ea;background:#fff}' +
+    '.xhs-star-detail-toggle{display:flex;width:100%;align-items:center;justify-content:space-between;gap:16px;padding:13px 15px;border:0;border-top:1px solid #dfe4ea;background:#f8fbff;color:#0b67d1;font:inherit;font-size:12px;font-weight:750;text-align:left;cursor:pointer}.xhs-star-detail-toggle span{color:#667085;font-size:10px;font-weight:600}.xhs-star-detail-toggle:focus-visible{outline:2px solid #0b67d1;outline-offset:-2px}.xhs-star-detail-report[hidden]{display:none}.xhs-star-detail-report .xhs-star-controls{margin-top:16px}' +
     '.xhs-unit-costs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:10px 0}.xhs-unit-costs div{padding:7px;border:1px solid #b9d5fb;background:#eef5ff}.xhs-unit-costs dt{color:#475467;font-size:8px}.xhs-unit-costs dd{margin:2px 0 0;color:#0b4fa8;font-size:10px;font-weight:750}.xhs-note-node-list{margin:12px 0 0 14px;padding-left:14px;border-left:2px solid #d8dee8}.xhs-note-node{margin-top:7px;padding:9px;border:1px dashed #cfd8e5;background:#fbfcfe}.xhs-note-node>header{display:flex;justify-content:space-between;gap:10px}.xhs-note-node h6{margin:3px 0}.xhs-order-unverified{border-color:#f4b740;background:#fffaf0}.xhs-unassigned-notes{margin-top:14px;padding:12px;border:1px solid #f4b740;background:#fffaf0}.xhs-unassigned-note-list{display:grid;gap:7px}.xhs-unassigned-note>header b{color:#b54708}' +
     '.xhs-sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}' +
     '@media(max-width:900px){.xhs-account-metrics,.xhs-pgy-metrics,.xhs-star-metrics,.xhs-star-task-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.xhs-chart-grid{grid-template-columns:1fr}.xhs-control-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}';
@@ -3583,6 +3584,16 @@
 
     var starState = Object.assign({ projectId: '', taskId: '' }, object(snapshot.star && snapshot.star.filters));
     var starControls = Array.from(document.querySelectorAll('[data-xhs-star-filter]'));
+    var starTaskSummaryDefaults = Array.from(
+      document.querySelectorAll('[data-xhs-export-metric^="star.task."]')
+    ).map(function (node) {
+      return { node: node, text: node.textContent };
+    });
+    var restoreStarTaskSummary = function () {
+      starTaskSummaryDefaults.forEach(function (entry) {
+        entry.node.textContent = entry.text;
+      });
+    };
     var starValue = function (row) {
       try { return JSON.parse(row.getAttribute('data-xhs-star-values') || '{}'); } catch (error) { return {}; }
     };
@@ -3702,7 +3713,11 @@
           });
         }
         if (emptyRow) emptyRow.hidden = matches.length !== 0;
-        setStarMetrics(kind, aggregate);
+        if (kind === 'task' && !starState.projectId && !starState.taskId) {
+          restoreStarTaskSummary();
+        } else {
+          setStarMetrics(kind, aggregate);
+        }
         if (kind === 'project') {
           setMetric('star.project.count', matches.length, integer);
           setMetric('star.project.taskCount', matches.reduce(function (total, row) {

@@ -237,6 +237,93 @@ test('导出的蒲公英和星河披露按钮可离线展开并再次收起', ()
   assert.equal(starButton.firstChild.nodeValue, '查看更多');
 });
 
+test('导出初始化不得用不完整任务行覆盖星河任务汇总', () => {
+  const summaryMetric = { textContent: '¥999' };
+  const controls = ['project', 'task'].map((kind) => ({
+    value: '',
+    options: [],
+    selectedOptions: [],
+    disabled: false,
+    listeners: new Map(),
+    getAttribute(name) {
+      return name === 'data-xhs-star-filter' ? kind : '';
+    },
+    addEventListener(type, listener) {
+      this.listeners.set(type, listener);
+    },
+  }));
+  const rows = [
+    {
+      hidden: false,
+      getAttribute(name) {
+        if (name === 'data-xhs-star-values') {
+          return JSON.stringify({ costs: { total: 100 }, metrics: {} });
+        }
+        if (name === 'data-xhs-star-project-id') return 'project-a';
+        if (name === 'data-xhs-star-task') return 'task-a';
+        return '';
+      },
+    },
+    {
+      hidden: false,
+      getAttribute(name) {
+        if (name === 'data-xhs-star-values') {
+          return JSON.stringify({ costs: { total: null }, metrics: {} });
+        }
+        if (name === 'data-xhs-star-project-id') return 'project-b';
+        if (name === 'data-xhs-star-task') return 'task-b';
+        return '';
+      },
+    },
+  ];
+  const taskRoot = {
+    querySelectorAll(selector) {
+      return selector === '[data-xhs-star-task][data-xhs-star-values]' ? rows : [];
+    },
+    querySelector() {
+      return null;
+    },
+  };
+  const snapshotNode = {
+    textContent: JSON.stringify({
+      schema: 'xhsInteractiveExportV1',
+      pgy: {},
+      spotlight: {},
+      star: { filters: { projectId: '', taskId: '' } },
+      notes: {},
+    }),
+  };
+  const document = {
+    querySelector(selector) {
+      if (selector === '#xhs-export-snapshot') return snapshotNode;
+      if (selector === '[data-xhs-star-summary-kind="task"]') return taskRoot;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-xhs-star-filter]') return controls;
+      if (selector === '[data-xhs-export-metric="star.task.costs.total"]') return [summaryMetric];
+      if (selector === '[data-xhs-export-metric^="star.task."]') return [summaryMetric];
+      return [];
+    },
+  };
+
+  vm.runInNewContext(
+    runtimeSource + '\n;xhsInteractiveExportRuntime();',
+    { document, window: { XhsReportModel: {} }, Array, Set },
+  );
+
+  assert.equal(summaryMetric.textContent, '¥999',
+    '无筛选时必须保留归档中的任务汇总，不能被一条缺失明细改写为未知');
+
+  controls[1].value = 'task-a';
+  controls[1].listeners.get('change')();
+  assert.equal(summaryMetric.textContent, '¥100', '选择单个任务后应按筛选后的任务明细重算');
+
+  controls[1].value = '';
+  controls[1].listeners.get('change')();
+  assert.equal(summaryMetric.textContent, '¥999', '清空筛选后应恢复归档中的完整任务汇总');
+});
+
 test('导出表格构建默认只展示十行并建立可访问的精确关联', () => {
   const helperStart = reportSource.indexOf('function applyExportTableLimits(markup, options) {');
   const helperEnd = reportSource.indexOf('\n  function buildExportReportDocument(metadata) {', helperStart);
