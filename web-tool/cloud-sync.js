@@ -6,8 +6,10 @@
   const DIRECTORY_KEY = 'taobaoProjectDirectoryV1';
   const RUN_INDEX_KEY = 'taobaoStoreRunIndexV1';
   const MAX_API_BYTES = 28 * 1024 * 1024;
+  const MAX_SESSION_BYTES = 128 * 1024;
   const MAX_RUN_BYTES = 24 * 1024 * 1024;
   const MAX_XHS_SNAPSHOT_BYTES = 8 * 1024 * 1024;
+  const XHS_DETAIL_KEY_PREFIX = 'xhsAnalysisDetailChunkV1:';
   const XHS_SNAPSHOT_KEYS = new Set(['xhsAnalysisSnapshotV1', 'xhsCollectionStatusV1']);
   const SENSITIVE_RUN_KEYS = new Set([
     'password', 'masterpassword', 'authorization', 'cookie', 'cookies',
@@ -20,14 +22,29 @@
     'indexeddb', 'datasets',
   ]);
   const SYNC_KEYS = new Set([VAULT_KEY, DIRECTORY_KEY, RUN_INDEX_KEY]);
+  const TEAM_ORIGIN = 'https://tbdata.aizicheng.com';
+  const TEAM_VAULT_SCOPE_ID = 'team:https://tbdata.aizicheng.com';
+  const TEAM_SESSION_HEARTBEAT_MS = 30000;
+  const TEAM_SESSION_HEARTBEAT_TIMEOUT_MS = 8000;
+  const TEAM_VAULT_LOCK_RETRY_INITIAL_MS = 1000;
+  const TEAM_VAULT_LOCK_RETRY_MAX_MS = 30000;
   const pendingBridgeRequests = new Map();
+  const pendingRunDeletions = new Map();
   const state = {
     enabled: false,
     connected: false,
     syncing: false,
     lastSyncedAt: 0,
     lastError: '',
+    canDeleteRuns: false,
+    permissions: null,
     role: '',
+    vaultScopeId: '',
+    vaultLockEpoch: 0,
+    legacyAvailable: false,
+    remoteVaultExists: false,
+    remoteVaultRevision: 0,
+    remoteVaultDeleted: false,
     conflicts: [],
   };
   let stopped = false;
@@ -36,15 +53,21 @@
   let syncPromise = null;
   let rerunRequested = false;
   let syncTimer = 0;
+  let teamSessionHeartbeatTimer = 0;
+  let teamSessionHeartbeatPromise = null;
+  let teamSessionHeartbeatController = null;
+  let teamSessionHeartbeatRevoked = false;
+  let teamVaultLockRetryTimer = 0;
+  let teamVaultLockRetryPromise = null;
+  let teamVaultLockRetryFailures = 0;
+  let vaultAuthEpoch = 0;
+  let legacyMigrationPromise = null;
+  let vaultMutationPromise = null;
+  let appliedVaultTombstoneRevision = -1;
 
   function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value) &&
       Object.prototype.toString.call(value) === '[object Object]';
-  }
-
-  function isLocalHost() {
-    const hostname = String(location.hostname || '').toLowerCase();
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
   }
 
   function cleanText(value, maxLength) {
@@ -236,10 +259,16 @@
     return false;
   }
 
+  function isXhsDetailSnapshotKey(value) {
+    const key = String(value == null ? '' : value);
+    return key.startsWith(XHS_DETAIL_KEY_PREFIX) && /^\d{4,6}$/.test(
+      key.slice(XHS_DETAIL_KEY_PREFIX.length)
+    );
+  }
+
   function assertXhsSnapshotsSafe(snapshots) {
-    for (const key of XHS_SNAPSHOT_KEYS) {
-      if (!Object.prototype.hasOwnProperty.call(snapshots, key)) continue;
-      const snapshot = snapshots[key];
+    for (const [key, snapshot] of Object.entries(snapshots)) {
+      if (!XHS_SNAPSHOT_KEYS.has(key) && !isXhsDetailSnapshotKey(key)) continue;
       let serialized = '';
       try {
         serialized = JSON.stringify(snapshot);
@@ -283,6 +312,7 @@
       record,
       revision: revision(object.revision == null ? object.version : object.revision),
       updatedAt: timestamp(object.updatedAt) || timestamp(record && record.updatedAt),
+      deleted: object.deleted === true || object.tombstone === true,
     };
   }
 
@@ -303,6 +333,14 @@
       lastSyncedAt: state.lastSyncedAt,
       lastError: state.lastError,
       role: state.role,
+      vaultScopeId: state.vaultScopeId,
+      vaultLockEpoch: state.vaultLockEpoch,
+      legacyAvailable: state.legacyAvailable === true,
+      remoteVaultExists: state.remoteVaultExists === true,
+      remoteVaultRevision: revision(state.remoteVaultRevision),
+      remoteVaultDeleted: state.remoteVaultDeleted === true,
+      canDeleteRuns: Boolean(state.canDeleteRuns),
+      permissions: state.permissions,
       conflicts: state.conflicts.slice(),
     };
   }
@@ -355,7 +393,10 @@
       }
     }
     if (!response.ok) {
-      const error = new Error(cleanText(body && (body.message || body.error), 500) ||
+      const nestedError = isPlainObject(body && body.error) ? body.error : {};
+      const error = new Error(cleanText(body && (
+        body.message || nestedError.message || (typeof body.error === 'string' ? body.error : '')
+      ), 500) ||
         ('云同步请求失败（' + response.status + '）。'));
       error.status = response.status;
       error.response = body;
@@ -373,6 +414,7 @@
       throw new Error('当前用户尚未获得网页工具权限。');
     }
     const permissions = isPlainObject(session.permissions) ? session.permissions : {};
+    const canDelete = permissions.canDeleteRuns == null ? permissions.deleteRuns : permissions.canDeleteRuns;
     const privileged = role === 'owner' || role === 'admin';
     const operative = privileged || role === 'operator';
     return {
@@ -381,8 +423,150 @@
       canWriteVault: permissions.canWriteVault == null ? privileged : permissions.canWriteVault === true,
       canWriteDirectory: permissions.canWriteDirectory == null ? operative : permissions.canWriteDirectory === true,
       canWriteRuns: permissions.canWriteRuns == null ? operative : permissions.canWriteRuns === true,
+      canDeleteRuns: canDelete == null ? privileged : canDelete === true,
       canReadRuns: permissions.canReadRuns !== false,
     };
+  }
+
+  function sanitizeVaultScopeId(value) {
+    const scopeId = cleanText(value, 220);
+    if (!/^(?:team:https:\/\/[a-z0-9.-]+(?::\d+)?|local:[a-z0-9.-]+)$/i.test(scopeId)) {
+      throw new Error('账号库工作区范围无效，请刷新页面后重试。');
+    }
+    return scopeId;
+  }
+
+  async function lockAccountVault() {
+    vaultAuthEpoch += 1;
+    try {
+      const response = await requestBridge('lockAccountVault', {}, 10000);
+      if (!response || response.ok === false) {
+        throw new Error(response && response.message || '账号库会话锁定失败。');
+      }
+      const vaultLockEpoch = Math.max(0, Number(response.vaultLockEpoch) || 0);
+      state.vaultLockEpoch = vaultLockEpoch;
+      return { ok: true, locked: true, vaultLockEpoch };
+    } finally {
+      emit('vault-locked', {
+        vaultScopeId: '',
+        connected: false,
+        syncing: false,
+        permissions: null,
+        role: '',
+        canDeleteRuns: false,
+      });
+    }
+  }
+
+  function clearTeamVaultLockRetryTimer() {
+    clearTimeout(teamVaultLockRetryTimer);
+    teamVaultLockRetryTimer = 0;
+  }
+
+  function scheduleTeamVaultLockRetry() {
+    if (stopped || teamVaultLockRetryTimer || teamVaultLockRetryPromise) return;
+    const exponent = Math.max(0, Math.min(teamVaultLockRetryFailures - 1, 5));
+    const delay = Math.min(
+      TEAM_VAULT_LOCK_RETRY_MAX_MS,
+      TEAM_VAULT_LOCK_RETRY_INITIAL_MS * Math.pow(2, exponent)
+    );
+    teamVaultLockRetryTimer = setTimeout(() => {
+      teamVaultLockRetryTimer = 0;
+      lockRevokedTeamVault().catch(() => {});
+    }, delay);
+  }
+
+  function lockRevokedTeamVault() {
+    if (stopped) return Promise.resolve({ ok: true, skipped: true });
+    if (teamVaultLockRetryPromise) return teamVaultLockRetryPromise;
+    let locked = false;
+    const attempt = lockAccountVault()
+      .then((result) => {
+        locked = true;
+        teamVaultLockRetryFailures = 0;
+        clearTeamVaultLockRetryTimer();
+        return result;
+      })
+      .finally(() => {
+        if (teamVaultLockRetryPromise === attempt) teamVaultLockRetryPromise = null;
+        if (!locked && !stopped) {
+          teamVaultLockRetryFailures += 1;
+          scheduleTeamVaultLockRetry();
+        }
+      });
+    teamVaultLockRetryPromise = attempt;
+    return attempt;
+  }
+
+  function assertActiveTeamVaultSession(value) {
+    const source = unwrapResponse(value);
+    const session = isPlainObject(source) ? source : {};
+    const member = isPlainObject(session.member) ? session.member : {};
+    const role = cleanText(session.role, 30).toLowerCase();
+    const memberRole = cleanText(member.role, 30).toLowerCase();
+    const permissions = isPlainObject(session.permissions) ? session.permissions : {};
+    if (member.status !== 'active' || session.mustChangePassword !== false ||
+        !['owner', 'admin', 'operator'].includes(role) || memberRole !== role ||
+        permissions.canReadVault !== true || permissions.canWriteRuns !== true) {
+      throw new Error('团队登录或账号库权限已失效。');
+    }
+    return session;
+  }
+
+  function teamSessionHeartbeatEnabled() {
+    return !stopped && state.enabled && !teamSessionHeartbeatRevoked &&
+      location.origin === TEAM_ORIGIN && state.vaultScopeId === TEAM_VAULT_SCOPE_ID;
+  }
+
+  function clearTeamSessionHeartbeatTimer() {
+    clearTimeout(teamSessionHeartbeatTimer);
+    teamSessionHeartbeatTimer = 0;
+  }
+
+  function scheduleTeamSessionHeartbeat() {
+    clearTeamSessionHeartbeatTimer();
+    if (!teamSessionHeartbeatEnabled()) return;
+    teamSessionHeartbeatTimer = setTimeout(() => {
+      teamSessionHeartbeatTimer = 0;
+      revalidateTeamSession().catch(() => {});
+    }, TEAM_SESSION_HEARTBEAT_MS);
+  }
+
+  function revalidateTeamSession() {
+    if (!teamSessionHeartbeatEnabled()) {
+      return Promise.resolve({ ok: true, skipped: true });
+    }
+    if (teamSessionHeartbeatPromise) return teamSessionHeartbeatPromise;
+    teamSessionHeartbeatPromise = (async () => {
+      let timeout = 0;
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      teamSessionHeartbeatController = controller;
+      if (controller) {
+        timeout = setTimeout(() => {
+          controller.abort(new Error('团队登录状态确认超时。'));
+        }, TEAM_SESSION_HEARTBEAT_TIMEOUT_MS);
+      }
+      try {
+        const requestOptions = controller ? { signal: controller.signal } : {};
+        assertActiveTeamVaultSession(
+          await requestJson('/api/session', requestOptions, MAX_SESSION_BYTES)
+        );
+        return { ok: true, checkedAt: Date.now() };
+      } catch (error) {
+        if (stopped) return { ok: true, skipped: true };
+        teamSessionHeartbeatRevoked = true;
+        clearTeamSessionHeartbeatTimer();
+        await lockRevokedTeamVault().catch(() => {});
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+        if (teamSessionHeartbeatController === controller) teamSessionHeartbeatController = null;
+      }
+    })().finally(() => {
+      teamSessionHeartbeatPromise = null;
+      if (teamSessionHeartbeatEnabled()) scheduleTeamSessionHeartbeat();
+    });
+    return teamSessionHeartbeatPromise;
   }
 
   async function guardedRecordSync(config, permissions, conflicts) {
@@ -390,7 +574,17 @@
     const local = config.sanitize(stored && stored[config.storageKey]);
     const remoteResponse = await requestJson(config.apiPath);
     const remoteEnvelope = envelope(remoteResponse, config.field);
+    if (typeof config.onRemoteEnvelope === 'function') {
+      config.onRemoteEnvelope(remoteEnvelope);
+    }
     const remote = config.sanitize(remoteEnvelope.record);
+    if (remoteEnvelope.deleted) {
+      if (remoteEnvelope.record != null) throw new Error('云端' + config.label + '删除标记格式无效。');
+      if (typeof config.onRemoteDeleted === 'function') {
+        await config.onRemoteDeleted(remoteEnvelope, local);
+      }
+      return 'deleted';
+    }
     if (!remote) {
       if (remoteEnvelope.record != null) throw new Error('云端' + config.label + '格式无效。');
       if (local && config.canWrite(permissions)) {
@@ -412,7 +606,13 @@
       return 'empty';
     }
     if (!local) {
-      await requestBridge(config.setAction, { [config.field]: remote }, 45000);
+      const setPayload = typeof config.setPayload === 'function'
+        ? config.setPayload(remoteEnvelope)
+        : (config.setPayload || {});
+      await requestBridge(config.setAction, Object.assign(
+        { [config.field]: remote },
+        setPayload
+      ), 45000);
       return 'downloaded';
     }
     const localJson = JSON.stringify(local);
@@ -443,17 +643,417 @@
         conflicts.push(config.field + ':local-changed');
         return 'conflict';
       }
-      await requestBridge(config.setAction, { [config.field]: remote }, 45000);
+      const setPayload = typeof config.setPayload === 'function'
+        ? config.setPayload(remoteEnvelope)
+        : (config.setPayload || {});
+      await requestBridge(config.setAction, Object.assign(
+        { [config.field]: remote },
+        setPayload
+      ), 45000);
       return 'downloaded';
     }
     conflicts.push(config.field + ':same-timestamp');
     return 'conflict';
   }
 
+  function updateRemoteVaultState(remoteEnvelope, legacyAvailable) {
+    const remote = sanitizeVaultRecord(remoteEnvelope && remoteEnvelope.record);
+    const detail = {
+      remoteVaultExists: Boolean(remote),
+      remoteVaultRevision: revision(remoteEnvelope && remoteEnvelope.revision),
+      remoteVaultDeleted: Boolean(remoteEnvelope && remoteEnvelope.deleted),
+    };
+    if (legacyAvailable != null) detail.legacyAvailable = legacyAvailable === true;
+    Object.assign(state, detail);
+    return remote;
+  }
+
+  async function applyRemoteVaultTombstone(remoteEnvelope, vaultLockEpoch) {
+    const tombstoneRevision = revision(remoteEnvelope && remoteEnvelope.revision);
+    if (!remoteEnvelope || remoteEnvelope.deleted !== true || tombstoneRevision < 1) {
+      throw new Error('云端账号库删除标记无效。');
+    }
+    if (appliedVaultTombstoneRevision === tombstoneRevision) {
+      return {
+        applied: false,
+        alreadyApplied: true,
+        vaultLockEpoch: state.vaultLockEpoch,
+      };
+    }
+    let response;
+    try {
+      response = await requestBridge('applyAccountVaultTombstone', {
+        vaultLockEpoch,
+        revision: tombstoneRevision,
+      }, 30000);
+    } catch (error) {
+      // The server tombstone is already authoritative. Clear page-held
+      // plaintext immediately even if the extension bridge needs a later sync
+      // to finish deleting its scoped ciphertext/session.
+      emit('vault-tombstoned', {
+        connected: true,
+        remoteVaultExists: false,
+        remoteVaultRevision: tombstoneRevision,
+        remoteVaultDeleted: true,
+      });
+      const failure = new Error('团队账号库已在云端删除，但本机锁定尚未完成；请保持页面打开后重试同步。');
+      failure.cause = error;
+      throw failure;
+    }
+    if (response && response.stale === true) {
+      throw new Error('账号库在应用删除标记时已出现更新版本，请重新同步。');
+    }
+    if (!response || response.applied !== true) {
+      emit('vault-tombstoned', {
+        connected: true,
+        remoteVaultExists: false,
+        remoteVaultRevision: tombstoneRevision,
+        remoteVaultDeleted: true,
+      });
+      throw new Error(response && response.message || '本机账号库删除标记应用失败。');
+    }
+    const nextEpoch = Number(response.vaultLockEpoch);
+    if (!Number.isSafeInteger(nextEpoch) || nextEpoch <= Number(vaultLockEpoch)) {
+      throw new Error('本机账号库锁定版本无效。');
+    }
+    appliedVaultTombstoneRevision = tombstoneRevision;
+    state.vaultLockEpoch = nextEpoch;
+    emit('vault-tombstoned', {
+      connected: true,
+      vaultLockEpoch: nextEpoch,
+      remoteVaultExists: false,
+      remoteVaultRevision: tombstoneRevision,
+      remoteVaultDeleted: true,
+    });
+    return {
+      applied: true,
+      vaultLockEpoch: nextEpoch,
+      revision: tombstoneRevision,
+    };
+  }
+
+  async function downloadRemoteVault(remote, vaultLockEpoch, remoteRevision) {
+    const safeRemote = sanitizeVaultRecord(remote);
+    if (!safeRemote) throw new Error('云端账号库密文格式无效。');
+    await requestBridge('setAccountVault', {
+      vault: safeRemote,
+      vaultLockEpoch,
+      remoteRevision: revision(remoteRevision),
+      serverConfirmed: true,
+    }, 45000);
+    return safeRemote;
+  }
+
+  async function performLegacyAccountVaultMigration(input) {
+    if (!state.enabled || stopped) throw new Error('服务器云同步未启用。');
+    const source = isPlainObject(input) ? input : {};
+    const fingerprint = cleanText(source.fingerprint, 64).toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new Error('旧账号库校验标识无效。');
+    const requestedEpoch = Number(source.vaultLockEpoch);
+    if (!Number.isSafeInteger(requestedEpoch) || requestedEpoch < 0) {
+      throw new Error('账号库锁定版本无效，请刷新后重试。');
+    }
+
+    const sessionResponse = await requestJson('/api/session');
+    const permissions = rolePermissions(sessionResponse);
+    if (!permissions.canReadVault || !permissions.canWriteVault) {
+      throw new Error('当前团队角色无权迁移账号库。');
+    }
+    const binding = await requestBridge('bindAccountVaultScope', {}, 30000);
+    const vaultScopeId = sanitizeVaultScopeId(binding && binding.vaultScopeId);
+    const vaultLockEpoch = Number(binding && binding.vaultLockEpoch);
+    if (vaultScopeId !== 'team:https://tbdata.aizicheng.com') {
+      throw new Error('旧账号库只能迁移到已登录的在线团队工作区。');
+    }
+    if (!Number.isSafeInteger(vaultLockEpoch) || vaultLockEpoch !== requestedEpoch) {
+      throw new Error('账号库已在其他页面锁定，请重新验证主密码。');
+    }
+    if (!binding || binding.legacyAvailable !== true) {
+      throw new Error('未找到可迁移的升级前本机账号库。');
+    }
+
+    const prepared = await requestBridge('getLegacyAccountVault', {}, 30000);
+    const preparedFingerprint = cleanText(prepared && prepared.fingerprint, 64).toLowerCase();
+    if (!prepared || prepared.legacyAvailable !== true || preparedFingerprint !== fingerprint ||
+        sanitizeVaultScopeId(prepared.vaultScopeId) !== vaultScopeId ||
+        Number(prepared.vaultLockEpoch) !== vaultLockEpoch) {
+      throw new Error('旧账号库已变化，请重新验证主密码。');
+    }
+    const legacyVault = sanitizeVaultRecord(prepared.legacyVault);
+    if (!legacyVault) throw new Error('旧账号库密文格式无效。');
+
+    const remoteResponse = await requestJson('/api/vault');
+    let remoteEnvelope = envelope(remoteResponse, 'vault');
+    let remote = updateRemoteVaultState(remoteEnvelope, true);
+    if (remoteEnvelope.deleted) {
+      throw new Error('团队账号库已删除，禁止用升级前密文覆盖删除标记。');
+    }
+    if (remoteEnvelope.record != null && !remote) {
+      throw new Error('云端账号库密文格式无效。');
+    }
+    if (remote) {
+      await downloadRemoteVault(remote, vaultLockEpoch, remoteEnvelope.revision);
+      emit('vault-migration-conflict', {
+        connected: true,
+        role: permissions.role,
+        permissions,
+        vaultScopeId,
+        vaultLockEpoch,
+        legacyAvailable: true,
+      });
+      return {
+        migrated: false,
+        reason: 'remote-exists',
+        downloaded: true,
+        revision: remoteEnvelope.revision,
+      };
+    }
+    if (remoteEnvelope.revision !== 0) {
+      throw new Error('云端账号库状态已变化，未执行迁移。');
+    }
+
+    let savedResponse;
+    try {
+      savedResponse = await requestJson('/api/vault', {
+        method: 'PUT',
+        body: { vault: legacyVault, expectedRevision: 0 },
+      });
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      const latestResponse = await requestJson('/api/vault');
+      remoteEnvelope = envelope(latestResponse, 'vault');
+      remote = updateRemoteVaultState(remoteEnvelope, true);
+      if (remoteEnvelope.deleted) {
+        throw new Error('团队账号库已删除，旧密文已保留在本机。');
+      }
+      if (remoteEnvelope.record != null && !remote) {
+        throw new Error('云端账号库密文格式无效。');
+      }
+      if (remote) await downloadRemoteVault(remote, vaultLockEpoch, remoteEnvelope.revision);
+      scheduleSync(100);
+      emit('vault-migration-conflict', {
+        connected: true,
+        role: permissions.role,
+        permissions,
+        vaultScopeId,
+        vaultLockEpoch,
+        legacyAvailable: true,
+      });
+      return {
+        migrated: false,
+        reason: 'conflict',
+        downloaded: Boolean(remote),
+        revision: remoteEnvelope.revision,
+      };
+    }
+
+    const savedEnvelope = envelope(savedResponse, 'vault');
+    const savedVault = updateRemoteVaultState(savedEnvelope, true);
+    if (!savedVault || JSON.stringify(savedVault) !== JSON.stringify(legacyVault)) {
+      throw new Error('云端未返回本次迁移的完整密文，本机旧库未移动。');
+    }
+    await requestBridge('commitLegacyAccountVault', {
+      fingerprint,
+      vaultLockEpoch,
+      remoteRevision: savedEnvelope.revision,
+      serverConfirmed: true,
+    }, 45000);
+    emit('vault-migration-complete', {
+      connected: true,
+      role: permissions.role,
+      permissions,
+      vaultScopeId,
+      vaultLockEpoch,
+      legacyAvailable: false,
+      remoteVaultExists: true,
+      remoteVaultRevision: savedEnvelope.revision,
+      remoteVaultDeleted: false,
+      lastSyncedAt: Date.now(),
+      lastError: '',
+    });
+    return {
+      migrated: true,
+      revision: savedEnvelope.revision,
+      vaultScopeId,
+      vaultLockEpoch,
+    };
+  }
+
+  function migrateLegacyAccountVault(input) {
+    if (legacyMigrationPromise) return legacyMigrationPromise;
+    legacyMigrationPromise = runAccountVaultMutation(
+      () => performLegacyAccountVaultMigration(input),
+    ).finally(() => {
+      legacyMigrationPromise = null;
+    });
+    return legacyMigrationPromise;
+  }
+
+  async function prepareAccountVaultMutation() {
+    if (!state.enabled || stopped) throw new Error('服务器云同步未启用。');
+    const sessionResponse = await requestJson('/api/session');
+    const permissions = rolePermissions(sessionResponse);
+    if (!permissions.canReadVault || !permissions.canWriteVault ||
+        !['owner', 'admin'].includes(permissions.role)) {
+      throw new Error('只有团队所有者或管理员可以重置账号库。');
+    }
+    const binding = await requestBridge('bindAccountVaultScope', {}, 30000);
+    const vaultScopeId = sanitizeVaultScopeId(binding && binding.vaultScopeId);
+    const vaultLockEpoch = Number(binding && binding.vaultLockEpoch);
+    if (!vaultScopeId.startsWith('team:')) {
+      throw new Error('当前不是在线团队账号库，不能执行团队重置。');
+    }
+    if (!Number.isSafeInteger(vaultLockEpoch) || vaultLockEpoch < 0) {
+      throw new Error('账号库锁定版本无效，请刷新页面后重试。');
+    }
+    Object.assign(state, {
+      connected: true,
+      role: permissions.role,
+      permissions,
+      vaultScopeId,
+      vaultLockEpoch,
+    });
+    return { permissions, vaultScopeId, vaultLockEpoch };
+  }
+
+  function runAccountVaultMutation(operation) {
+    if (vaultMutationPromise) {
+      return Promise.reject(new Error('另一个账号库重置或重建操作正在进行。'));
+    }
+    const activeSync = syncPromise;
+    const task = (async () => {
+      if (activeSync) await activeSync;
+      return operation();
+    })();
+    vaultMutationPromise = task;
+    return task.finally(() => {
+      if (vaultMutationPromise === task) vaultMutationPromise = null;
+      scheduleSync(100);
+    });
+  }
+
+  function deleteAccountVault() {
+    return runAccountVaultMutation(async () => {
+      const context = await prepareAccountVaultMutation();
+      const currentResponse = await requestJson('/api/vault');
+      const currentEnvelope = envelope(currentResponse, 'vault');
+      updateRemoteVaultState(currentEnvelope, state.legacyAvailable);
+      if (currentEnvelope.record != null && !sanitizeVaultRecord(currentEnvelope.record)) {
+        throw new Error('云端账号库密文格式无效。');
+      }
+
+      let deletedEnvelope = currentEnvelope;
+      if (!currentEnvelope.deleted) {
+        let deletedResponse;
+        try {
+          deletedResponse = await requestJson('/api/vault', {
+            method: 'DELETE',
+            body: { expectedRevision: currentEnvelope.revision },
+          }, 10000);
+        } catch (error) {
+          if (error && [400, 401, 403, 409, 428].includes(error.status)) throw error;
+          try {
+            const reconciled = await requestJson('/api/vault');
+            const reconciledEnvelope = envelope(reconciled, 'vault');
+            if (!reconciledEnvelope.deleted) throw error;
+            deletedResponse = reconciled;
+          } catch (reconcileError) {
+            throw error;
+          }
+        }
+        deletedEnvelope = envelope(deletedResponse, 'vault');
+        if (!deletedEnvelope.deleted || deletedEnvelope.revision < 1) {
+          throw new Error('服务器未返回有效的账号库删除标记。');
+        }
+      }
+
+      updateRemoteVaultState(deletedEnvelope, state.legacyAvailable);
+      const local = await applyRemoteVaultTombstone(
+        deletedEnvelope,
+        context.vaultLockEpoch,
+      );
+      return {
+        deleted: true,
+        revision: deletedEnvelope.revision,
+        vaultScopeId: context.vaultScopeId,
+        vaultLockEpoch: local.vaultLockEpoch,
+      };
+    });
+  }
+
+  function recreateAccountVault(value) {
+    const vault = sanitizeVaultRecord(value);
+    if (!vault) return Promise.reject(new Error('新账号库密文格式无效。'));
+    return runAccountVaultMutation(async () => {
+      const context = await prepareAccountVaultMutation();
+      const currentResponse = await requestJson('/api/vault');
+      const currentEnvelope = envelope(currentResponse, 'vault');
+      updateRemoteVaultState(currentEnvelope, state.legacyAvailable);
+      if (!currentEnvelope.deleted || currentEnvelope.record != null || currentEnvelope.revision < 1) {
+        throw new Error('团队账号库当前不是已删除状态，请先同步最新版本。');
+      }
+      let savedResponse;
+      try {
+        savedResponse = await requestJson('/api/vault', {
+          method: 'PUT',
+          body: {
+            vault,
+            expectedRevision: currentEnvelope.revision,
+            recreate: true,
+          },
+        });
+      } catch (error) {
+        if (error && [400, 401, 403, 409, 428].includes(error.status)) throw error;
+        try {
+          const reconciled = await requestJson('/api/vault');
+          const reconciledEnvelope = envelope(reconciled, 'vault');
+          const reconciledVault = sanitizeVaultRecord(reconciledEnvelope.record);
+          if (reconciledEnvelope.deleted || !reconciledVault ||
+              JSON.stringify(reconciledVault) !== JSON.stringify(vault) ||
+              reconciledEnvelope.revision <= currentEnvelope.revision) {
+            throw error;
+          }
+          savedResponse = reconciled;
+        } catch (reconcileError) {
+          throw error;
+        }
+      }
+      const savedEnvelope = envelope(savedResponse, 'vault');
+      const savedVault = sanitizeVaultRecord(savedEnvelope.record);
+      if (savedEnvelope.deleted || !savedVault ||
+          JSON.stringify(savedVault) !== JSON.stringify(vault)) {
+        throw new Error('服务器未返回本次重建的完整账号库密文。');
+      }
+      await requestBridge('setAccountVault', {
+        vault: savedVault,
+        vaultLockEpoch: context.vaultLockEpoch,
+        remoteRevision: savedEnvelope.revision,
+        serverConfirmed: true,
+      }, 45000);
+      appliedVaultTombstoneRevision = -1;
+      updateRemoteVaultState(savedEnvelope, state.legacyAvailable);
+      emit('vault-recreated', {
+        connected: true,
+        vaultScopeId: context.vaultScopeId,
+        vaultLockEpoch: context.vaultLockEpoch,
+        remoteVaultExists: true,
+        remoteVaultRevision: savedEnvelope.revision,
+        remoteVaultDeleted: false,
+      });
+      return {
+        recreated: true,
+        vault: savedVault,
+        revision: savedEnvelope.revision,
+        vaultScopeId: context.vaultScopeId,
+        vaultLockEpoch: context.vaultLockEpoch,
+      };
+    });
+  }
+
   async function syncRuns(permissions, conflicts) {
     if (!permissions.canReadRuns) return { uploaded: 0, downloaded: 0 };
     const localResponse = await requestBridge('listStoreRuns', {}, 30000);
-    const localItems = (Array.isArray(localResponse && localResponse.runs) ? localResponse.runs : [])
+    const allLocalItems = (Array.isArray(localResponse && localResponse.runs) ? localResponse.runs : [])
       .slice(0, 1000).map(sanitizeRunMetadata).filter(Boolean);
     const remoteResponse = unwrapResponse(await requestJson('/api/runs'));
     const remoteArray = Array.isArray(remoteResponse)
@@ -461,14 +1061,26 @@
       : (Array.isArray(remoteResponse && remoteResponse.runs) ? remoteResponse.runs
         : (Array.isArray(remoteResponse && remoteResponse.items) ? remoteResponse.items : []));
     const remoteItems = remoteArray.slice(0, 1000).map(sanitizeRunMetadata).filter(Boolean);
+    const deletedRunIds = new Set(
+      (Array.isArray(remoteResponse && remoteResponse.deletedRunIds)
+        ? remoteResponse.deletedRunIds : []).map(sanitizeRunId).filter(Boolean)
+    );
+    let deleted = 0;
+    for (const metadata of allLocalItems) {
+      if (!deletedRunIds.has(metadata.runId)) continue;
+      await requestBridge('deleteStoreRun', { runId: metadata.runId }, 30000);
+      deleted += 1;
+    }
+    const localItems = allLocalItems.filter((metadata) => !deletedRunIds.has(metadata.runId));
     const localMap = new Map(localItems.map((item) => [item.runId, item]));
     const remoteMap = new Map(remoteItems.map((item) => [item.runId, item]));
     let uploaded = 0;
     let downloaded = 0;
     if (permissions.canWriteRuns) {
       for (const metadata of localItems) {
-        if (remoteMap.has(metadata.runId)) continue;
+        if (remoteMap.has(metadata.runId) || pendingRunDeletions.has(metadata.runId)) continue;
         const full = await requestBridge('getStoreRun', { runId: metadata.runId }, 45000);
+        if (pendingRunDeletions.has(metadata.runId)) continue;
         if (!full || !full.run) continue;
         const run = sanitizeUploadRun(full.run, metadata.runId);
         try {
@@ -478,14 +1090,20 @@
           }, MAX_API_BYTES);
           uploaded += 1;
         } catch (error) {
+          if (error.status === 410) {
+            await requestBridge('deleteStoreRun', { runId: metadata.runId }, 30000);
+            deleted += 1;
+            continue;
+          }
           if (error.status !== 409) throw error;
           conflicts.push('run:' + metadata.runId + ':remote-created');
         }
       }
     }
     for (const metadata of remoteItems) {
-      if (localMap.has(metadata.runId)) continue;
+      if (localMap.has(metadata.runId) || pendingRunDeletions.has(metadata.runId)) continue;
       const response = unwrapResponse(await requestJson('/api/runs/' + encodeURIComponent(metadata.runId), {}, MAX_API_BYTES));
+      if (pendingRunDeletions.has(metadata.runId)) continue;
       const run = isPlainObject(response) && Object.prototype.hasOwnProperty.call(response, 'run')
         ? response.run
         : response;
@@ -498,16 +1116,70 @@
         conflicts.push('run:' + metadata.runId + ':local-newer');
       }
     }
-    return { uploaded, downloaded };
+    return Object.assign({ uploaded, downloaded }, deleted ? { deleted } : {});
+  }
+
+  function deleteRun(value) {
+    const runId = sanitizeRunId(value);
+    if (!runId) return Promise.reject(new Error('店铺归档编号无效。'));
+    if (!state.enabled || stopped) return Promise.reject(new Error('服务器云同步未启用。'));
+    if (pendingRunDeletions.has(runId)) return pendingRunDeletions.get(runId);
+
+    const operation = (async () => {
+      if (!state.permissions || !state.permissions.canDeleteRuns) {
+        const sessionResponse = await requestJson('/api/session');
+        state.permissions = rolePermissions(sessionResponse);
+        state.canDeleteRuns = state.permissions.canDeleteRuns;
+      }
+      if (!state.permissions.canDeleteRuns) {
+        throw new Error('当前账号无权限删除运行记录。');
+      }
+      if (syncPromise) await syncPromise.catch(() => null);
+      try {
+        await requestJson('/api/runs/' + encodeURIComponent(runId), { method: 'DELETE' });
+      } catch (error) {
+        if (error.status !== 404 && error.status !== 410) throw error;
+      }
+      let localDeleted = true;
+      try {
+        await requestBridge('deleteStoreRun', { runId }, 30000);
+      } catch (error) {
+        // The server tombstone is authoritative.  Keeping the remote delete
+        // successful prevents a transient extension/bridge failure from
+        // making the UI claim that a logically deleted report still exists;
+        // the next sync will retry removing the stale local copy.
+        localDeleted = false;
+      }
+      return { deleted: true, runId, localDeleted };
+    })().finally(() => {
+      pendingRunDeletions.delete(runId);
+      scheduleSync(100);
+    });
+    pendingRunDeletions.set(runId, operation);
+    return operation;
   }
 
   async function performSync() {
+    const syncVaultAuthEpoch = vaultAuthEpoch;
     emit('sync-start', { syncing: true, lastError: '', conflicts: [] });
     const conflicts = [];
     try {
       const sessionResponse = await requestJson('/api/session');
+      if (syncVaultAuthEpoch !== vaultAuthEpoch) throw new Error('云端登录状态已变化，请重新同步。');
       const permissions = rolePermissions(sessionResponse);
+      const binding = await requestBridge('bindAccountVaultScope', {}, 30000);
+      const vaultScopeId = sanitizeVaultScopeId(binding && binding.vaultScopeId);
+      const vaultLockEpoch = Number(binding && binding.vaultLockEpoch);
+      if (!Number.isSafeInteger(vaultLockEpoch) || vaultLockEpoch < 0) {
+        throw new Error('账号库锁定版本无效，请刷新页面后重试。');
+      }
+      if (syncVaultAuthEpoch !== vaultAuthEpoch) throw new Error('云端登录状态已变化，请重新同步。');
       state.role = permissions.role;
+      state.vaultScopeId = vaultScopeId;
+      state.vaultLockEpoch = vaultLockEpoch;
+      state.legacyAvailable = binding && binding.legacyAvailable === true;
+      state.permissions = permissions;
+      state.canDeleteRuns = permissions.canDeleteRuns;
       if (permissions.canReadVault) {
         await guardedRecordSync({
           storageKey: VAULT_KEY,
@@ -516,8 +1188,20 @@
           label: '账号库密文',
           sanitize: sanitizeVaultRecord,
           setAction: 'setAccountVault',
+          setPayload: (remoteEnvelope) => ({
+            vaultLockEpoch: state.vaultLockEpoch,
+            remoteRevision: remoteEnvelope.revision,
+            serverConfirmed: true,
+          }),
           canWrite: (value) => value.canWriteVault,
+          onRemoteEnvelope: (remoteEnvelope) => {
+            updateRemoteVaultState(remoteEnvelope, binding && binding.legacyAvailable === true);
+          },
+          onRemoteDeleted: (remoteEnvelope) => (
+            applyRemoteVaultTombstone(remoteEnvelope, state.vaultLockEpoch)
+          ),
         }, permissions, conflicts);
+        if (syncVaultAuthEpoch !== vaultAuthEpoch) throw new Error('云端登录状态已变化，请重新同步。');
       }
       await guardedRecordSync({
         storageKey: DIRECTORY_KEY,
@@ -529,17 +1213,37 @@
         canWrite: (value) => value.canWriteDirectory,
       }, permissions, conflicts);
       const runs = await syncRuns(permissions, conflicts);
+      if (syncVaultAuthEpoch !== vaultAuthEpoch) throw new Error('云端登录状态已变化，请重新同步。');
       emit('sync-complete', {
         connected: true,
         syncing: false,
         lastSyncedAt: Date.now(),
         lastError: '',
         role: permissions.role,
+        vaultScopeId,
+        vaultLockEpoch: state.vaultLockEpoch,
+        legacyAvailable: state.legacyAvailable,
+        remoteVaultExists: state.remoteVaultExists,
+        remoteVaultRevision: state.remoteVaultRevision,
+        remoteVaultDeleted: state.remoteVaultDeleted,
         conflicts,
         runs,
       });
-      return { ok: true, role: permissions.role, conflicts: conflicts.slice(), runs };
+      teamSessionHeartbeatRevoked = false;
+      scheduleTeamSessionHeartbeat();
+      return {
+        ok: true, role: permissions.role, vaultScopeId,
+        vaultLockEpoch: state.vaultLockEpoch,
+        legacyAvailable: state.legacyAvailable,
+        remoteVaultExists: state.remoteVaultExists,
+        remoteVaultRevision: state.remoteVaultRevision,
+        remoteVaultDeleted: state.remoteVaultDeleted,
+        conflicts: conflicts.slice(), runs,
+      };
     } catch (error) {
+      if (error && (error.status === 401 || error.status === 403)) {
+        await lockAccountVault().catch(() => {});
+      }
       emit('sync-error', {
         syncing: false,
         lastError: error && error.message ? error.message : String(error),
@@ -559,6 +1263,10 @@
 
   function syncNow() {
     if (!state.enabled || stopped) return Promise.resolve({ ok: true, skipped: true });
+    if (vaultMutationPromise) {
+      rerunRequested = true;
+      return vaultMutationPromise.then(() => ({ ok: true, deferred: true }));
+    }
     if (syncPromise) {
       rerunRequested = true;
       return syncPromise;
@@ -600,6 +1308,12 @@
   function stop() {
     stopped = true;
     clearTimeout(syncTimer);
+    clearTeamSessionHeartbeatTimer();
+    clearTeamVaultLockRetryTimer();
+    if (teamSessionHeartbeatController) {
+      teamSessionHeartbeatController.abort(new Error('云同步已停止。'));
+      teamSessionHeartbeatController = null;
+    }
     for (const pending of pendingBridgeRequests.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('云同步已停止。'));
@@ -624,17 +1338,37 @@
         message.keys.some((key) => SYNC_KEYS.has(key))) scheduleSync(1200);
   });
 
+  window.addEventListener('focus', () => {
+    if (teamSessionHeartbeatEnabled()) revalidateTeamSession().catch(() => {});
+  });
+  if (typeof document !== 'undefined' && document && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && teamSessionHeartbeatEnabled()) {
+        revalidateTeamSession().catch(() => {});
+      }
+    });
+  }
+
   let topLevel = false;
   try {
     topLevel = window.top === window;
   } catch (error) {
     topLevel = false;
   }
-  state.enabled = topLevel && !isLocalHost();
+  // cloud-sync.js is injected only into server-rendered pages.  Hostname is
+  // not a deployment signal: the standalone Node server is commonly opened
+  // through localhost/127.0.0.1 as well.  Embedded report/data viewers stay
+  // disabled so they cannot start a second synchronizer.
+  state.enabled = topLevel;
   let readyPromise = Promise.resolve({ ok: true, skipped: true });
   const publicApi = {
     start,
     syncNow,
+    migrateLegacyAccountVault,
+    deleteAccountVault,
+    recreateAccountVault,
+    deleteRun,
+    lockAccountVault,
     stop,
     getState,
     get ready() { return readyPromise; },

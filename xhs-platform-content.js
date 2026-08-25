@@ -16,7 +16,7 @@
     adstar: Object.freeze([
       'projects.list', 'orders.list', 'reports.summary', 'reports.detail', 'identity.get',
     ]),
-    pgy: Object.freeze(['notes.list', 'notes.sum', 'identity.get']),
+    pgy: Object.freeze(['notes.list', 'notes.sum', 'projects.list', 'identity.get']),
     juguang: Object.freeze([
       'reports.query', 'accounts.current', 'accounts.list', 'identity.get',
     ]),

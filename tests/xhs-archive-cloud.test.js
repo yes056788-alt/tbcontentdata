@@ -131,6 +131,27 @@ function xhsRun(runId = 'store-run-fictional-xhs-archive-001') {
   });
 }
 
+function shardedXhsRun(runId = 'store-run-fictional-xhs-sharded-001') {
+  const run = xhsRun(runId);
+  const key = 'xhsAnalysisDetailChunkV1:0000';
+  run.snapshots[XHS_ANALYSIS_KEY].detailArchive = {
+    schema: 'xhsAnalysisDetailManifestV1',
+    schemaVersion: 1,
+    complete: true,
+    chunks: [{ key, index: 0, kind: 'notes', count: 1, bytes: 100, hash: 'fictional' }],
+    sections: { notes: { sourceCount: 1, storedCount: 1, omittedCount: 0 } },
+  };
+  run.snapshots[key] = {
+    schema: 'xhsAnalysisDetailChunkV1',
+    schemaVersion: 1,
+    runId: run.snapshots[XHS_ANALYSIS_KEY].runId,
+    index: 0,
+    kind: 'notes',
+    items: [{ noteId: 'fictional-sharded-note-001' }],
+  };
+  return run;
+}
+
 function createBridgeHarness(initialStorage = {}) {
   const source = read('web-tool-bridge.js');
   const storage = clone(initialStorage);
@@ -377,6 +398,14 @@ function createRunSyncScenario({ localRuns, remoteRuns, inspectPost }) {
 
   const bridge = async (message) => {
     if (message.action === 'ping') return { connected: true, capabilities: ['cloudSync'] };
+    if (message.action === 'bindAccountVaultScope') {
+      return {
+        bound: true,
+        vaultScopeId: 'team:https://fictional-cloud.example',
+        vaultLockEpoch: 0,
+        legacyAvailable: false,
+      };
+    }
     if (message.action === 'getStorage') {
       return message.payload.keys.includes('taobaoStoreRunIndexV1')
         ? { taobaoStoreRunIndexV1: runIndex }
@@ -501,6 +530,45 @@ test('bridge get/import preserves legacy Taobao archives and opens compact XHS a
   assert.deepEqual(
     Object.keys(harness.storage[`taobaoStoreRunV1:${importedId}`].snapshots).sort(),
     [...XHS_KEYS].sort(),
+  );
+});
+
+test('detail shard keys survive bridge import/read/clear and both cloud size guards', async () => {
+  const run = shardedXhsRun();
+  const detailKey = 'xhsAnalysisDetailChunkV1:0000';
+  const harness = createBridgeHarness();
+  const imported = await harness.request('importStoreRun', { runId: run.runId, run });
+
+  assert.equal(imported.ok, true, imported.message);
+  assert.deepEqual(
+    harness.storage[`taobaoStoreRunV1:${run.runId}`].snapshots[detailKey],
+    run.snapshots[detailKey]
+  );
+
+  const liveHarness = createBridgeHarness({
+    [XHS_ANALYSIS_KEY]: run.snapshots[XHS_ANALYSIS_KEY],
+    [detailKey]: run.snapshots[detailKey],
+  });
+  const readResponse = await liveHarness.request('getStorage', { keys: [detailKey] });
+  assert.equal(readResponse.ok, true, readResponse.message);
+  assert.deepEqual(JSON.parse(JSON.stringify(readResponse.data[detailKey])), run.snapshots[detailKey]);
+  const clearResponse = await liveHarness.request('clearStorage', { keys: [XHS_ANALYSIS_KEY] });
+  assert.equal(clearResponse.ok, true, clearResponse.message);
+  assert.equal(liveHarness.storage[XHS_ANALYSIS_KEY], undefined);
+  assert.equal(liveHarness.storage[detailKey], undefined);
+
+  assert.deepEqual(loadCloudUploadApi().sanitizeUploadRun(run, run.runId), run);
+  assert.doesNotThrow(() => loadServerRunApi().assertRunPayloadSafe(run));
+
+  const oversized = shardedXhsRun('store-run-fictional-xhs-sharded-oversized-001');
+  oversized.snapshots[detailKey].oversizedFixture = 'x'.repeat(MAX_XHS_BYTES + 1);
+  assert.throws(
+    () => loadCloudUploadApi().sanitizeUploadRun(oversized, oversized.runId),
+    /8\s*MB|小红书.*超过/i
+  );
+  assert.throws(
+    () => loadServerRunApi().assertRunPayloadSafe(oversized),
+    (error) => error && error.code === 'XHS_SNAPSHOT_TOO_LARGE'
   );
 });
 

@@ -24,6 +24,9 @@ for (const id of [
   'refreshReportBtn', 'exportReportBtn', 'clearReportBtn',
   'reportProgressBar', 'reportSteps', 'reportIndex', 'emptyReport', 'flowSection',
   'guangheSection', 'wxtSection', 'shortVideoSection', 'dmpSection', 'dmpReport',
+  'adstarSection', 'adstarReport', 'adstarContext',
+  'pgySection', 'pgyReport', 'pgyContext',
+  'juguangSection', 'juguangReport', 'juguangContext',
   'flowContext', 'flowReport', 'guangheContext', 'guangheReport',
   'wxtMarketingMount', 'wxtShortVideoMount', 'dmpContext',
 ]) {
@@ -46,8 +49,8 @@ assert.match(server, /style-src 'self' 'unsafe-inline'/);
 assert.doesNotMatch(page, /startContentDiagnosisReport|BUSINESS_DEFENSE_GENERATE_CONTENT_REPORT/);
 assert.match(page, /taobaoContentDiagnosisReportStatusV1/);
 assert.match(page, /taobaoContentDiagnosisWxtReportV1/);
-assert.match(page, /buildGuangheMarkup\('channel', true\)/);
-assert.match(page, /buildGuangheMarkup\('asset', true\)/);
+assert.match(page, /buildGuangheMarkup\('channel', false, \{ exportMode: true \}\)/);
+assert.match(page, /buildGuangheMarkup\('asset', false, \{ exportMode: true \}\)/);
 assert.match(page, /<th colspan="3">内容查看人数<\/th>/);
 assert.match(page, /<th colspan="2">商品点击人数<\/th>/);
 assert.match(page, /<th colspan="2">商品加购人数<\/th>/);
@@ -73,9 +76,10 @@ assert.match(page, /requestBridge\('getStoreRun', \{ runId: ARCHIVE_RUN_ID \}/);
 assert.doesNotMatch(page, /restoreStoreRun/);
 assert.doesNotMatch(page, /五章节合并导出|export-chapter/);
 assert.match(page, /交互式单页报告 · 点击模块查看对应内容/);
-for (const key of ['flow', 'guanghe', 'wxt', 'shortVideo', 'dmp']) {
+for (const key of ['flow', 'guanghe', 'wxt', 'shortVideo', 'dmp', 'adstar', 'pgy', 'juguang']) {
   assert.match(page, new RegExp("key: '" + key + "'"));
 }
+assert.match(page, /String\(sections\.length\)\.padStart\(2, '0'\)/);
 assert.match(page, /role="tablist" aria-label="报告模块"/);
 assert.match(page, /role="tabpanel" aria-labelledby="export-tab-/);
 assert.match(page, /data-export-section/);
@@ -83,7 +87,8 @@ assert.match(page, /data-export-panel/);
 assert.match(page, /panel\.hidden=panel\.dataset\.exportPanel!==key/);
 assert.match(page, /tab\.setAttribute\("aria-selected",String\(active\)\)/);
 assert.match(page, /tab\.tabIndex=active\?0:-1/);
-assert.match(page, /const initialSection = sectionHasData\(activeSection\)/);
+assert.match(page, /const requestedSection = activeSection === 'xiaohongshu'/);
+assert.match(page, /const initialSection = sectionHasData\(requestedSection\)/);
 assert.match(page, /const initialGuangheView = guangheView === 'asset' \? 'asset' : 'channel'/);
 assert.match(page, /data-export-guanghe-view="channel"/);
 assert.match(page, /data-export-guanghe-view="asset"/);
@@ -119,8 +124,11 @@ assert.match(background, /requestedTags: \['年龄', '消费能力等级'\]/);
 const guangheSyncStart = background.indexOf("if (!message || message.type !== 'WXT_SYNC_GUANGHE_CONTENT') return;");
 assert.ok(guangheSyncStart >= 0, 'expected Guanghe sync listener');
 const guangheSyncBlock = background.slice(guangheSyncStart);
-assert.match(guangheSyncBlock, /active: false/);
-assert.doesNotMatch(guangheSyncBlock, /active: true/);
+assert.match(guangheSyncBlock, /withGuangheWorkflow/);
+assert.match(guangheSyncBlock, /prepareGuangheAutomaticSyncTarget/);
+assert.match(guangheSyncBlock, /guangheTarget\.frameId/);
+assert.doesNotMatch(guangheSyncBlock, /chrome\.tabs\.create/);
+assert.doesNotMatch(guangheSyncBlock, /chrome\.tabs\.remove/);
 assert.match(wxt, /markup: reportMarkup\(data\)/);
 assert.match(wxt, /await saveBusinessDefenseWxtSnapshot\(data, 'marketingScene'\)/);
 assert.match(wxt, /markup: shortVideoDiagnosisMarkup\(data\)/);

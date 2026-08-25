@@ -711,90 +711,6 @@ select:hover {
   font-size: 12px;
 }
 
-.xhs-binding-panel {
-  margin-top: 15px;
-  padding: 14px;
-  border: 1px solid #dce2ea;
-  background: #ffffff;
-}
-
-.xhs-binding-head h3 {
-  color: #344054;
-  font-size: 13px;
-}
-
-.xhs-binding-head p {
-  margin: 3px 0 0;
-  color: #667085;
-  font-size: 11px;
-}
-
-.xhs-binding-rows {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.xhs-binding-row {
-  display: flex;
-  min-width: 0;
-  min-height: 70px;
-  gap: 8px;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px;
-  border: 1px solid #dce2ea;
-  background: #f8fafc;
-}
-
-.xhs-binding-row > span {
-  min-width: 0;
-}
-
-.xhs-binding-row strong,
-.xhs-binding-row small {
-  display: block;
-}
-
-.xhs-binding-row strong {
-  color: #344054;
-  font-size: 12px;
-}
-
-.xhs-binding-row small {
-  margin-top: 3px;
-  overflow: hidden;
-  color: #667085;
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.xhs-binding-row .row-action:disabled {
-  color: #98a2b3;
-  cursor: not-allowed;
-  text-decoration: none;
-}
-
-.xhs-binding-state {
-  color: #027a48;
-}
-
-.xhs-binding-state.unbound {
-  color: #667085;
-}
-
-.xhs-binding-empty {
-  grid-column: 1 / -1;
-  margin: 0;
-  padding: 13px 10px;
-  border: 1px dashed #cbd5e1;
-  color: #667085;
-  font-size: 11px;
-  text-align: center;
-}
-
 .task-actions {
   justify-content: flex-end;
   margin-top: 18px;
@@ -2003,10 +1919,6 @@ html.embedded-view .report-shell {
 
   .platform-picker-grid {
     grid-template-columns: 1fr 1fr;
-  }
-
-  .xhs-binding-rows {
-    grid-template-columns: 1fr;
   }
 
   .batch-account-list {

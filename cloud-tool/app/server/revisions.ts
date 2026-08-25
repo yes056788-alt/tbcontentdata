@@ -1,5 +1,7 @@
 import { ApiError, parseInteger } from "./http";
 
+const MAX_EXPECTED_REVISION = Number.MAX_SAFE_INTEGER - 1;
+
 export function parseExpectedRevision(
   request: Request,
   bodyValue: unknown,
@@ -13,10 +15,14 @@ export function parseExpectedRevision(
       .replace(/^"|"$/g, "");
     headerRevision = parseInteger(normalized, "If-Match", {
       min: 0,
+      max: MAX_EXPECTED_REVISION,
       required: true,
     });
   }
-  const bodyRevision = parseInteger(bodyValue, "expectedRevision", { min: 0 });
+  const bodyRevision = parseInteger(bodyValue, "expectedRevision", {
+    min: 0,
+    max: MAX_EXPECTED_REVISION,
+  });
   if (
     headerRevision !== undefined &&
     bodyRevision !== undefined &&

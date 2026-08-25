@@ -56,6 +56,7 @@ export function permissionsForRole(role: MemberRole) {
     canWriteDirectory: managesWorkspace,
     canReadRuns: true,
     canWriteRuns: operates,
+    canDeleteRuns: managesWorkspace,
   };
 }
 

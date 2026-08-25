@@ -7,6 +7,40 @@
 
   const LOGIN_URL = 'https://adstar.alimama.com/index.htm?forward=https%3A%2F%2Fadstar.alimama.com%2Findex.htm';
   const LOGOUT_URL = 'https://adstar.alimama.com/openapi/param2/1/gateway.unionpub/union.logout?forward=https%3A%2F%2Fadstar.alimama.com%2Findex.htm';
+  const cancelledOperations = new Set();
+  const activeOperationCleanups = new Map();
+
+  function operationId(payload) {
+    return String(payload && payload.operationId || '').trim().slice(0, 120);
+  }
+
+  function rememberCancelledOperation(id) {
+    if (!id) return;
+    cancelledOperations.add(id);
+    while (cancelledOperations.size > 200) {
+      const oldest = cancelledOperations.values().next().value;
+      cancelledOperations.delete(oldest);
+    }
+    const cleanup = activeOperationCleanups.get(id);
+    if (typeof cleanup === 'function') {
+      try { cleanup(); } catch (error) {}
+    }
+  }
+
+  async function operationCancelled(payload, delayMs) {
+    const id = operationId(payload);
+    if (!id) return false;
+    if (Number(delayMs) > 0) {
+      await new Promise((resolve) => setTimeout(resolve, Number(delayMs)));
+    } else {
+      await Promise.resolve();
+    }
+    return cancelledOperations.has(id);
+  }
+
+  function cancelledResult() {
+    return { ok: false, code: 'XINGHE_OPERATION_CANCELLED', message: '星河登录操作已取消。' };
+  }
 
   function normalize(value) {
     return String(value || '').normalize('NFKC').replace(/\s+/g, '').toLowerCase();
@@ -105,6 +139,44 @@
     return '';
   }
 
+  function xingheProductApplicationEvidence(text) {
+    if (location.origin !== 'https://adstar.alimama.com' ||
+        !/^\/portal\/v2\/pages\//.test(location.pathname) ||
+        /\/portal\/v2\/pages\/role\/picker\//.test(location.pathname)) {
+      return false;
+    }
+    const pageText = normalize([document.title, text].join(' '));
+    if (!pageText.includes(normalize('\u6dd8\u5b9d\u661f\u6cb3'))) return false;
+    const navigationLabels = [
+      '\u6211\u7684\u661f\u6cb3', '\u6570\u636e\u6d1e\u5bdf', '\u6d3b\u52a8\u62db\u5546', '\u6743\u76ca\u4e2d\u5fc3',
+      '\u8d22\u52a1\u7ba1\u7406', '\u7b56\u7565\u4e2d\u5fc3', '\u8d26\u6237\u7ba1\u7406',
+    ].map(normalize);
+    const navigationCount = navigationLabels.filter((label) => pageText.includes(label)).length;
+    return navigationCount >= 2;
+  }
+
+  function xingheProductSessionEvidence(text) {
+    if (!xingheProductApplicationEvidence(text)) return false;
+    const pageText = String(text || '').normalize('NFKC').replace(/\s+/g, '');
+    if (/\bID:?\d{4,24}\b/i.test(pageText) || /\u9000\u51fa\u767b\u5f55|\u5207\u6362\u8d26\u53f7|\u4f7f\u7528\u5176\u4ed6\u8d26\u53f7\u767b\u5f55/.test(pageText)) {
+      return true;
+    }
+    const accountControls = visibleElements([
+      '[data-user-id]', '[data-account-id]',
+      '[class*="avatar" i]', '[class*="user-info" i]', '[class*="account-info" i]',
+      '[class*="user-name" i]', '[class*="username" i]',
+    ].join(','));
+    return accountControls.some((element) => {
+      const identity = element.getAttribute && (
+        element.getAttribute('data-user-id') || element.getAttribute('data-account-id')
+      );
+      const image = typeof element.querySelector === 'function'
+        ? element.querySelector('img[src]')
+        : null;
+      return Boolean(identity || (image && image.src));
+    });
+  }
+
   function pageState() {
     const text = bodyText();
     const inputs = loginInputs();
@@ -117,7 +189,7 @@
     const hasLoginForm = Boolean(inputs.password ||
       (inputs.account && /\u5bc6\u7801\u767b\u5f55|\u626b\u7801\u767b\u5f55/.test(text)));
     if (hasLoginForm) {
-      if (error) return { kind: 'loginError', message: error };
+      if (error) return { kind: 'loginError', message: '\u661f\u6cb3\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef\u3002' };
       return { kind: 'login', message: '\u7b49\u5f85\u8f93\u5165\u8d26\u53f7\u5bc6\u7801\u3002' };
     }
     if (roles.length) {
@@ -133,13 +205,13 @@
           : '\u661f\u6cb3\u5f53\u524d\u8eab\u4efd\u672a\u6388\u6743\uff0c\u5df2\u4fdd\u7559\u6dd8\u5b9d\u767b\u5f55\u6001\uff0c\u5c06\u7ee7\u7eed\u5176\u4ed6\u5e73\u53f0\u53d6\u6570\u3002',
       };
     }
-    if (error) return { kind: 'loginError', message: error };
+    if (error) return { kind: 'loginError', message: '\u661f\u6cb3\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef\u3002' };
     if (/\/portal\/v2\/pages\/role\/picker\//.test(location.pathname)) {
       return { kind: 'rolePicker', roleCount: 0, message: '\u7b49\u5f85\u9009\u62e9\u767b\u5f55\u8eab\u4efd\u3002' };
     }
     const logout = visibleElements('a').find((element) => /union\.logout/.test(String(element.href || ''))) ||
       findClickable(['\u9000\u51fa', '\u9000\u51fa\u767b\u5f55', '\u4f7f\u7528\u5176\u4ed6\u8d26\u53f7\u767b\u5f55'], true);
-    if (logout) {
+    if (logout || xingheProductSessionEvidence(text)) {
       return { kind: 'loggedIn', accountHint: accountHint(text), message: '\u661f\u6cb3\u5df2\u767b\u5f55\u3002' };
     }
     if (document.readyState === 'complete' && text.length > 80) {
@@ -149,23 +221,39 @@
   }
 
   async function fillLogin(payload) {
+    const id = operationId(payload);
+    if (await operationCancelled(payload, id ? 25 : 0)) return cancelledResult();
     const passwordTab = findClickable(['\u5bc6\u7801\u767b\u5f55'], true);
     if (passwordTab) {
       passwordTab.click();
       await new Promise((resolve) => setTimeout(resolve, 250));
+      if (await operationCancelled(payload, 0)) return cancelledResult();
     }
     const inputs = loginInputs();
     if (!inputs.account || !inputs.password) {
       return { ok: false, message: '\u672a\u627e\u5230\u661f\u6cb3\u8d26\u53f7\u6216\u5bc6\u7801\u8f93\u5165\u6846。' };
     }
-    nativeInput(inputs.account, String(payload && payload.username || ''));
-    nativeInput(inputs.password, String(payload && payload.password || ''));
-    const submit = visibleElements('button,input[type="submit"],[role="button"]').find((element) => (
-      normalize(elementText(element) || element.value) === normalize('\u767b\u5f55')
-    ));
-    if (!submit) return { ok: false, message: '\u672a\u627e\u5230\u661f\u6cb3\u767b\u5f55\u6309\u94ae。' };
-    submit.click();
-    return { ok: true, state: pageState() };
+    if (id) {
+      activeOperationCleanups.set(id, () => {
+        nativeInput(inputs.account, '');
+        nativeInput(inputs.password, '');
+      });
+    }
+    try {
+      if (await operationCancelled(payload, 0)) return cancelledResult();
+      nativeInput(inputs.account, String(payload && payload.username || ''));
+      if (await operationCancelled(payload, 0)) return cancelledResult();
+      nativeInput(inputs.password, String(payload && payload.password || ''));
+      if (await operationCancelled(payload, 0)) return cancelledResult();
+      const submit = visibleElements('button,input[type="submit"],[role="button"]').find((element) => (
+        normalize(elementText(element) || element.value) === normalize('\u767b\u5f55')
+      ));
+      if (!submit) return { ok: false, message: '\u672a\u627e\u5230\u661f\u6cb3\u767b\u5f55\u6309\u94ae。' };
+      submit.click();
+      return { ok: true, state: pageState() };
+    } finally {
+      if (id) activeOperationCleanups.delete(id);
+    }
   }
 
   function roleContainer(button) {
@@ -178,16 +266,18 @@
     return button.parentElement || button;
   }
 
-  function selectRole(payload) {
+  async function selectRole(payload) {
+    if (await operationCancelled(payload, operationId(payload) ? 25 : 0)) return cancelledResult();
     const buttons = roleButtons();
     if (!buttons.length) return { ok: false, message: '\u661f\u6cb3\u8eab\u4efd\u9875\u672a\u627e\u5230\u53ef\u767b\u5f55\u8eab\u4efd。' };
     const keyword = normalize(payload && payload.roleKeyword || '\u54c1\u724c');
     let selected = buttons.find((button) => normalize(elementText(roleContainer(button))).includes(keyword));
     if (!selected && buttons.length === 1) selected = buttons[0];
     if (!selected) {
-      return { ok: false, needsRoleChoice: true, message: '\u672a\u627e\u5230\u5339\u914d\u8eab\u4efd\u201c' + String(payload && payload.roleKeyword || '\u54c1\u724c') + '\u201d。' };
+      return { ok: false, needsRoleChoice: true, message: '\u661f\u6cb3\u672a\u627e\u5230\u5339\u914d\u7684\u767b\u5f55\u8eab\u4efd。' };
     }
     const label = elementText(roleContainer(selected)).slice(0, 180);
+    if (await operationCancelled(payload, 0)) return cancelledResult();
     selected.click();
     return { ok: true, roleLabel: label };
   }
@@ -209,6 +299,11 @@
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || !String(message.type || '').startsWith('XINGHE_')) return;
+    if (message.type === 'XINGHE_CANCEL_OPERATION') {
+      rememberCancelledOperation(operationId(message));
+      sendResponse({ ok: true, cancelled: true });
+      return false;
+    }
     Promise.resolve().then(async () => {
       if (message.type === 'XINGHE_GET_STATE') return { ok: true, state: pageState(), href: location.href };
       if (message.type === 'XINGHE_FILL_LOGIN') return fillLogin(message);
@@ -219,8 +314,8 @@
         return { ok: true };
       }
       return { ok: false, message: '\u672a\u77e5\u661f\u6cb3\u81ea\u52a8\u5316\u64cd\u4f5c。' };
-    }).then(sendResponse).catch((error) => {
-      sendResponse({ ok: false, message: error && error.message ? error.message : String(error) });
+    }).then(sendResponse).catch(() => {
+      sendResponse({ ok: false, message: '\u661f\u6cb3\u9875\u9762\u81ea\u52a8\u5316\u64cd\u4f5c\u5931\u8d25。' });
     });
     return true;
   });

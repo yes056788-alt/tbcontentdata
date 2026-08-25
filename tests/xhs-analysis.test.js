@@ -22,7 +22,7 @@ function pgyNote(sourceKey, cooperation, platformFee, extras = {}) {
     noteId: 'fictional-note-001',
     sourceKey,
     title: '虚构联表笔记',
-    publishDate: '2029-12-01',
+    publishDate: '2030-01-02',
     author: { id: 'fictional-creator-001', name: '虚构达人' },
     costs: {
       cooperation,
@@ -76,6 +76,8 @@ function completeInput() {
     },
     notes: [
       pgyNote('fictional-cooperation-001', 100, 10, {
+        taobaoTaskId: 'fictional-taobao-task-001',
+        taskEndDate: '2030-01-31',
         source: {
           rawPayload: largeRawPayload,
           signedUrl: 'https://media.example/note?noteId=fictional-note-001&xsec_token=fictional-xsec&sign=fictional-signature',
@@ -315,14 +317,7 @@ function completeInput() {
     runId: 'fictional-run-001',
     storeId: 'fictional-store-001',
     dateRange: clone(RANGE),
-    accountBindings: {
-      pgy: ['pgy:fictional-brand-user-001'],
-      juguang: [
-        'juguang:fictional-juguang-brand-001:3001:4:main',
-      ],
-      adstar: ['adstar:fictional-star-member-001'],
-    },
-    generatedAt: '2030-02-01T00:00:00.000Z',
+    generatedAt: '2030-01-31T16:30:00.000Z',
     asOf: '2030-01-30',
     targetRoi: 2,
     collections: { pgy, juguang, adstar },
@@ -350,9 +345,13 @@ test('merges three sources by noteId and aggregates multi-cooperation and multi-
   assert.deepEqual(note.costs, {
     cooperation: 150,
     platformFee: 15,
+    creatorTotal: 165,
     juguang: 100,
     total: 265,
+    periodCreator: 165,
+    periodTotal: 265,
     starTaskAligned: 215,
+    outsideTask: 50,
     outsideDirect: 20,
   });
   assert.deepEqual(snapshot.management.costs, {
@@ -363,6 +362,9 @@ test('merges three sources by noteId and aggregates multi-cooperation and multi-
     total: 265,
     starTaskAligned: 215,
     outsideDirect: 20,
+    juguangInTask: 50,
+    juguangOutsideTask: 50,
+    juguangUnknownTask: 0,
   });
 });
 
@@ -378,13 +380,17 @@ test('merges overlapping Star order intervals, de-duplicates same-note same-day 
   assert.equal(note.star.metrics.seededProductGmv, 240);
   assert.equal(note.star.metrics.linkedProductGmv, 60);
   assert.equal(note.juguang.inTask.spend, 50);
+  assert.equal(note.juguang.outsideTask.spend, 50);
+  assert.equal(note.juguang.alignmentCoverage, 'complete');
   assert.equal(note.juguang.outsideDirect.spend, 20);
-  assert.equal(note.results.starTaskGmv, 500);
-  assert.ok(Math.abs(note.results.starTaskRoi - (500 / 215)) < 1e-12);
+  assert.equal(snapshot.star.coverage, 'complete');
+  assert.equal(note.results.starTaskGmv, 240);
+  assert.ok(Math.abs(note.results.starTaskRoi - (240 / 215)) < 1e-12);
   assert.equal(note.results.outsideDirectGmv, 100);
   assert.equal(note.results.outsideDirectRoi, 5);
-  assert.equal(snapshot.management.starTaskResult.gmv, 500);
-  assert.ok(Math.abs(snapshot.management.starTaskResult.roi - (500 / 215)) < 1e-12);
+  assert.equal(snapshot.management.starTaskResult.gmv, null,
+    'task GMV is unavailable when the store summary omits seeded-product GMV');
+  assert.equal(snapshot.management.starTaskResult.roi, null);
   assert.equal(typeof snapshot.management.starTaskResult.metrics, 'object');
   assert.equal(typeof snapshot.star.store.metrics, 'object');
   assert.deepEqual(snapshot.star.store.metrics, snapshot.management.starTaskResult.metrics,
@@ -406,12 +412,22 @@ test('merges overlapping Star order intervals, de-duplicates same-note same-day 
   assert.deepEqual(snapshot.star.projects.map((item) => item.id), [
     'fictional-project-001', 'fictional-project-002',
   ]);
-  assert.ok(snapshot.star.orders.every((item) => item.allocatedCost === 107.5));
-  assert.ok(snapshot.star.projects.every((item) => item.allocatedCost === 107.5));
+  assert.ok(snapshot.star.orders.every((item) => (
+    !Object.hasOwn(item, 'allocatedCost') && !Object.hasOwn(item, 'roi')
+  )));
+  assert.ok(snapshot.star.projects.every((item) => (
+    !Object.hasOwn(item, 'allocatedCost') && !Object.hasOwn(item, 'roi')
+  )));
+  assert.deepEqual(snapshot.star.projects.map((item) => item.orders.map((order) => order.id)), [
+    ['fictional-order-001'], ['fictional-order-002'],
+  ]);
   assert.equal(snapshot.spotlight.daily.length, 5, 'compact Juguang daily rows remain exportable');
-  assert.equal(snapshot.star.daily.length, 2, 'same-note same-day Star rows remain de-duplicated for export');
+  assert.equal(snapshot.star.daily.length, 0, 'duplicate Star daily facts are omitted from the archive snapshot');
+  assert.equal(snapshot.star.dailyCount, 2, 'the compact snapshot retains the normalized daily fact count');
+  assert.equal(snapshot.star.dailyOmitted, true);
   assert.ok(snapshot.spotlight.daily.every((row) => row.noteId && row.date && row.accountId));
-  assert.ok(snapshot.star.daily.every((row) => row.noteId && row.date && row.metrics));
+  assert.ok(snapshot.notes.every((row) => row.noteId && row.star && row.star.metrics),
+    'joined notes retain the Star metrics consumed by reports and exports');
 });
 
 test('blocks decision actions when any required source is partial', () => {
@@ -430,6 +446,51 @@ test('blocks decision actions when any required source is partial', () => {
   assert.ok(snapshot.actions.every((action) => (
     !['scale', 'stop', 'optimize'].includes(action.action)
   )));
+  const note = noteFrom(snapshot);
+  assert.equal(note.juguang.coverage, 'partial');
+  assert.equal(note.costs.juguang, null);
+  assert.equal(note.costs.starTaskAligned, null);
+  assert.equal(note.costs.outsideTask, null,
+    'partial Juguang coverage must not publish observed outside-task spend as complete');
+});
+
+test('keeps PGY task and overdue counts independent while Star coverage is partial', () => {
+  const input = completeInput();
+  input.collections.adstar.status = 'partial';
+  const snapshot = createXhsAnalysisSnapshot(input);
+
+  assert.equal(snapshot.star.coverage, 'partial');
+  assert.equal(snapshot.pgy.starTaskNoteCount, 1,
+    'PGY Taobao task IDs are complete membership evidence without Star');
+  assert.equal(snapshot.pgy.overdueNoteCount, 1,
+    'PGY task end dates are evaluated against the report generation date without Star');
+  assert.equal(snapshot.pgy.asOf, '2030-02-01');
+});
+
+test('keeps task-period costs unknown when complete sources still contain unalignable Juguang spend', () => {
+  const input = completeInput();
+  for (const project of input.collections.adstar.lists.projects.items) {
+    delete project.startTime;
+    delete project.endTime;
+  }
+  for (const order of input.collections.adstar.lists.orders.items) {
+    delete order.startTime;
+    delete order.endTime;
+  }
+
+  const snapshot = createXhsAnalysisSnapshot(input);
+  const note = noteFrom(snapshot);
+  assert.equal(note.juguang.coverage, 'complete');
+  assert.equal(note.juguang.alignmentCoverage, 'partial');
+  assert.equal(note.juguang.total.spend, 100, 'all-platform spend remains observable');
+  assert.equal(note.costs.starTaskAligned, null);
+  assert.equal(note.costs.outsideTask, null);
+  assert.equal(snapshot.management.costs.starTaskAligned, null);
+  assert.equal(snapshot.star.store.costs.total, null);
+  assert.equal(snapshot.star.store.costs.adInTask, null);
+  assert.equal(snapshot.star.store.metrics.visitCost, null);
+  assert.equal(snapshot.quality.decisionReady, false);
+  assert.ok(snapshot.quality.issues.some((issue) => issue.code === 'juguang_task_period_unknown'));
 });
 
 test('a selected but failed source stays unknown instead of manufacturing automatic zero spend', () => {
@@ -473,7 +534,6 @@ test('a selected source subset never manufactures automatic zeroes for unselecte
   const input = completeInput();
   input.selectedPlatforms = ['adstar'];
   input.collections = { adstar: input.collections.adstar };
-  input.accountBindings = { adstar: input.accountBindings.adstar };
   const snapshot = createXhsAnalysisSnapshot(input);
 
   assert.equal(snapshot.quality.decisionReady, false);
@@ -498,7 +558,7 @@ test('a selected source subset never manufactures automatic zeroes for unselecte
   assert.equal(mapped.inputs.xhs_reportedNoteCount.mode, 'manual_fallback');
 });
 
-test('rejects mismatched date ranges and account bindings at the analysis gate', () => {
+test('rejects mismatched date ranges without binding collected identities to a project store', () => {
   const dateMismatch = completeInput();
   dateMismatch.collections.adstar.dateRange = {
     ...clone(RANGE),
@@ -513,62 +573,34 @@ test('rejects mismatched date ranges and account bindings at the analysis gate',
   const accountMismatch = completeInput();
   accountMismatch.collections.pgy.identity.brandUserId = 'fictional-wrong-brand-user';
   const accountSnapshot = createXhsAnalysisSnapshot(accountMismatch);
-  assert.equal(accountSnapshot.quality.decisionReady, false);
-  assert.ok(accountSnapshot.quality.issues.some((issue) => (
-    issue.code === 'account_binding_mismatch' && issue.platform === 'pgy'
+  assert.equal(accountSnapshot.quality.decisionReady, true);
+  assert.ok(!accountSnapshot.quality.issues.some((issue) => (
+    issue.code === 'account_binding_mismatch'
   )));
 });
 
-test('deduplicates quality issues by code and platform while preserving distinct issue keys', () => {
+test('ignores legacy store identity binding inputs', () => {
   const input = completeInput();
-  input.collections.pgy.identity.brandUserId = 'fictional-wrong-brand-user';
+  input.accountBindings = {
+    pgy: ['pgy:legacy-bound-user'],
+    juguang: ['juguang:legacy-brand:9999:4:main'],
+    adstar: ['adstar:legacy-member'],
+  };
   input.bindingIssues = [
     {
       severity: 'critical',
       code: 'account_binding_mismatch',
       platform: 'pgy',
-      message: 'Binding reconciliation already rejected the PGY account.',
-    },
-    {
-      severity: 'critical',
-      code: 'account_binding_mismatch',
-      platform: 'adstar',
-      message: 'The same code on another platform remains distinct.',
-    },
-    {
-      severity: 'critical',
-      code: 'account_identity_bound_to_other_store',
-      platform: 'pgy',
-      message: 'A different code on the same platform remains distinct.',
+      message: 'Legacy binding input must not affect current analysis.',
     },
   ];
 
   const snapshot = createXhsAnalysisSnapshot(input);
-  const issueKeys = snapshot.quality.issues.map((issue) => `${issue.code}:${issue.platform}`);
-
-  assert.equal(issueKeys.filter((key) => key === 'account_binding_mismatch:pgy').length, 1);
-  assert.ok(issueKeys.includes('account_binding_mismatch:adstar'));
-  assert.ok(issueKeys.includes('account_identity_bound_to_other_store:pgy'));
-});
-
-test('keeps the highest severity when duplicate quality issues share a code and platform', () => {
-  const input = completeInput();
-  input.collections.pgy.identity.brandUserId = 'fictional-wrong-brand-user';
-  input.bindingIssues = [{
-    severity: 'warning',
-    code: 'account_binding_mismatch',
-    platform: 'pgy',
-    message: 'An earlier non-blocking observation must not hide the binding gate.',
-  }];
-
-  const snapshot = createXhsAnalysisSnapshot(input);
-  const matches = snapshot.quality.issues.filter((issue) => (
-    issue.code === 'account_binding_mismatch' && issue.platform === 'pgy'
-  ));
-
-  assert.equal(matches.length, 1);
-  assert.equal(matches[0].severity, 'critical');
-  assert.equal(snapshot.quality.decisionReady, false);
+  assert.equal(snapshot.quality.decisionReady, true);
+  assert.ok(!snapshot.quality.issues.some((issue) => (
+    issue.code === 'account_binding_mismatch' ||
+    issue.code === 'account_identity_bound_to_other_store'
+  )));
 });
 
 test('projects only compact analysis fields and excludes signed URLs, credentials, and raw payloads', () => {

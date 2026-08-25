@@ -6,15 +6,13 @@
   const RUN_INDEX_KEY = 'taobaoStoreRunIndexV1';
   const TASK_STATUS_KEY = 'taobaoProjectTaskStatusV1';
   const BATCH_STATUS_KEY = 'taobaoAccountBatchStatusV1';
-  const XHS_BINDINGS_KEY = 'xhsStoreAccountBindingsV1';
-  const XHS_BINDING_PLATFORMS = Object.freeze({
-    adstar: '淘宝星河',
-    pgy: '蒲公英',
-    juguang: '聚光',
-  });
   const taskType = 'report';
   const pendingRequests = new Map();
   const $ = (selector) => document.querySelector(selector);
+
+  function isPlainObject(value) {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+  }
 
   let connected = false;
   let directory = { storeGroups: [], stores: [] };
@@ -38,15 +36,16 @@
   let selectedStoreId = '';
   let activeMode = 'current';
   let refreshing = false;
-  let xhsBindingSummary = null;
-  let xhsBindingSummaryStoreId = '';
-  let xhsBindingLoading = false;
-  let xhsBindingError = '';
 
   function selectedPlatforms(mode) {
     const picker = document.querySelector('[data-platform-picker="' + mode + '"]');
     return picker ? Array.from(picker.querySelectorAll('input[type="checkbox"]:checked'))
       .map((input) => input.value) : [];
+  }
+
+  function selectedCredentialMode() {
+    const selected = document.querySelector('input[name="credentialMode"]:checked');
+    return selected && selected.value === 'currentSession' ? 'currentSession' : 'vault';
   }
 
   function validatePlatformCapabilities(platforms) {
@@ -92,6 +91,76 @@
     });
   }
 
+  function deleteStoreRun(runId) {
+    function parseServerDeletePermission(session) {
+      const source = isPlainObject(session) ? session : {};
+      const member = isPlainObject(source.member) ? source.member : {};
+      const role = String(source.role || member.role || (source.user && source.user.role) || '').trim().toLowerCase();
+      const permissions = isPlainObject(source.permissions) ? source.permissions : {};
+      const canDelete = permissions.canDeleteRuns == null ? permissions.deleteRuns : permissions.canDeleteRuns;
+      const privileged = role === 'owner' || role === 'admin';
+      const hasPermission = canDelete == null ? privileged : canDelete === true;
+      return hasPermission === true;
+    }
+
+    function extractServerDeleteErrorText(bodyText, status) {
+      if (!bodyText) return '云端删除运行记录失败（HTTP ' + status + '）。';
+      try {
+        const body = JSON.parse(bodyText);
+        const candidate = isPlainObject(body)
+          ? (body.error && (body.error.message || body.error.error) || body.message)
+          : null;
+        if (typeof candidate === 'string' && candidate) return candidate;
+      } catch (error) {}
+      return '云端删除运行记录失败（HTTP ' + status + '）。';
+    }
+
+    async function deleteRunFallbackToServer(targetRunId) {
+      const id = String(targetRunId || '').trim();
+      if (!/^store-run-[a-z0-9-]+$/i.test(id)) {
+        throw new Error('店铺归档编号无效。');
+      }
+      const sessionResponse = await fetch('/api/session', {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      if (!sessionResponse.ok) {
+        throw new Error('当前账号登录已失效，请重新登录后重试。');
+      }
+      const sessionPayload = await sessionResponse.json().catch(() => null);
+      if (!parseServerDeletePermission(sessionPayload)) {
+        throw new Error('当前账号无权限删除运行记录。');
+      }
+      const deleteResponse = await fetch('/api/runs/' + encodeURIComponent(id), {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      if (deleteResponse.status === 404 || deleteResponse.status === 410) {
+        await request('deleteStoreRun', { runId: id }, 30000);
+        return;
+      }
+      if (!deleteResponse.ok) {
+        const deleteText = await deleteResponse.text().catch(() => '');
+        throw new Error(extractServerDeleteErrorText(deleteText, deleteResponse.status));
+      }
+      await request('deleteStoreRun', { runId: id }, 30000);
+    }
+
+    const cloudSync = window.TaobaoCloudSync;
+    if (cloudSync && typeof cloudSync.deleteRun === 'function') {
+      return cloudSync.deleteRun(runId);
+    }
+    const hostname = String(window.location.hostname || '').toLowerCase();
+    const cloudPage = Boolean(document.querySelector('.cloud-team-topbar'));
+    const serverHosted = cloudPage || !['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname);
+    if (!serverHosted) return request('deleteStoreRun', { runId });
+    return deleteRunFallbackToServer(runId);
+  }
+
   function setNotice(message, tone) {
     $('#pageNotice').textContent = message || '';
     $('#pageNotice').dataset.tone = tone || '';
@@ -113,94 +182,6 @@
 
   function storeById(storeId) {
     return directory.stores.find((store) => store.id === storeId) || null;
-  }
-
-  function xhsBindingManagementSupported() {
-    return bridgeCapabilities.has('xhsBindingManagement');
-  }
-
-  function xhsBindingManagementLocked() {
-    return Boolean(
-      taskStatus && taskStatus.running ||
-      batchStatus && (batchStatus.running || batchStatus.paused)
-    );
-  }
-
-  function normalizeXhsBindingSummary(value) {
-    const source = value && typeof value === 'object' ? value : {};
-    const platforms = source.platforms && typeof source.platforms === 'object'
-      ? source.platforms
-      : {};
-    return {
-      platforms: Object.fromEntries(Object.keys(XHS_BINDING_PLATFORMS).map((platform) => {
-        const item = platforms[platform] && typeof platforms[platform] === 'object'
-          ? platforms[platform]
-          : {};
-        const updatedAt = String(item.updatedAt || '').slice(0, 80);
-        return [platform, {
-          bound: item.bound === true,
-          updatedAt: Number.isFinite(Date.parse(updatedAt)) ? updatedAt : '',
-        }];
-      })),
-    };
-  }
-
-  function renderXhsBindingPanel() {
-    const store = storeById(selectedStoreId);
-    $('#xhsBindingStoreName').textContent = store ? store.name : '未选择';
-    if (!store) {
-      $('#xhsBindingRows').innerHTML = '<p class="xhs-binding-empty">选择店铺后查看三平台绑定状态。</p>';
-      return;
-    }
-    if (!xhsBindingManagementSupported()) {
-      $('#xhsBindingRows').innerHTML = '<p class="xhs-binding-empty">当前数据助手版本不支持安全绑定管理，请重新加载最新扩展。</p>';
-      return;
-    }
-    if (xhsBindingError) {
-      $('#xhsBindingRows').innerHTML = '<p class="xhs-binding-empty">' + escapeHtml(xhsBindingError) + '</p>';
-      return;
-    }
-    if (xhsBindingLoading || xhsBindingSummaryStoreId !== store.id || !xhsBindingSummary) {
-      $('#xhsBindingRows').innerHTML = '<p class="xhs-binding-empty">正在读取安全绑定摘要…</p>';
-      return;
-    }
-    const locked = xhsBindingManagementLocked();
-    $('#xhsBindingRows').innerHTML = Object.entries(XHS_BINDING_PLATFORMS).map(([platform, label]) => {
-      const item = xhsBindingSummary.platforms[platform] || { bound: false, updatedAt: '' };
-      const state = item.bound ? '已绑定' : '未绑定';
-      const updated = item.updatedAt ? '记录更新：' + formatDate(item.updatedAt) : '暂无更新时间';
-      return '<div class="xhs-binding-row" role="listitem"><span><strong>' + escapeHtml(label) +
-        ' · <b class="xhs-binding-state' + (item.bound ? '' : ' unbound') + '">' + state + '</b></strong><small>' +
-        escapeHtml(updated) + '</small></span><button class="row-action danger" type="button" data-reset-xhs-binding="' + platform + '"' +
-        (!item.bound || locked ? ' disabled' : '') + '>解除旧绑定</button></div>';
-    }).join('');
-  }
-
-  async function refreshXhsBindingSummary() {
-    const store = storeById(selectedStoreId);
-    if (!store || !connected || !xhsBindingManagementSupported() || xhsBindingManagementLocked()) {
-      renderXhsBindingPanel();
-      return;
-    }
-    const requestedStoreId = store.id;
-    xhsBindingLoading = true;
-    xhsBindingError = '';
-    renderXhsBindingPanel();
-    try {
-      const summary = await request('getXhsBindingSummary', { storeId: requestedStoreId }, 10000);
-      if (selectedStoreId !== requestedStoreId) return;
-      xhsBindingSummary = normalizeXhsBindingSummary(summary);
-      xhsBindingSummaryStoreId = requestedStoreId;
-    } catch (error) {
-      if (selectedStoreId === requestedStoreId) {
-        xhsBindingSummary = null;
-        xhsBindingSummaryStoreId = '';
-        xhsBindingError = error && error.message || '小红书绑定状态读取失败。';
-      }
-    } finally {
-      if (selectedStoreId === requestedStoreId) xhsBindingLoading = false;
-      renderXhsBindingPanel();
-    }
   }
 
   function formatDate(value) {
@@ -456,7 +437,6 @@
   }
 
   function renderStatus() {
-    renderXhsBindingPanel();
     if (activeMode === 'batch') {
       const status = batchStatus || null;
       const sameTask = Boolean(status && (status.taskType === taskType || status.taskType === 'both'));
@@ -495,24 +475,42 @@
     }
 
     const status = taskStatus && taskStatus.taskType === taskType ? taskStatus : null;
-    const runningAnyTask = Boolean(taskStatus && taskStatus.running);
+    const terminal = Boolean(status && status.running !== true && (
+      status.cancelled || status.finishedAt ||
+      ['failed', 'success', 'partial', 'cancelled'].includes(status.status)
+    ));
+    const waitingForVerification = Boolean(status && status.running === true && !terminal && (
+      status.waitingForVerification || status.paused
+    ));
+    const runningAnyTask = Boolean(taskStatus && (
+      taskStatus.running || taskStatus.cancelling
+    ));
     const running = Boolean(status && status.running);
-    $('#taskStatusDescription').textContent = '当前登录账号的一键取数进度';
+    const cancelling = Boolean(status && status.cancelling);
+    const active = running || waitingForVerification;
+    const cancelButton = $('#cancelCurrentTaskBtn');
+    $('#taskStatusDescription').textContent = '单店一键取数进度';
     $('#startCurrentTaskBtn').disabled = !connected || !selectedStoreId || !selectedPlatforms('current').length || runningAnyTask;
+    cancelButton.hidden = !(active || cancelling);
+    cancelButton.disabled = !connected || cancelling || !status || !status.taskId ||
+      !bridgeCapabilities.has('projectTaskCancel');
+    cancelButton.textContent = cancelling ? '正在取消' : '取消任务';
     $('#currentTaskProgress').classList.toggle('running', running);
     $('#currentTaskProgress').style.width = running ? '' : (status && status.finishedAt ? '100%' : '0');
     $('#currentTaskStore').textContent = status && status.storeName || '尚未启动';
     $('#currentTaskState').textContent = status
-      ? (running ? '执行中' : status.error || status.status === 'failed'
+      ? (status.cancelled ? '已取消' : cancelling ? '正在取消' : waitingForVerification ? '等待验证' : running ? '执行中' : status.error || status.status === 'failed'
         ? '失败'
         : status.status === 'partial' ? '部分成功' : '已完成')
       : '等待开始';
     $('#currentTaskCopy').textContent = status
-      ? (status.error || status.phase || '任务状态已更新')
+      ? (terminal
+        ? (status.error || status.phase || '任务状态已更新')
+        : (status.pauseReason || status.error || status.phase || '任务状态已更新'))
       : (runningAnyTask ? '另一类当前账号任务正在执行。' : '选择店铺后启动任务。');
     $('#currentTaskStartedAt').textContent = status ? formatDate(status.startedAt) : '-';
     $('#currentTaskFinishedAt').textContent = status && status.finishedAt ? formatDate(status.finishedAt) : '-';
-    $('#openLatestTaskBtn').hidden = !(status && status.archiveRunId && !running);
+    $('#openLatestTaskBtn').hidden = !(status && status.archiveRunId && !active);
     $('#openLatestTaskBtn').dataset.runId = status && status.archiveRunId || '';
   }
 
@@ -521,7 +519,7 @@
     $('#taskLogCount').textContent = values.length + ' 条';
     $('#taskRunRows').innerHTML = values.length ? values.map((run) => {
       const status = statusInfo(run.status);
-      const mode = run.runMode === 'current' ? '当前登录账号' : '批量账号库';
+      const mode = run.runMode === 'current' ? '单店一键取数' : '批量账号库';
       const actionLabel = '打开报告';
       return '<tr><td><strong>' + escapeHtml(run.storeName || '-') + '</strong></td><td>' + mode + '</td>' +
         '<td>' + escapeHtml(run.accountName || run.usernameMasked || '-') + '</td><td>' + escapeHtml(formatDate(run.finishedAt)) + '</td>' +
@@ -574,7 +572,6 @@
       renderLogs();
       renderBatchSession();
       renderStatus();
-      await refreshXhsBindingSummary();
       if (sessionResponse && sessionResponse.ok === false) {
         setNotice('当前数据助手版本不支持账号库会话，请在扩展管理页重新加载扩展。', 'error');
       }
@@ -628,7 +625,12 @@
     const platforms = selectedPlatforms('current');
     if (!platforms.length) throw new Error('请至少选择一个平台任务。');
     validatePlatformCapabilities(platforms);
+    const credentialMode = selectedCredentialMode();
+    if (credentialMode === 'vault' && !accountSession.unlocked) {
+      throw new Error('请先在账号库管理中解锁一次，再使用账号库自动登录。');
+    }
     const hasXhs = platforms.some((platform) => ['adstar', 'pgy', 'juguang'].includes(platform));
+    const juguangConcurrentTabs = Number($('#juguangConcurrentTabs') && $('#juguangConcurrentTabs').value);
     const dateRange = {
       from: $('#xhsDateFrom').value,
       to: $('#xhsDateTo').value,
@@ -637,7 +639,10 @@
     if (hasXhs && (!dateRange.from || !dateRange.to || dateRange.from > dateRange.to)) {
       throw new Error('请选择有效的小红书开始和结束日期。');
     }
-    if (!window.confirm('使用当前 Chrome 已登录账号为“' + store.name + '”执行一键取数？')) return;
+    const loginDescription = credentialMode === 'vault'
+      ? '使用账号库中该店铺的默认淘宝与小红书账号自动登录'
+      : '复用当前 Chrome 已登录账号';
+    if (!window.confirm(loginDescription + '，并为“' + store.name + '”执行一键取数？')) return;
     taskStatus = {
       taskType,
       runMode: 'current',
@@ -647,47 +652,73 @@
       startedAt: Date.now(),
       phase: '正在启动任务',
       platforms,
+      credentialMode,
     };
     renderStatus();
     setNotice('任务已提交，后台页面会自动打开并执行。');
     const response = await request('startProjectTask', {
       taskType,
       platforms,
+      credentialMode,
       dateRange,
+      concurrentAccountTabs: platforms.includes('juguang') && [2, 3].includes(juguangConcurrentTabs)
+        ? juguangConcurrentTabs
+        : undefined,
       store: { id: store.id, name: store.name, groupId: store.groupId || '', groupName: groupName(store.groupId) },
     }, 30000);
     if (!response || response.ok === false) throw new Error(response && response.message || '任务启动失败。');
     setTimeout(refresh, 350);
   }
 
-  async function resetXhsBinding(platform) {
-    const store = storeById(selectedStoreId);
-    const label = XHS_BINDING_PLATFORMS[platform];
-    if (!store || !label) throw new Error('请先选择店铺和有效的小红书平台。');
-    if (!connected || !xhsBindingManagementSupported()) {
-      throw new Error('当前数据助手不支持安全绑定管理，请重新加载最新扩展。');
+  async function cancelCurrentTask() {
+    const status = taskStatus && taskStatus.taskType === taskType ? taskStatus : null;
+    if (!status || !status.taskId || (
+      !status.running && !status.cancelling &&
+      !status.waitingForVerification && !status.paused
+    )) {
+      throw new Error('当前没有正在执行的当前账号任务。');
     }
-    if (xhsBindingManagementLocked()) throw new Error('任务执行期间不能解除小红书店铺绑定。');
-    const requestedStoreId = store.id;
-    xhsBindingLoading = true;
-    xhsBindingError = '';
-    renderXhsBindingPanel();
+    if (!connected || !bridgeCapabilities.has('projectTaskCancel')) {
+      throw new Error('当前数据助手不支持安全取消，请重新加载最新扩展。');
+    }
+    if (status.cancelling) return;
+    const taskId = status.taskId;
+    const previousPhase = status.phase;
+    taskStatus = Object.assign({}, status, {
+      cancelling: true,
+      phase: '正在请求取消任务',
+    });
+    renderStatus();
     try {
-      const summary = await request('resetXhsBinding', {
-        storeId: requestedStoreId,
-        platform,
-      }, 10000);
-      if (summary && summary.cancelled === true) return;
-      if (selectedStoreId === requestedStoreId) {
-        xhsBindingSummary = normalizeXhsBindingSummary(summary);
-        xhsBindingSummaryStoreId = requestedStoreId;
+      const response = await request('cancelProjectTask', { taskId: status.taskId }, 10000);
+      if (response && response.cancelled === false) {
+        if (taskStatus && taskStatus.taskId === taskId) {
+          taskStatus = Object.assign({}, taskStatus, { cancelling: false, phase: previousPhase });
+          renderStatus();
+        }
+        return;
       }
-      setNotice(label + '旧绑定已解除；下次 READY 采集成功后才会建立新绑定。', 'success');
-    } finally {
-      if (selectedStoreId === requestedStoreId) xhsBindingLoading = false;
-      renderXhsBindingPanel();
+      if (taskStatus && taskStatus.taskId === taskId) {
+        const finished = Boolean(response && response.cancelled === true && response.running === false);
+        taskStatus = Object.assign({}, taskStatus, {
+          running: !finished,
+          cancelling: !finished,
+          cancelled: finished,
+          status: finished ? 'cancelled' : taskStatus.status,
+          finishedAt: finished ? Date.now() : taskStatus.finishedAt,
+          phase: finished ? '任务已取消' : '正在取消，当前步骤结束后停止',
+        });
+        renderStatus();
+      }
+      setNotice(response && response.message || '已提交取消请求。');
+      setTimeout(refresh, 300);
+    } catch (error) {
+      if (taskStatus && taskStatus.taskId === taskId) {
+        taskStatus = Object.assign({}, taskStatus, { cancelling: false, phase: previousPhase });
+        renderStatus();
+      }
+      throw error;
     }
-    await refreshXhsBindingSummary();
   }
 
   async function openRun(runId) {
@@ -702,7 +733,7 @@
       return;
     }
     if (!window.confirm('删除这条运行日志和归档数据？')) return;
-    await request('deleteStoreRun', { runId });
+    await deleteStoreRun(runId);
     runs = runs.filter((run) => run.runId !== runId);
     renderLogs();
     setNotice('运行日志已删除。', 'success');
@@ -727,9 +758,6 @@
     if (message.type === 'storageChanged' && (message.keys || []).some((key) => (
       [DIRECTORY_KEY, RUN_INDEX_KEY, TASK_STATUS_KEY, BATCH_STATUS_KEY].includes(key)
     ))) refresh();
-    else if (message.type === 'storageChanged' && (message.keys || []).includes(XHS_BINDINGS_KEY)) {
-      refreshXhsBindingSummary();
-    }
   });
 
   document.querySelectorAll('[data-task-mode]').forEach((button) => {
@@ -745,14 +773,13 @@
   $('#taskGroupSelect').addEventListener('change', () => { selectedStoreId = ''; renderStoreOptions(); });
   $('#taskStoreSelect').addEventListener('change', (event) => {
     selectedStoreId = event.currentTarget.value;
-    xhsBindingSummary = null;
-    xhsBindingSummaryStoreId = '';
-    xhsBindingError = '';
     renderStatus();
-    refreshXhsBindingSummary();
   });
   $('#startCurrentTaskBtn').addEventListener('click', () => {
     startCurrentTask().catch((error) => { setNotice(error.message, 'error'); refresh(); });
+  });
+  $('#cancelCurrentTaskBtn').addEventListener('click', () => {
+    cancelCurrentTask().catch((error) => { setNotice(error.message, 'error'); refresh(); });
   });
   $('#batchGroupSelect').addEventListener('change', (event) => {
     selectedBatchGroupId = event.currentTarget.value;
@@ -808,15 +835,6 @@
     const button = event.target.closest('[data-run-action]');
     if (button) handleRunAction(button).catch((error) => setNotice(error.message, 'error'));
   });
-  $('#xhsBindingRows').addEventListener('click', (event) => {
-    const button = event.target.closest('[data-reset-xhs-binding]');
-    if (!button || button.disabled) return;
-    resetXhsBinding(button.dataset.resetXhsBinding).catch((error) => {
-      setNotice(error.message, 'error');
-      refreshXhsBindingSummary();
-    });
-  });
-
   initializeXhsDateRange();
   Promise.resolve(window.TaobaoCloudSync && window.TaobaoCloudSync.ready)
     .catch(() => null)
@@ -832,7 +850,10 @@
       setNotice('未连接数据助手，请在 Chrome 扩展管理页重新加载扩展。', 'error');
     });
   setInterval(() => {
-    if (connected && ((taskStatus && taskStatus.running) ||
+    if (connected && ((taskStatus && (
+      taskStatus.running || taskStatus.cancelling ||
+      taskStatus.waitingForVerification || taskStatus.paused
+    )) ||
         (batchStatus && (batchStatus.running || batchStatus.paused)))) refresh();
   }, 2000);
   window.addEventListener('focus', () => { if (connected) refresh(); });

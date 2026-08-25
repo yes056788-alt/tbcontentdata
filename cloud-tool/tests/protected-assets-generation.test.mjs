@@ -26,7 +26,9 @@ const protectedPageAssets = {
     "app.css", "portal.css", "xlsx.full.min.js", "diagnosis-spec.js",
     "xhs-contract.js", "xhs-metrics.js", "diagnosis-popup.js",
   ],
-  "report-view.html": ["app.css", "report.css", "portal.css", "report.js"],
+  "report-view.html": [
+    "app.css", "report.css", "portal.css", "xhs-report-model.js", "report.js",
+  ],
 };
 const extensionFilenames = [
   "adstar-page-hook.js",
@@ -35,7 +37,8 @@ const extensionFilenames = [
   "xhs-platform-content.js",
   "xhs/contract.js",
   "xhs/quality.js",
-  "xhs/bindings.js",
+  "xhs/identity.js",
+  "xhs/account-login.js",
   "xhs/collector-core.js",
   "xhs/local-cache.js",
   "xhs/page-client.js",
@@ -46,6 +49,7 @@ const extensionFilenames = [
   "xhs/runtime.js",
   "xhs/analysis.js",
   "xhs/metrics.js",
+  "xiaohongshu-login-content.js",
   "xinghe-content-script.js",
   "diagnosis-popup.js",
   "rules.js",
@@ -115,6 +119,7 @@ test("keeps protected HTML and extension packages out of static client roots", a
     "cloud-sync.js",
     "xhs-contract.js",
     "xhs-metrics.js",
+    "xhs-report-model.js",
   ]) {
     await access(new URL(`public/${filename}`, siteRoot));
   }
@@ -259,10 +264,10 @@ test("generates the exact protected page and download allowlists around one ZIP"
     assert.equal((generated.LEGACY_PAGE_HTML[filename].match(/id="lockVaultBtn"/g) ?? []).length, 0);
   }
 
-  assert.equal(generated.EXTENSION_PACKAGE_VERSION, "2.37.11");
+  assert.equal(generated.EXTENSION_PACKAGE_VERSION, "2.37.34");
   assert.deepEqual(Array.from(generated.EXTENSION_PACKAGE_FILENAMES), [
     "taobao-data-assistant.zip",
-    "taobao-data-assistant-2.37.11.zip",
+    "taobao-data-assistant-2.37.34.zip",
   ]);
   const archive = Buffer.from(generated.EXTENSION_PACKAGE_BASE64, "base64");
   assert.ok(archive.length > 100_000);

@@ -308,9 +308,10 @@
 
   function requestAutomaticGuangheSync(targetVideoGroups) {
     return new Promise((resolve, reject) => {
+      // Includes waiting for an existing Guanghe workflow, permission recovery and page collection.
       const timeout = window.setTimeout(() => {
-        reject(new Error('光合作品自动同步超时，请检查自动打开的光合页面。'));
-      }, 4 * 60 * 1000);
+        reject(new Error('光合作品自动同步超时，请检查已复用的光合页面。'));
+      }, 16 * 60 * 1000);
       try {
         chrome.runtime.sendMessage({
           type: 'WXT_SYNC_GUANGHE_CONTENT',
@@ -323,9 +324,11 @@
             return;
           }
           if (!response || !response.ok) {
-            reject(new Error(response && response.message
+            const syncError = new Error(response && response.message
               ? response.message
-              : '光合作品自动同步失败。'));
+              : '光合作品自动同步失败。');
+            if (response && response.code) syncError.code = response.code;
+            reject(syncError);
             return;
           }
           resolve(response);
@@ -893,19 +896,35 @@
     return Array.from(new Set(values.map(normalizeLinkedId).filter(Boolean)));
   }
 
-  function readGuangheStorage() {
+  function readGuangheStorage(syncResult) {
     return new Promise((resolve) => {
       try {
+        const storageKey = String(syncResult && syncResult.storageKey || '');
+        const keys = [
+          'gh_wxt_results',
+          'gh_wxt_snapshot_meta',
+          'gh_wxt_data_context',
+          'gh_product_results',
+        ];
+        if (/^gh_wxt_sync_v1:gh-sync-[a-z0-9-]{8,80}$/i.test(storageKey)) {
+          keys.push(storageKey);
+        }
         chrome.storage.local.get(
-          [
-            'gh_wxt_results',
-            'gh_wxt_snapshot_meta',
-            'gh_wxt_data_context',
-            'gh_product_results',
-          ],
+          keys,
           (stored) => {
             try { void chrome.runtime.lastError; } catch (error) {}
-            resolve(stored || {});
+            const values = stored || {};
+            const scoped = storageKey && values[storageKey];
+            if (scoped && typeof scoped === 'object') {
+              values.gh_wxt_results = Array.isArray(scoped.results) ? scoped.results : [];
+              values.gh_wxt_snapshot_meta = scoped.snapshotMeta || {};
+              values.gh_wxt_data_context = scoped.dataContext || {};
+              try {
+                const removal = chrome.storage.local.remove(storageKey);
+                if (removal && typeof removal.catch === 'function') removal.catch(() => {});
+              } catch (error) {}
+            }
+            resolve(values);
           }
         );
       } catch (error) {
@@ -957,7 +976,7 @@
   }
 
   async function enrichShortVideoWithGuanghe(data, syncResult) {
-    const stored = await readGuangheStorage();
+    const stored = await readGuangheStorage(syncResult);
     const context = stored.gh_wxt_data_context || {};
     const snapshot = stored.gh_wxt_snapshot_meta || {};
     const expectedRequestId = String(syncResult && syncResult.requestId || '');
@@ -4209,6 +4228,7 @@
       } catch (syncError) {
         guangheSync = {
           ok: false,
+          code: String(syncError && syncError.code || 'GUANGHE_SYNC_FAILED'),
           message: syncError && syncError.message
             ? syncError.message
             : '光合作品定向匹配失败。',
@@ -4218,7 +4238,8 @@
         guangheSync.ok
           ? '光合已匹配 ' + formatInteger(guangheSync.matchedCount) + '/' +
             formatInteger(guangheSync.targetCount) + ' 个视频，正在关联商品ID…'
-          : '光合匹配未完成，将使用万相台付费数据继续生成报告…',
+          : '光合匹配未完成：' + String(guangheSync.message || '未知原因') +
+            '；将使用万相台付费数据继续生成报告…',
         false
       );
       await enrichShortVideoWithGuanghe(data, guangheSync);
@@ -4311,27 +4332,45 @@
       } catch (syncError) {
         guangheSync = {
           ok: false,
+          code: String(syncError && syncError.code || 'GUANGHE_SYNC_FAILED'),
           message: syncError && syncError.message
             ? syncError.message
             : '光合作品定向匹配失败。',
         };
       }
       await enrichShortVideoWithGuanghe(data, guangheSync);
+      const matchedCount = Number(guangheSync && guangheSync.matchedCount) || 0;
+      const targetCount = targetVideoGroups.length;
+      const guanghePartial = Boolean(
+        !guangheSync || guangheSync.ok === false ||
+        guangheSync.complete === false || guangheSync.timedOut === true ||
+        guangheSync.failed === true || guangheSync.capped === true ||
+        (targetCount > 0 && matchedCount === 0)
+      );
+      let guangheWarning = '';
+      if (!guangheSync || guangheSync.ok === false) {
+        guangheWarning = String(guangheSync && guangheSync.message ||
+          '光合作品匹配未完成，报告使用万相台付费数据。');
+      } else if (targetCount > 0 && matchedCount === 0) {
+        guangheWarning = '光合未匹配到万相台视频，请核对光合权限、登录账号与作品 ID。';
+      } else if (guanghePartial) {
+        guangheWarning = '光合作品匹配未完整扫描，本章已标记为部分完成。';
+      }
       const section = {
         ok: true,
+        partial: guanghePartial,
         savedAt: Date.now(),
         startTime: data.startTime,
         endTime: data.endTime,
-        targetCount: targetVideoGroups.length,
-        matchedCount: Number(guangheSync && guangheSync.matchedCount) || 0,
-        warning: guangheSync && guangheSync.ok === false
-          ? String(guangheSync.message || '光合作品匹配未完成，报告使用万相台付费数据。')
-          : '',
+        targetCount,
+        matchedCount,
+        warning: guangheWarning,
         markup: shortVideoDiagnosisMarkup(data),
       };
       await writeContentDiagnosisWxtSection(runId, 'shortVideo', section);
       return {
         ok: true,
+        partial: section.partial,
         startTime: section.startTime,
         endTime: section.endTime,
         targetCount: section.targetCount,

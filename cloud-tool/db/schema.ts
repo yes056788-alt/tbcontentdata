@@ -246,6 +246,19 @@ export const runs = sqliteTable(
   ],
 );
 
+export const runDeletions = sqliteTable(
+  "run_deletions",
+  {
+    runId: text("run_id").primaryKey(),
+    blobKey: text("blob_key"),
+    deletedBy: text("deleted_by").notNull(),
+    deletedAt: integer("deleted_at", { mode: "timestamp_ms" })
+      .notNull()
+      .default(nowMs),
+  },
+  (table) => [index("run_deletions_deleted_at_idx").on(table.deletedAt)],
+);
+
 export const auditLogs = sqliteTable(
   "audit_logs",
   {

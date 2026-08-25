@@ -373,12 +373,25 @@
         if (item.itemId) productIds.add(String(item.itemId));
       });
     });
-    return new Promise((resolve, reject) => {
-      chrome.storage.local.set({
+    const requestId = String(automaticDataContext.requestId || '');
+    const storageKey = /^gh-sync-[a-z0-9-]{8,80}$/i.test(requestId)
+      ? 'gh_wxt_sync_v1:' + requestId
+      : '';
+    const storageValues = storageKey
+      ? {
+        [storageKey]: {
+          results: parsedRows,
+          snapshotMeta: automaticSnapshotMeta,
+          dataContext: automaticDataContext,
+        },
+      }
+      : {
         gh_wxt_results: parsedRows,
         gh_wxt_snapshot_meta: automaticSnapshotMeta,
         gh_wxt_data_context: automaticDataContext,
-      }, () => {
+      };
+    return new Promise((resolve, reject) => {
+      chrome.storage.local.set(storageValues, () => {
         const error = chrome.runtime.lastError;
         if (error) {
           reject(new Error(error.message || '光合作品数据写入失败。'));
@@ -386,7 +399,8 @@
         }
         resolve({
           ok: true,
-          requestId: automaticDataContext.requestId || '',
+          requestId,
+          storageKey,
           contentCount: parsedRows.length,
           productCount: productIds.size,
           targetCount: Number(automaticDataContext.targetCount) || 0,
@@ -411,10 +425,11 @@
 
   function runAutomaticFullContentSync(requestId, targetVideoGroups) {
     return new Promise((resolve, reject) => {
+      // Covers page readiness, date-condition probing and the bounded 90-second scan.
       const timeout = window.setTimeout(() => {
         cleanup();
         reject(new Error('光合作品定向同步超时，请检查光合页面登录状态。'));
-      }, 3 * 60 * 1000);
+      }, 6 * 60 * 1000);
       let requestTimer = null;
       let started = false;
 
@@ -436,7 +451,9 @@
         }
         if (event.data.type === 'GH_FULL_CONTENT_SYNC_ERROR') {
           cleanup();
-          reject(new Error(event.data.message || '光合作品全量同步失败。'));
+          const error = new Error(event.data.message || '光合作品全量同步失败。');
+          error.code = String(event.data.code || 'GUANGHE_SYNC_FAILED');
+          reject(error);
           return;
         }
         if (event.data.type !== 'GH_FULL_CONTENT_SYNC_DATA') return;
@@ -461,6 +478,10 @@
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message && message.type === 'GH_SYNC_BRIDGE_READY') {
+      sendResponse({ ok: true, href: location.href });
+      return;
+    }
     if (!message || message.type !== 'GH_SYNC_ALL_CONTENT') return;
     const requestId = String(message.requestId || '');
     if (!/^gh-sync-[a-z0-9-]{8,80}$/i.test(requestId)) {
@@ -473,6 +494,7 @@
     runAutomaticFullContentSync(requestId, targetVideoGroups).then(sendResponse).catch((error) => {
       sendResponse({
         ok: false,
+        code: String(error && error.code || 'GUANGHE_SYNC_FAILED'),
         message: error && error.message ? error.message : '光合作品定向同步失败。',
       });
     });
@@ -503,7 +525,6 @@
       });
       if (views.content.results || views.product.results) {
         buildRelationIndexes();
-        console.log(TAG, '已恢复缓存数据');
       }
     });
   }
@@ -2305,5 +2326,4 @@
     +'@media (max-width:900px){.panel-container{width:96vw;height:88vh}.panel-header{align-items:flex-start;flex-wrap:wrap}.panel-controls{order:3;flex-basis:100%;flex-wrap:wrap}.panel-filter-input,.panel-name-filter-input{width:180px}.context-content{grid-template-columns:1fr}.goal-filter-group{max-height:132px;overflow:auto}.col-metric{min-width:86px}}';
   }
 
-  console.log(TAG, 'content-script 已加载');
 })();

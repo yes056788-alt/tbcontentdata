@@ -15,12 +15,14 @@ const syncSource = fs.readFileSync(
 const pageHookPath = path.join(root, 'juguang-page-hook.js');
 const pageHookSource = fs.readFileSync(pageHookPath, 'utf8');
 const platformContentSource = fs.readFileSync(path.join(root, 'xhs-platform-content.js'), 'utf8');
+const accountLogin = require('../xhs/account-login');
 const pageClient = require('../xhs/page-client');
 
 const CHANNEL = 'xhs-page-bridge-v2';
 const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
 const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
 const JUGUANG_ORIGIN = 'https://ad.xiaohongshu.com';
+const JUGUANG_REPORT_ENTRY_PATH = '/aurora/ad/datareports-basic/note';
 const MCC_ORIGIN = 'https://mcc.xiaohongshu.com';
 const REPORT_PATH = '/api/leona/rtb/common/data/report';
 const CURRENT_ACCOUNT_PATH = '/api/edith/get_account_info';
@@ -259,6 +261,15 @@ test('the standalone juguang collector exists', () => {
     true,
     `缺少独立聚光采集器：${collectorResource}`,
   );
+});
+
+test('juguang account login enters the canonical note report instead of the keyword tool', () => {
+  const entryUrl = accountLogin.XHS_PLATFORM_ENTRY_URLS.juguang;
+  const entry = new URL(entryUrl);
+
+  assert.equal(entryUrl, `${JUGUANG_ORIGIN}${JUGUANG_REPORT_ENTRY_PATH}`);
+  assert.equal(entry.pathname, JUGUANG_REPORT_ENTRY_PATH);
+  assert.doesNotMatch(entry.pathname, /\/aurora\/ad\/tools\/newKeywordTool(?:\/|$)/);
 });
 
 test('background service worker imports the standalone juguang collector', () => {

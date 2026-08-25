@@ -10,13 +10,16 @@ import {
   BUSINESS_MIGRATION_CATALOG_SEED,
   BUSINESS_MIGRATION_FORMAT,
   BUSINESS_MIGRATION_MAX_LINE_BYTES,
-  BUSINESS_MIGRATION_VERSION,
   decryptMigrationRecord,
   deriveMigrationKey,
   parseMigrationLine,
   sha256HexText,
   validateMigrationHeader,
 } from "../../lib/business-migration-format.mjs";
+import {
+  isSharedVaultTombstonePayload,
+  SHARED_VAULT_TOMBSTONE_PAYLOAD,
+} from "../../lib/shared-vault-tombstone.mjs";
 
 const RUN_AAD = new TextEncoder().encode("taobao-shared-run-v1");
 const RUN_LIMIT_BYTES = 24 * 1024 * 1024;
@@ -131,14 +134,34 @@ function canonicalVault(recordValue) {
   };
 }
 
-function canonicalVaultRecord(value) {
+function canonicalVaultRecord(value, migrationVersion) {
   const record = plainObject(value, "Vault migration record");
   const revision = safeInteger(record.revision, "Vault revision");
   const vault = optionalObject(record.vault, "Vault ciphertext");
+  const deleted = migrationVersion >= 4
+    ? record.deleted
+    : false;
+  if (migrationVersion >= 4 && typeof deleted !== "boolean") {
+    throw new Error("Vault deletion state is required in migration version 4.");
+  }
+  if (vault && deleted) {
+    throw new Error("Vault migration record cannot contain ciphertext and a deletion state.");
+  }
+  if (migrationVersion >= 4) {
+    if ((vault || deleted) && revision < 1) {
+      throw new Error("Stored vault migration records require a positive revision.");
+    }
+    if (!vault && !deleted && revision !== 0) {
+      throw new Error("An absent vault migration record must use revision zero.");
+    }
+  }
   return {
     vault: vault ? canonicalVault(vault) : null,
+    deleted,
     revision,
-    updatedAt: vault ? timestampMs(record.updatedAt, "Vault record updatedAt") : null,
+    updatedAt: vault || deleted
+      ? timestampMs(record.updatedAt, "Vault record updatedAt")
+      : null,
   };
 }
 
@@ -225,10 +248,21 @@ function canonicalRunRecord(value, name) {
   };
 }
 
+function canonicalRunDeletionRecord(value, name) {
+  if (!/^run-deletions\/\d{8}\.json$/.test(name)) {
+    throw new Error("Run deletion migration record name is invalid.");
+  }
+  const record = plainObject(value, "Run deletion migration record");
+  return {
+    runId: validRunId(record.runId),
+    deletedAt: timestampMs(record.deletedAt, "Run deletion timestamp"),
+  };
+}
+
 function validateManifest(value, header, catalogSha256, recordCount, counts, revisions) {
   const manifest = plainObject(value, "Migration manifest");
   if (manifest.format !== BUSINESS_MIGRATION_FORMAT ||
-      manifest.version !== BUSINESS_MIGRATION_VERSION ||
+      manifest.version !== header.version ||
       manifest.createdAt !== header.createdAt ||
       manifest.consistent !== true ||
       !Number.isFinite(Date.parse(String(manifest.completedAt)))) {
@@ -236,7 +270,7 @@ function validateManifest(value, header, catalogSha256, recordCount, counts, rev
   }
   const catalog = plainObject(manifest.catalog, "Migration manifest catalog");
   if (catalog.algorithm !== BUSINESS_MIGRATION_CATALOG_ALGORITHM ||
-      safeInteger(catalog.records, "Migration catalog record count", 2, 1_000_002) !== recordCount ||
+      safeInteger(catalog.records, "Migration catalog record count", 2, 2_000_002) !== recordCount ||
       typeof catalog.sha256 !== "string" || catalog.sha256 !== catalogSha256 ||
       manifest.catalogSha256 !== catalogSha256) {
     throw new Error("Migration manifest catalog integrity check failed.");
@@ -244,7 +278,13 @@ function validateManifest(value, header, catalogSha256, recordCount, counts, rev
   const totals = plainObject(manifest.totals, "Migration manifest totals");
   if (safeInteger(totals.vault, "Vault total", 0, 1) !== counts.vault ||
       safeInteger(totals.directory, "Directory total", 0, 1) !== counts.directory ||
-      safeInteger(totals.runs, "Run total", 0, 1_000_000) !== counts.runs) {
+      safeInteger(totals.runs, "Run total", 0, 1_000_000) !== counts.runs ||
+      (header.version >= 3 && safeInteger(
+        totals.runDeletions,
+        "Run deletion total",
+        0,
+        1_000_000,
+      ) !== counts.runDeletions)) {
     throw new Error("Migration manifest totals do not match the package.");
   }
   const sourceRevisions = plainObject(manifest.sourceRevisions, "Migration source revisions");
@@ -256,7 +296,9 @@ function validateManifest(value, header, catalogSha256, recordCount, counts, rev
     createdAt: manifest.createdAt,
     completedAt: manifest.completedAt,
     catalogSha256,
-    totals: { ...counts },
+    totals: header.version >= 3
+      ? { ...counts }
+      : { vault: counts.vault, directory: counts.directory, runs: counts.runs },
   };
 }
 
@@ -276,7 +318,10 @@ export async function scanBusinessMigration(source, passphrase, options = {}) {
   let vaultRecord;
   let directoryRecord;
   let runCount = 0;
+  let runDeletionCount = 0;
   let previousRunId = "";
+  let previousRunDeletionId = "";
+  let sawRunDeletion = false;
 
   for await (const rawLine of source.openLines()) {
     lineNumber += 1;
@@ -298,7 +343,7 @@ export async function scanBusinessMigration(source, passphrase, options = {}) {
       if (expectedIndex !== 0 || vaultRecord || decrypted.descriptor.name !== "vault.json") {
         throw new Error("Migration package has an invalid vault record.");
       }
-      vaultRecord = canonicalVaultRecord(decrypted.value);
+      vaultRecord = canonicalVaultRecord(decrypted.value, header.version);
       await options.onRecord?.({ kind: "vault", record: vaultRecord });
     } else if (decrypted.descriptor.kind === "directory") {
       if (expectedIndex !== 1 || directoryRecord || decrypted.descriptor.name !== "directory.json") {
@@ -307,7 +352,7 @@ export async function scanBusinessMigration(source, passphrase, options = {}) {
       directoryRecord = canonicalDirectoryRecord(decrypted.value);
       await options.onRecord?.({ kind: "directory", record: directoryRecord });
     } else if (decrypted.descriptor.kind === "run") {
-      if (!vaultRecord || !directoryRecord ||
+      if (!vaultRecord || !directoryRecord || sawRunDeletion ||
           decrypted.descriptor.name !== `runs/${String(runCount + 1).padStart(8, "0")}.json`) {
         throw new Error("Migration package has an invalid run record ordering.");
       }
@@ -318,6 +363,23 @@ export async function scanBusinessMigration(source, passphrase, options = {}) {
       previousRunId = runRecord.metadata.id;
       runCount += 1;
       await options.onRecord?.({ kind: "run", record: runRecord });
+    } else if (decrypted.descriptor.kind === "run-deletion") {
+      sawRunDeletion = true;
+      if (!vaultRecord || !directoryRecord || header.version < 3 ||
+          decrypted.descriptor.name !==
+            `run-deletions/${String(runDeletionCount + 1).padStart(8, "0")}.json`) {
+        throw new Error("Migration package has an invalid run deletion record ordering.");
+      }
+      const runDeletionRecord = canonicalRunDeletionRecord(
+        decrypted.value,
+        decrypted.descriptor.name,
+      );
+      if (runDeletionRecord.runId <= previousRunDeletionId) {
+        throw new Error("Migration run deletion identifiers are duplicated or not strictly ordered.");
+      }
+      previousRunDeletionId = runDeletionRecord.runId;
+      runDeletionCount += 1;
+      await options.onRecord?.({ kind: "run-deletion", record: runDeletionRecord });
     } else if (decrypted.descriptor.kind === "manifest") {
       if (!vaultRecord || !directoryRecord || decrypted.descriptor.name !== "manifest.json") {
         throw new Error("Migration package has an invalid manifest record.");
@@ -326,6 +388,7 @@ export async function scanBusinessMigration(source, passphrase, options = {}) {
         vault: vaultRecord.vault ? 1 : 0,
         directory: directoryRecord.directory ? 1 : 0,
         runs: runCount,
+        runDeletions: runDeletionCount,
       };
       manifest = validateManifest(
         decrypted.value,
@@ -383,27 +446,127 @@ function targetBusinessCounts(database) {
   const row = database.prepare(`
     SELECT
       (SELECT count(*) FROM shared_vault) AS vault_count,
+      (SELECT encrypted_payload FROM shared_vault WHERE id = 1) AS vault_payload,
       (SELECT count(*) FROM shared_documents) AS directory_count,
-      (SELECT count(*) FROM runs) AS run_count
+      (SELECT count(*) FROM runs) AS run_count,
+      (SELECT count(*) FROM run_deletions) AS run_deletion_count
   `).get();
   return {
     vault: Number(row.vault_count),
+    vaultPayload: row.vault_payload === null || row.vault_payload === undefined
+      ? null
+      : String(row.vault_payload),
     directory: Number(row.directory_count),
     runs: Number(row.run_count),
+    runDeletions: Number(row.run_deletion_count),
   };
 }
 
-function assertEmptyBusinessTarget(database) {
+function assertEmptyBusinessTarget(database, options = {}) {
   const counts = targetBusinessCounts(database);
-  if (counts.vault || counts.directory || counts.runs) {
+  const onlyVaultTombstone =
+    counts.vault === 1 &&
+    counts.directory === 0 &&
+    counts.runs === 0 &&
+    counts.runDeletions === 0 &&
+    isSharedVaultTombstonePayload(counts.vaultPayload);
+  if (onlyVaultTombstone) {
+    if (options.packageHasVault && options.recreateVault !== true) {
+      throw new Error(
+        "Target contains a deleted shared vault; pass recreateVault: true " +
+        "(CLI --recreate-vault) to restore a real vault explicitly.",
+      );
+    }
+    return;
+  }
+  if (counts.vault || counts.directory || counts.runs || counts.runDeletions) {
     throw new Error("Target business tables are not empty; import refuses to overwrite existing data.");
   }
 }
 
-function insertVaultRecord(database, vaultRecord) {
+function insertVaultRecord(database, vaultRecord, recreateVault) {
   const now = Date.now();
+  if (vaultRecord.deleted) {
+    const tombstoneBytes = Buffer.byteLength(SHARED_VAULT_TOMBSTONE_PAYLOAD);
+    const existing = database.prepare(`
+      SELECT encrypted_payload, revision, updated_at
+      FROM shared_vault
+      WHERE id = 1
+      LIMIT 1
+    `).get();
+    if (existing) {
+      if (!isSharedVaultTombstonePayload(existing.encrypted_payload)) {
+        throw new Error("Target shared vault is active; import refuses to overwrite it.");
+      }
+      const revision = Math.max(Number(existing.revision), vaultRecord.revision);
+      const updatedAt = Math.max(
+        Number(existing.updated_at) || 0,
+        vaultRecord.updatedAt ?? now,
+      );
+      database.prepare(`
+        UPDATE shared_vault
+        SET payload_bytes = ?, revision = ?, updated_by = ?, updated_at = ?
+        WHERE id = 1 AND encrypted_payload = ?
+      `).run(
+        tombstoneBytes,
+        revision,
+        IMPORT_ACTOR,
+        updatedAt,
+        SHARED_VAULT_TOMBSTONE_PAYLOAD,
+      );
+      return;
+    }
+    database.prepare(`
+      INSERT INTO shared_vault
+        (id, encrypted_payload, payload_bytes, revision, updated_by, created_at, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?, ?)
+    `).run(
+      SHARED_VAULT_TOMBSTONE_PAYLOAD,
+      tombstoneBytes,
+      vaultRecord.revision,
+      IMPORT_ACTOR,
+      vaultRecord.updatedAt ?? now,
+      vaultRecord.updatedAt ?? now,
+    );
+    return;
+  }
   if (vaultRecord.vault) {
     const payload = JSON.stringify(vaultRecord.vault);
+    const existing = database.prepare(`
+      SELECT encrypted_payload, revision
+      FROM shared_vault
+      WHERE id = 1
+      LIMIT 1
+    `).get();
+    if (existing && isSharedVaultTombstonePayload(existing.encrypted_payload)) {
+      if (recreateVault !== true) {
+        throw new Error(
+          "Target contains a deleted shared vault; explicit recreate intent is required.",
+        );
+      }
+      const revision = Math.max(
+        Number(existing.revision) + 1,
+        vaultRecord.revision,
+      );
+      const result = database.prepare(`
+        UPDATE shared_vault
+        SET encrypted_payload = ?, payload_bytes = ?, revision = ?,
+            updated_by = ?, created_at = ?, updated_at = ?
+        WHERE id = 1 AND encrypted_payload = ?
+      `).run(
+        payload,
+        Buffer.byteLength(payload),
+        revision,
+        IMPORT_ACTOR,
+        now,
+        now,
+        existing.encrypted_payload,
+      );
+      if (result.changes !== 1) {
+        throw new Error("Deleted shared vault changed during explicit recreation.");
+      }
+      return;
+    }
     database.prepare(`
       INSERT INTO shared_vault
         (id, encrypted_payload, payload_bytes, revision, updated_by, created_at, updated_at)
@@ -482,6 +645,24 @@ function insertRunRecord(insertRun, entry) {
   );
 }
 
+function prepareRunDeletionInsert(database) {
+  return database.prepare(`
+    INSERT INTO run_deletions (run_id, deleted_by, deleted_at)
+    VALUES (?, ?, ?)
+  `);
+}
+
+async function insertRunDeletionRecord(database, objectStore, insertRunDeletion, entry) {
+  const activeRun = database.prepare(
+    "SELECT blob_key FROM runs WHERE id = ? LIMIT 1",
+  ).get(entry.runId);
+  insertRunDeletion.run(entry.runId, IMPORT_ACTOR, entry.deletedAt);
+  database.prepare("DELETE FROM runs WHERE id = ?").run(entry.runId);
+  if (activeRun?.blob_key) {
+    await objectStore.delete(String(activeRun.blob_key));
+  }
+}
+
 async function cleanupImportedRunObjects(database, objectStore, untrackedKey) {
   if (untrackedKey) await objectStore.delete(untrackedKey).catch(() => {});
   const page = database.prepare(`
@@ -517,22 +698,31 @@ export async function importBusinessMigration(options) {
   if (!options.database || !options.objectStore) {
     throw new Error("Migration target database and object store are required.");
   }
-  assertEmptyBusinessTarget(options.database);
+  const targetOptions = {
+    packageHasVault: verified.manifest.totals.vault === 1,
+    recreateVault: options.recreateVault === true,
+  };
+  assertEmptyBusinessTarget(options.database, targetOptions);
   const runEncryptionKey = await prepareRunEncryptionKey(options.runDataKey);
   const insertRun = prepareRunInsert(options.database);
+  const insertRunDeletion = prepareRunDeletionInsert(options.database);
   let untrackedKey = "";
   let transactionOpen = false;
   try {
     options.database.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
-    assertEmptyBusinessTarget(options.database);
+    assertEmptyBusinessTarget(options.database, targetOptions);
     const imported = await scanBusinessMigration(source, options.passphrase, {
       async onRecord({ kind, record }) {
         if (kind === "vault") {
-          insertVaultRecord(options.database, record);
+          insertVaultRecord(
+            options.database,
+            record,
+            options.recreateVault === true,
+          );
         } else if (kind === "directory") {
           insertDirectoryRecord(options.database, record);
-        } else {
+        } else if (kind === "run") {
           const key = `runs/${record.metadata.id}.json`;
           untrackedKey = key;
           const encrypted = await encryptRunPayload(record.payload, runEncryptionKey);
@@ -543,6 +733,13 @@ export async function importBusinessMigration(options) {
           });
           insertRunRecord(insertRun, record);
           untrackedKey = "";
+        } else if (kind === "run-deletion") {
+          await insertRunDeletionRecord(
+            options.database,
+            options.objectStore,
+            insertRunDeletion,
+            record,
+          );
         }
       },
     });

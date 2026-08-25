@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { loginPath, recordOf, requestJson, textOf } from "./auth-api";
 import { ArrowIcon, DownloadIcon, KeyIcon, LockIcon, ShieldIcon } from "./icons";
 import { TeamTopbar } from "./team-topbar";
+import { lockVaultAndRedirect } from "./vault-session-lock";
 
 type MigrationSession = {
   name: string;
@@ -63,11 +64,11 @@ export function MigrationClient() {
         if (!active) return;
         setSession(migrationSession(payload));
       })
-      .catch((loadError) => {
+      .catch(async (loadError) => {
         if (!active) return;
         const status = Number(recordOf(loadError).status) || Number((loadError as { status?: number })?.status);
-        if (status === 401) {
-          window.location.replace(loginPath("/migration"));
+        if (status === 401 || status === 403) {
+          await lockVaultAndRedirect(loginPath("/migration"));
           return;
         }
         setError(loadError instanceof Error ? loadError.message : "无法读取当前账号权限。");
@@ -117,6 +118,10 @@ export function MigrationClient() {
         },
         body: JSON.stringify({ passphrase }),
       });
+      if (response.status === 401 || response.status === 403) {
+        await lockVaultAndRedirect(loginPath("/migration"));
+        return;
+      }
       if (!response.ok) throw new Error(await responseError(response));
       if (!response.body) throw new Error("浏览器无法读取迁移数据流，请升级 Chrome 后重试。");
       const writable = await fileHandle.createWritable();
@@ -151,7 +156,7 @@ export function MigrationClient() {
           <div>
             <span className="eyebrow"><ShieldIcon /> OWNER-ONLY BACKUP</span>
             <h1 id="migration-title">加密业务数据迁移</h1>
-            <p>导出共享账号库密文、项目目录与全部历史报告；不会包含登录会话、成员密码、环境密钥或浏览器 Cookie。</p>
+            <p>导出团队密码库密文、项目目录与全部历史报告；不会包含登录会话、成员密码、环境密钥或浏览器 Cookie。</p>
           </div>
           <div className="admin-security-note"><LockIcon /><span><strong>逐记录 AES-GCM</strong><small>PBKDF2 派生独立迁移密钥并生成 SHA-256 manifest</small></span></div>
         </section>
@@ -215,7 +220,7 @@ export function MigrationClient() {
             <aside className="migration-card migration-notes">
               <h2>迁移包安全边界</h2>
               <ul>
-                <li><strong>账号库</strong><span>仅复制浏览器端已加密的 AES-GCM 密文，服务器不会获得主密码。</span></li>
+                <li><strong>密码库</strong><span>仅复制浏览器端已加密的 AES-GCM 密文，服务器不会获得团队主密码。</span></li>
                 <li><strong>历史报告</strong><span>源端校验完整性后逐条重新加密写入迁移包，不在文件中保存运行密钥。</span></li>
                 <li><strong>一致性</strong><span>导出前后会比对 revision 与历史索引；数据发生变化时，目标导入器会拒绝该包。</span></li>
                 <li><strong>明确排除</strong><span>成员登录密码、会话、Cookie、初始化令牌与环境密钥不会进入迁移包。</span></li>

@@ -14,6 +14,7 @@
     'identity.get': { path: '/api/solar/content/note/list', identity: true },
     'notes.list': { path: '/api/solar/content/note/list' },
     'notes.sum': { path: '/api/solar/content/note/list/sum' },
+    'projects.list': { path: '/api/solar/content/project/third_list' },
   });
   const BODY_FIELDS = Object.freeze([
     'brandUserIds', 'startTime', 'endTime', 'pageNum', 'pageSize', 'sorts', 'sceneType',

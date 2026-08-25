@@ -14,6 +14,10 @@ const syncSource = fs.readFileSync(
 );
 const pageHookPath = path.join(root, 'pgy-page-hook.js');
 const pageHookSource = fs.readFileSync(pageHookPath, 'utf8');
+const platformBridgeSource = fs.readFileSync(
+  path.join(root, 'xhs-platform-content.js'),
+  'utf8',
+);
 
 const CHANNEL = 'xhs-page-bridge-v2';
 const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
@@ -40,6 +44,12 @@ const PGY_ENDPOINTS = [
     method: 'POST',
     pathname: '/api/solar/content/note/list',
     payload: { pageNum: 2, pageSize: 30 },
+  },
+  {
+    endpoint: 'projects.list',
+    method: 'POST',
+    pathname: '/api/solar/content/project/third_list',
+    payload: { pageNum: 1, pageSize: 30 },
   },
 ];
 
@@ -205,6 +215,18 @@ test('pgy page hook allowlists identity, sum, and list endpoints with analyzer p
       `蒲公英请求字段白名单缺少：${field}`,
     );
   }
+});
+
+test('pgy content bridge forwards the cross-domain project endpoint', () => {
+  const pgyAllowlist = platformBridgeSource.match(
+    /pgy:\s*Object\.freeze\(\[([\s\S]*?)\]\)/,
+  );
+  assert.ok(pgyAllowlist, '蒲公英内容桥接白名单不存在');
+  assert.match(
+    pgyAllowlist[1],
+    quotedLiteralPattern('projects.list'),
+    '跨域项目分页请求必须通过隔离世界内容桥接转发到页面钩子',
+  );
 });
 
 test('pgy endpoints keep fixed requests, correlate responses, and do not leak secrets or URLs', async () => {

@@ -4,9 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createNodePersistence } from "../db/node.ts";
-import { members, sharedDocuments } from "../db/schema.ts";
+import {
+  members,
+  runDeletions,
+  runs,
+  sharedDocuments,
+} from "../db/schema.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url));
 
@@ -54,6 +59,68 @@ test("Node SQLite migrations, atomic batches and filesystem objects persist", as
         .where(eq(members.id, "duplicate")),
       [],
       "a failed batch must roll back every statement",
+    );
+
+    const deletedRunId = "store-run-node-tombstone";
+    const deletedBlobKey = "runs/store-run-node-tombstone.json";
+    const runRecord = {
+      id: deletedRunId,
+      blobKey: deletedBlobKey,
+      payloadBytes: 20,
+      payloadSha256: "a".repeat(64),
+      createdBy: "test",
+    };
+    await persistence.db.insert(runs).values(runRecord);
+    const [insertedDeletions, deletedRuns] = await persistence.db.batch([
+      persistence.db.insert(runDeletions).values({
+        runId: deletedRunId,
+        blobKey: sql`(
+          select ${runs.blobKey} from ${runs} where ${runs.id} = ${deletedRunId}
+        )`,
+        deletedBy: "test",
+      }).onConflictDoNothing({ target: runDeletions.runId }).returning(),
+      persistence.db.delete(runs)
+        .where(eq(runs.id, deletedRunId))
+        .returning(),
+    ]);
+    assert.equal(insertedDeletions[0]?.blobKey, deletedBlobKey);
+    assert.equal(deletedRuns[0]?.id, deletedRunId);
+    await assert.rejects(
+      persistence.db.insert(runs).values(runRecord),
+      (error) => {
+        let current = error;
+        for (let depth = 0; current && depth < 6; depth += 1) {
+          if (String(current.message || current).includes("RUN_DELETED_TOMBSTONE")) {
+            return true;
+          }
+          current = current.cause;
+        }
+        return false;
+      },
+    );
+    assert.deepEqual(
+      await persistence.db.select().from(runs).where(eq(runs.id, deletedRunId)),
+      [],
+    );
+
+    const rollbackRunId = "store-run-node-tombstone-rollback";
+    await assert.rejects(
+      persistence.db.batch([
+        persistence.db.insert(runDeletions).values({
+          runId: rollbackRunId,
+          deletedBy: "test",
+        }),
+        persistence.db.insert(members).values(member("rollback-member", "one@example.invalid")),
+        persistence.db.insert(members).values(member("rollback-member", "two@example.invalid")),
+      ]),
+    );
+    assert.deepEqual(
+      await persistence.db
+        .select()
+        .from(runDeletions)
+        .where(eq(runDeletions.runId, rollbackRunId)),
+      [],
+      "a failed delete batch must not leave a tombstone behind",
     );
 
     await persistence.db.insert(sharedDocuments).values({

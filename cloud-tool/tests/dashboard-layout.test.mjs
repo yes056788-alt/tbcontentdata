@@ -81,7 +81,10 @@ test("desktop home fills one viewport while narrow layouts can grow naturally", 
 
 test("home exposes a compact retry when cloud state cannot be read", () => {
   assert.doesNotMatch(dashboardSource, /Promise\.allSettled/);
-  assert.match(dashboardSource, /vaultError instanceof ApiError && vaultError\.status === 401/);
+  assert.match(
+    dashboardSource,
+    /vaultError instanceof ApiError &&\s*\(vaultError\.status === 401 \|\| vaultError\.status === 403\)/,
+  );
   assert.match(dashboardSource, /error \? "暂时无法确认账号库状态"/);
   assert.match(dashboardSource, /onClick=\{\(\) => void load\(\)\}[\s\S]*?重新连接/);
 });

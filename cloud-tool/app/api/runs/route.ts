@@ -16,9 +16,33 @@ import {
 } from "@/app/server/runs";
 import { encryptRunPayload } from "@/app/server/run-crypto";
 import { getDb, getRunsBucket } from "@/runtime-db";
-import { runs } from "@/db/schema";
+import { runDeletions, runs } from "@/db/schema";
 
 const MAX_RUN_REQUEST_BYTES = 25 * 1024 * 1024;
+const RUN_DELETED_TOMBSTONE_ERROR = "RUN_DELETED_TOMBSTONE";
+
+function isRunDeletedTombstoneError(error: unknown) {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; current !== undefined && depth < 6; depth += 1) {
+    if (typeof current === "string") {
+      return current.includes(RUN_DELETED_TOMBSTONE_ERROR);
+    }
+    if (!current || typeof current !== "object" || seen.has(current)) {
+      return false;
+    }
+    seen.add(current);
+    if (
+      "message" in current &&
+      typeof current.message === "string" &&
+      current.message.includes(RUN_DELETED_TOMBSTONE_ERROR)
+    ) {
+      return true;
+    }
+    current = "cause" in current ? current.cause : undefined;
+  }
+  return false;
+}
 
 function versionedBlobKey(runId: string, payloadSha256: string) {
   // Each write owns a unique object.  The hash keeps the object
@@ -56,12 +80,24 @@ export async function GET(request: Request) {
         min: 1,
         max: 1_000,
       }) ?? 1_000;
-    const rows = await getDb()
+    const db = getDb();
+    const rows = await db
       .select()
       .from(runs)
+      .where(sql`not exists (
+        select 1 from ${runDeletions}
+        where ${runDeletions.runId} = ${runs.id}
+      )`)
       .orderBy(desc(runs.sourceUpdatedAt), desc(runs.createdAt), desc(runs.id))
       .limit(limit);
-    return jsonResponse({ runs: rows.map(serializeRunMetadata) });
+    const deletions = await db
+      .select({ runId: runDeletions.runId })
+      .from(runDeletions)
+      .orderBy(desc(runDeletions.deletedAt), desc(runDeletions.runId));
+    return jsonResponse({
+      runs: rows.map(serializeRunMetadata),
+      deletedRunIds: deletions.map((item) => item.runId),
+    });
   });
 }
 
@@ -93,6 +129,18 @@ export async function POST(request: Request) {
     }
     const payloadSha256 = await sha256Hex(payload);
     const db = getDb();
+    const [existingDeletion] = await db
+      .select({ runId: runDeletions.runId })
+      .from(runDeletions)
+      .where(eq(runDeletions.runId, metadata.id))
+      .limit(1);
+    if (existingDeletion) {
+      throw new ApiError(
+        410,
+        "RUN_DELETED",
+        "该历史归档已删除，不能由旧客户端重新上传。",
+      );
+    }
     const [existing] = await db
       .select()
       .from(runs)
@@ -186,7 +234,42 @@ export async function POST(request: Request) {
       }
     } catch (error) {
       await deleteBlobOnlyWhenUnreferenced(db, blobKey);
+      if (isRunDeletedTombstoneError(error)) {
+        throw new ApiError(
+          410,
+          "RUN_DELETED",
+          "该历史归档已删除，不能由旧客户端重新上传。",
+        );
+      }
       throw error;
+    }
+
+    const [committedDeletion] = await db
+      .select({ runId: runDeletions.runId })
+      .from(runDeletions)
+      .where(eq(runDeletions.runId, metadata.id))
+      .limit(1);
+    if (committedDeletion) {
+      const [deletedCurrent] = await db
+        .delete(runs)
+        .where(eq(runs.id, metadata.id))
+        .returning({ blobKey: runs.blobKey });
+      await deleteBlobOnlyWhenUnreferenced(db, blobKey);
+      if (deletedCurrent?.blobKey && deletedCurrent.blobKey !== blobKey) {
+        await deleteBlobOnlyWhenUnreferenced(db, deletedCurrent.blobKey);
+      }
+      if (
+        existing?.blobKey &&
+        existing.blobKey !== blobKey &&
+        existing.blobKey !== deletedCurrent?.blobKey
+      ) {
+        await deleteBlobOnlyWhenUnreferenced(db, existing.blobKey);
+      }
+      throw new ApiError(
+        410,
+        "RUN_DELETED",
+        "该历史归档已删除，不能由旧客户端重新上传。",
+      );
     }
 
     const [current] = await db

@@ -418,6 +418,65 @@ test(
       assert.equal(restoredBody.run.runId, runId);
       assert.equal(restoredBody.run.marker, replacementMarker);
 
+      const deleted = await fetch(`${origin}/api/runs/${runId}`, {
+        method: "DELETE",
+        headers: { origin, cookie: restartedCookie },
+      });
+      assert.equal(deleted.status, 200, await deleted.text());
+      assert.deepEqual(await runObjectFiles(dataRoot, runId), []);
+
+      const missingAfterDelete = await fetch(`${origin}/api/runs/${runId}`, {
+        headers: { cookie: restartedCookie },
+      });
+      assert.equal(missingAfterDelete.status, 404);
+
+      const runList = await fetch(`${origin}/api/runs`, {
+        headers: { cookie: restartedCookie },
+      });
+      assert.equal(runList.status, 200);
+      const runListBody = await runList.json();
+      assert.equal(runListBody.runs.some((item) => item.runId === runId), false);
+      assert.ok(runListBody.deletedRunIds.includes(runId));
+
+      const staleReupload = await fetch(`${origin}/api/runs`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin,
+          cookie: restartedCookie,
+        },
+        body: JSON.stringify({
+          expectedAbsent: true,
+          run: {
+            runId,
+            marker: "stale-client-copy",
+            updatedAt: new Date(Date.parse(now) + 3_000).toISOString(),
+            status: "success",
+            failures: [],
+          },
+        }),
+      });
+      assert.equal(staleReupload.status, 410, await staleReupload.text());
+      assert.deepEqual(await runObjectFiles(dataRoot, runId), []);
+
+      const deletedDatabase = new DatabaseSync(join(dataRoot, "team.sqlite"));
+      try {
+        assert.equal(
+          deletedDatabase.prepare("SELECT count(*) AS count FROM runs WHERE id = ?").get(runId).count,
+          0,
+        );
+        assert.equal(
+          deletedDatabase.prepare("SELECT count(*) AS count FROM run_deletions WHERE run_id = ?").get(runId).count,
+          1,
+        );
+        assert.equal(
+          deletedDatabase.prepare("SELECT count(*) AS count FROM audit_logs WHERE action = 'run.deleted' AND target_id = ?").get(runId).count,
+          1,
+        );
+      } finally {
+        deletedDatabase.close();
+      }
+
       const serverBundle = await readFile(
         join(root, "dist", "standalone", "dist", "server", "index.js"),
         "utf8",

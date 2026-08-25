@@ -8,12 +8,13 @@
   const CHANNEL = 'xhs-page-bridge-v2';
   const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
   const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
+  const BRIDGE_UNAVAILABLE_CODE = 'XHS_PAGE_BRIDGE_UNAVAILABLE';
   const MAX_PAYLOAD_BYTES = 64 * 1024;
   const ENDPOINTS = Object.freeze({
     adstar: Object.freeze([
       'projects.list', 'orders.list', 'reports.summary', 'reports.detail', 'identity.get',
     ]),
-    pgy: Object.freeze(['notes.list', 'notes.sum', 'identity.get']),
+    pgy: Object.freeze(['notes.list', 'notes.sum', 'projects.list', 'identity.get']),
     juguang: Object.freeze([
       'reports.query', 'accounts.current', 'accounts.list', 'identity.get',
     ]),
@@ -51,8 +52,27 @@
     return { platform, endpoint, tabId: Number(request.tabId), payload: request.payload || {} };
   }
 
+  function bridgeUnavailableError(error) {
+    const message = String(error && error.message || error || 'XHS page returned no response.');
+    const unavailable = new Error(message);
+    unavailable.code = BRIDGE_UNAVAILABLE_CODE;
+    unavailable.retryable = true;
+    if (error) unavailable.cause = error;
+    return unavailable;
+  }
+
+  function isStaleReceiverError(error) {
+    if (!error) return false;
+    if (error.code === BRIDGE_UNAVAILABLE_CODE) return true;
+    // Page/API failures carry their own stable code and must never be replayed as
+    // transport recovery merely because their human-readable message mentions a response.
+    if (error.code != null) return false;
+    return /(?:receiving end does not exist|could not establish connection|no tab with id|message (?:port|channel) closed before a response|no response)/i
+      .test(String(error.message || error));
+  }
+
   function validateResponse(response, request) {
-    if (!response || typeof response !== 'object') throw new Error('XHS page returned no response.');
+    if (!response || typeof response !== 'object') throw bridgeUnavailableError();
     if (response.channel !== CHANNEL || response.type !== RESPONSE_TYPE) {
       throw new Error('XHS page returned an invalid response envelope.');
     }
@@ -71,6 +91,22 @@
     return response.data;
   }
 
+  function abortError(signal) {
+    const reason = signal && signal.reason;
+    if (reason && typeof reason === 'object' && reason.name === 'AbortError') return reason;
+    const error = new Error(
+      typeof reason === 'string' && reason.trim() ? reason : 'XHS page request was cancelled.'
+    );
+    error.name = 'AbortError';
+    error.code = 'ABORT_ERR';
+    error.retryable = false;
+    return error;
+  }
+
+  function throwIfAborted(signal) {
+    if (signal && signal.aborted) throw abortError(signal);
+  }
+
   function createPageClient(options) {
     const settings = options && typeof options === 'object' ? options : {};
     if (typeof settings.sendMessage !== 'function') throw new Error('sendMessage is required.');
@@ -79,6 +115,8 @@
     return Object.freeze({
       async request(input) {
         const safe = assertRequest(input);
+        const signal = input && input.signal;
+        throwIfAborted(signal);
         const envelope = {
           channel: CHANNEL,
           type: REQUEST_TYPE,
@@ -89,23 +127,43 @@
         };
         const timeoutMs = Math.max(1, Number(input && input.timeoutMs) || defaultTimeoutMs);
         let timer;
-        const timeout = new Promise((resolve, reject) => {
+        let abortListener = null;
+        const timeout = new Promise((_resolve, reject) => {
           timer = setTimeout(() => reject(new Error(`XHS page request timeout after ${timeoutMs} ms.`)), timeoutMs);
         });
+        const aborted = new Promise((_resolve, reject) => {
+          if (!signal || typeof signal.addEventListener !== 'function') return;
+          abortListener = () => reject(abortError(signal));
+          signal.addEventListener('abort', abortListener, { once: true });
+          if (signal.aborted) abortListener();
+        });
+        const sent = Promise.resolve().then(() => {
+          throwIfAborted(signal);
+          return settings.sendMessage(safe.tabId, envelope);
+        });
+        sent.catch(() => {});
         try {
           const response = await Promise.race([
-            Promise.resolve(settings.sendMessage(safe.tabId, envelope)),
+            sent,
             timeout,
+            aborted,
           ]);
+          throwIfAborted(signal);
           return validateResponse(response, envelope);
+        } catch (error) {
+          throwIfAborted(signal);
+          if (isStaleReceiverError(error)) throw bridgeUnavailableError(error);
+          throw error;
         } finally {
           clearTimeout(timer);
+          if (abortListener && signal) signal.removeEventListener('abort', abortListener);
         }
       },
     });
   }
 
   return Object.freeze({
+    BRIDGE_UNAVAILABLE_CODE,
     CHANNEL,
     ENDPOINTS,
     MAX_PAYLOAD_BYTES,

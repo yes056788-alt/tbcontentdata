@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { requestJson } from "./auth-api";
 import { LogoutIcon } from "./icons";
+import { lockAccountVaultSession } from "./vault-session-lock";
 
 export function LogoutButton({ compact = false }: { compact?: boolean }) {
   const [working, setWorking] = useState(false);
@@ -11,6 +12,12 @@ export function LogoutButton({ compact = false }: { compact?: boolean }) {
     if (working) return;
     setWorking(true);
     try {
+      try {
+        await lockAccountVaultSession();
+      } catch {
+        // Logout must still revoke the server session if the extension is not
+        // installed or a transient bridge failure prevents the local lock.
+      }
       await requestJson("/api/auth/logout", { method: "POST", body: "{}" });
     } catch {
       // Always leave the authenticated UI. The server also expires sessions

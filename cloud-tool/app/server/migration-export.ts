@@ -10,8 +10,9 @@ import {
   sha256HexText,
   validateMigrationPassphrase,
 } from "@/lib/business-migration-format.mjs";
+import { isSharedVaultTombstonePayload } from "@/lib/shared-vault-tombstone.mjs";
 import { getDb, getRunsBucket } from "@/runtime-db";
-import { runs, sharedDocuments, sharedVault } from "@/db/schema";
+import { runDeletions, runs, sharedDocuments, sharedVault } from "@/db/schema";
 import { validateDirectory } from "./directory";
 import { decryptRunPayload } from "./run-crypto";
 import { extractRunMetadata, serializeRunMetadata, sha256Hex } from "./runs";
@@ -44,7 +45,8 @@ const MIGRATION_FORBIDDEN_KEYS = new Set([
 ]);
 
 type RunRow = typeof runs.$inferSelect;
-type MigrationRecordKind = "vault" | "directory" | "run" | "manifest";
+type RunDeletionRow = typeof runDeletions.$inferSelect;
+type MigrationRecordKind = "vault" | "directory" | "run" | "run-deletion" | "manifest";
 
 function asRecord(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -109,6 +111,13 @@ function snapshotRun(row: RunRow) {
   };
 }
 
+function snapshotRunDeletion(row: RunDeletionRow) {
+  return {
+    runId: row.runId,
+    deletedAt: timeMs(row.deletedAt),
+  };
+}
+
 async function* pagedRunRows(): AsyncGenerator<RunRow> {
   let cursor = "";
   while (true) {
@@ -130,27 +139,57 @@ async function* pagedRunRows(): AsyncGenerator<RunRow> {
   }
 }
 
+async function* pagedRunDeletionRows(): AsyncGenerator<RunDeletionRow> {
+  let cursor = "";
+  while (true) {
+    const query = getDb()
+      .select()
+      .from(runDeletions)
+      .orderBy(asc(runDeletions.runId))
+      .limit(MIGRATION_RUN_PAGE_SIZE);
+    const page = cursor
+      ? await query.where(gt(runDeletions.runId, cursor))
+      : await query;
+    if (!page.length) return;
+    for (const row of page) {
+      if (row.runId <= cursor) throw new Error("Migration run deletion pagination did not advance.");
+      cursor = row.runId;
+      yield row;
+    }
+    if (page.length < MIGRATION_RUN_PAGE_SIZE) return;
+  }
+}
+
 async function snapshotSeed(vaultRevision: number, directoryRevision: number) {
   return sha256HexText(JSON.stringify({
     format: "taobao-business-source-snapshot",
-    version: 1,
+    version: 2,
     vaultRevision,
     directoryRevision,
   }));
 }
 
 async function appendSnapshotHash(previous: string, row: RunRow) {
-  return sha256HexText(`${previous}\n${JSON.stringify(snapshotRun(row))}`);
+  return sha256HexText(`${previous}\nrun\n${JSON.stringify(snapshotRun(row))}`);
 }
 
-async function scanRunSnapshot(vaultRevision: number, directoryRevision: number) {
+async function appendRunDeletionSnapshotHash(previous: string, row: RunDeletionRow) {
+  return sha256HexText(`${previous}\nrun-deletion\n${JSON.stringify(snapshotRunDeletion(row))}`);
+}
+
+async function scanBusinessSnapshot(vaultRevision: number, directoryRevision: number) {
   let sha256 = await snapshotSeed(vaultRevision, directoryRevision);
-  let count = 0;
+  let runs = 0;
+  let runDeletions = 0;
   for await (const row of pagedRunRows()) {
     sha256 = await appendSnapshotHash(sha256, row);
-    count += 1;
+    runs += 1;
   }
-  return { sha256, count };
+  for await (const row of pagedRunDeletionRows()) {
+    sha256 = await appendRunDeletionSnapshotHash(sha256, row);
+    runDeletions += 1;
+  }
+  return { sha256, runs, runDeletions };
 }
 
 async function currentDocuments() {
@@ -159,7 +198,14 @@ async function currentDocuments() {
     db.select().from(sharedVault).where(eq(sharedVault.id, VAULT_ROW_ID)).limit(1),
     db.select().from(sharedDocuments).where(eq(sharedDocuments.key, DIRECTORY_KEY)).limit(1),
   ]);
-  return { vault: vaultRows[0], directory: directoryRows[0] };
+  const vault = vaultRows[0];
+  return {
+    vault,
+    vaultDeleted: Boolean(
+      vault && isSharedVaultTombstonePayload(vault.encryptedPayload),
+    ),
+    directory: directoryRows[0],
+  };
 }
 
 function migrationRunMetadata(row: RunRow) {
@@ -205,13 +251,15 @@ async function* businessMigrationLines(request: Request, passphrase: string) {
   const header = createMigrationHeader(startedAt);
   const key = await deriveMigrationKey(passphrase, header);
   const source = await currentDocuments();
+  const sourceVaultDeleted = source.vaultDeleted;
   const sourceVaultRevision = source.vault?.revision ?? 0;
   const sourceDirectoryRevision = source.directory?.revision ?? 0;
-  const initialSnapshot = await scanRunSnapshot(sourceVaultRevision, sourceDirectoryRevision);
+  const initialSnapshot = await scanBusinessSnapshot(sourceVaultRevision, sourceDirectoryRevision);
   let exportSnapshotSha256 = await snapshotSeed(sourceVaultRevision, sourceDirectoryRevision);
   let catalogSha256 = BUSINESS_MIGRATION_CATALOG_SEED;
   let index = 0;
   let exportedRuns = 0;
+  let exportedRunDeletions = 0;
 
   const encryptedLine = async (
     kind: MigrationRecordKind,
@@ -233,9 +281,10 @@ async function* businessMigrationLines(request: Request, passphrase: string) {
 
   yield encodeMigrationLine(header);
   yield await encryptedLine("vault", "vault.json", {
-    vault: source.vault
+    vault: source.vault && !sourceVaultDeleted
       ? canonicalMigrationVault(JSON.parse(source.vault.encryptedPayload) as unknown)
       : null,
+    deleted: sourceVaultDeleted,
     revision: sourceVaultRevision,
     updatedAt: source.vault?.updatedAt ?? null,
   });
@@ -255,18 +304,31 @@ async function* businessMigrationLines(request: Request, passphrase: string) {
       { run: await runPayload(row, request), metadata: migrationRunMetadata(row) },
     );
   }
+  for await (const row of pagedRunDeletionRows()) {
+    exportSnapshotSha256 = await appendRunDeletionSnapshotHash(exportSnapshotSha256, row);
+    exportedRunDeletions += 1;
+    yield await encryptedLine(
+      "run-deletion",
+      `run-deletions/${String(exportedRunDeletions).padStart(8, "0")}.json`,
+      snapshotRunDeletion(row),
+    );
+  }
 
   const completedDocuments = await currentDocuments();
+  const completedVaultDeleted = completedDocuments.vaultDeleted;
   const completedVaultRevision = completedDocuments.vault?.revision ?? 0;
   const completedDirectoryRevision = completedDocuments.directory?.revision ?? 0;
-  const completedSnapshot = await scanRunSnapshot(
+  const completedSnapshot = await scanBusinessSnapshot(
     completedVaultRevision,
     completedDirectoryRevision,
   );
   const consistent = completedVaultRevision === sourceVaultRevision &&
+    completedVaultDeleted === sourceVaultDeleted &&
     completedDirectoryRevision === sourceDirectoryRevision &&
-    initialSnapshot.count === exportedRuns &&
-    completedSnapshot.count === exportedRuns &&
+    initialSnapshot.runs === exportedRuns &&
+    completedSnapshot.runs === exportedRuns &&
+    initialSnapshot.runDeletions === exportedRunDeletions &&
+    completedSnapshot.runDeletions === exportedRunDeletions &&
     initialSnapshot.sha256 === exportSnapshotSha256 &&
     completedSnapshot.sha256 === exportSnapshotSha256;
   const manifest = {
@@ -281,12 +343,13 @@ async function* businessMigrationLines(request: Request, passphrase: string) {
       sha256: catalogSha256,
     },
     // Kept as a top-level alias so operator output remains familiar while the
-    // v2 manifest no longer embeds an unbounded entries array.
+    // The manifest never embeds an unbounded entries array.
     catalogSha256,
     totals: {
-      vault: source.vault ? 1 : 0,
+      vault: source.vault && !sourceVaultDeleted ? 1 : 0,
       directory: source.directory ? 1 : 0,
       runs: exportedRuns,
+      runDeletions: exportedRunDeletions,
     },
     sourceRevisions: {
       vault: sourceVaultRevision,

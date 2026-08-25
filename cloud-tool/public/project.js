@@ -10,6 +10,10 @@
   const viewerOverrides = { report: '', data: '' };
   const viewerTokens = { report: 0, data: 0 };
   const $ = (selector) => document.querySelector(selector);
+
+  function isPlainObject(value) {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+  }
   let directory = { schema: 1, storeGroups: [], stores: [] };
   let runs = [];
   let selectedStoreId = '';
@@ -61,6 +65,76 @@
       pendingRequests.set(requestId, { resolve, reject, timer, removeAbortListener });
       window.postMessage({ channel: CHANNEL, type: 'request', requestId, action, payload: payload || {} }, location.origin);
     });
+  }
+
+  function deleteStoreRun(runId) {
+    function parseServerDeletePermission(session) {
+      const source = isPlainObject(session) ? session : {};
+      const member = isPlainObject(source.member) ? source.member : {};
+      const role = String(source.role || member.role || (source.user && source.user.role) || '').trim().toLowerCase();
+      const permissions = isPlainObject(source.permissions) ? source.permissions : {};
+      const canDelete = permissions.canDeleteRuns == null ? permissions.deleteRuns : permissions.canDeleteRuns;
+      const privileged = role === 'owner' || role === 'admin';
+      const hasPermission = canDelete == null ? privileged : canDelete === true;
+      return hasPermission === true;
+    }
+
+    function extractServerDeleteErrorText(bodyText, status) {
+      if (!bodyText) return '云端删除运行记录失败（HTTP ' + status + '）。';
+      try {
+        const body = JSON.parse(bodyText);
+        const candidate = isPlainObject(body)
+          ? (body.error && (body.error.message || body.error.error) || body.message)
+          : null;
+        if (typeof candidate === 'string' && candidate) return candidate;
+      } catch (error) {}
+      return '云端删除运行记录失败（HTTP ' + status + '）。';
+    }
+
+    async function deleteRunFallbackToServer(targetRunId) {
+      const id = String(targetRunId || '').trim();
+      if (!/^store-run-[a-z0-9-]+$/i.test(id)) {
+        throw new Error('店铺归档编号无效。');
+      }
+      const sessionResponse = await fetch('/api/session', {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      if (!sessionResponse.ok) {
+        throw new Error('当前账号登录已失效，请重新登录后重试。');
+      }
+      const sessionPayload = await sessionResponse.json().catch(() => null);
+      if (!parseServerDeletePermission(sessionPayload)) {
+        throw new Error('当前账号无权限删除运行记录。');
+      }
+      const deleteResponse = await fetch('/api/runs/' + encodeURIComponent(id), {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      if (deleteResponse.status === 404 || deleteResponse.status === 410) {
+        await request('deleteStoreRun', { runId: id }, 30000);
+        return;
+      }
+      if (!deleteResponse.ok) {
+        const deleteText = await deleteResponse.text().catch(() => '');
+        throw new Error(extractServerDeleteErrorText(deleteText, deleteResponse.status));
+      }
+      await request('deleteStoreRun', { runId: id }, 30000);
+    }
+
+    const cloudSync = window.TaobaoCloudSync;
+    if (cloudSync && typeof cloudSync.deleteRun === 'function') {
+      return cloudSync.deleteRun(runId);
+    }
+    const hostname = String(window.location.hostname || '').toLowerCase();
+    const cloudPage = Boolean(document.querySelector('.cloud-team-topbar'));
+    const serverHosted = cloudPage || !['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname);
+    if (!serverHosted) return request('deleteStoreRun', { runId });
+    return deleteRunFallbackToServer(runId);
   }
 
   function setNotice(message, tone) {
@@ -745,7 +819,7 @@
       return;
     }
     if (!window.confirm('删除这条历史记录？删除后无法恢复。')) return;
-    await request('deleteStoreRun', { runId });
+    await deleteStoreRun(runId);
     runs = runs.filter((run) => run.runId !== runId);
     if (viewerOverrides.report === runId) viewerOverrides.report = '';
     if (viewerOverrides.data === runId) viewerOverrides.data = '';

@@ -36,10 +36,71 @@
     return `xhs-v1-${hashText(serialized)}-${serialized.length}`;
   }
 
-  function wait(delayMs) {
-    return delayMs > 0
-      ? new Promise((resolve) => setTimeout(resolve, delayMs))
-      : Promise.resolve();
+  function abortError(signal) {
+    const reason = signal && signal.reason;
+    if (reason && typeof reason === 'object' && reason.name === 'AbortError') return reason;
+    const error = new Error(
+      typeof reason === 'string' && reason.trim() ? reason : 'XHS collection was cancelled.'
+    );
+    error.name = 'AbortError';
+    error.code = 'ABORT_ERR';
+    error.retryable = false;
+    return error;
+  }
+
+  function isAbortError(error, signal) {
+    return Boolean(signal && signal.aborted) || Boolean(error) && (
+      error.name === 'AbortError' || error.code === 'ABORT_ERR'
+    );
+  }
+
+  function throwIfAborted(signal) {
+    if (signal && signal.aborted) throw abortError(signal);
+  }
+
+  function raceWithSignal(value, signal) {
+    throwIfAborted(signal);
+    const pending = Promise.resolve(value);
+    if (!signal || typeof signal.addEventListener !== 'function') return pending;
+    let listener = null;
+    const cancelled = new Promise((_resolve, reject) => {
+      listener = () => reject(abortError(signal));
+      signal.addEventListener('abort', listener, { once: true });
+      if (signal.aborted) listener();
+    });
+    return Promise.race([pending, cancelled]).finally(() => {
+      if (listener) signal.removeEventListener('abort', listener);
+    });
+  }
+
+  function wait(delayMs, signal) {
+    throwIfAborted(signal);
+    if (delayMs <= 0) return Promise.resolve();
+    let timer = null;
+    let listener = null;
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        if (listener && signal) signal.removeEventListener('abort', listener);
+        timer = null;
+        listener = null;
+      };
+      listener = () => {
+        cleanup();
+        reject(abortError(signal));
+      };
+      if (signal && typeof signal.addEventListener === 'function') {
+        signal.addEventListener('abort', listener, { once: true });
+        if (signal.aborted) {
+          listener();
+          return;
+        }
+      }
+      timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, delayMs);
+    });
   }
 
   async function withRetry(operation, options) {
@@ -47,16 +108,19 @@
     const retries = Math.max(0, Number(settings.retries) || 0);
     const baseDelayMs = Math.max(0, Number(settings.baseDelayMs) || 0);
     const maxDelayMs = Math.max(baseDelayMs, Number(settings.maxDelayMs) || 5000);
+    const signal = settings.signal;
     let lastError;
     for (let attempt = 0; attempt <= retries; attempt += 1) {
+      throwIfAborted(signal);
       try {
-        return await operation(attempt + 1);
+        return await raceWithSignal(operation(attempt + 1, signal), signal);
       } catch (error) {
+        if (isAbortError(error, signal)) throw abortError(signal);
         lastError = error;
         if (error && error.retryable === false) throw error;
         if (attempt >= retries) break;
         const delay = Math.min(maxDelayMs, baseDelayMs * (2 ** attempt));
-        await wait(delay);
+        await wait(delay, signal);
       }
     }
     throw lastError;
@@ -92,13 +156,19 @@
 
   async function collectPaginated(options) {
     const settings = options && typeof options === 'object' ? options : {};
+    const signal = settings.signal;
+    throwIfAborted(signal);
     if (!settings.cache || typeof settings.cache.open !== 'function') throw new Error('Collection cache is required.');
     if (!settings.cacheKey) throw new Error('Collection cacheKey is required.');
     if (!settings.fingerprint) throw new Error('Collection fingerprint is required.');
     if (typeof settings.fetchPage !== 'function') throw new Error('Collection fetchPage is required.');
     if (typeof settings.parsePage !== 'function') throw new Error('Collection parsePage is required.');
 
-    let record = await settings.cache.open(settings.cacheKey, settings.fingerprint);
+    let record = await raceWithSignal(
+      settings.cache.open(settings.cacheKey, settings.fingerprint),
+      signal
+    );
+    throwIfAborted(signal);
     if (record.status === 'complete' && record.nextPage == null) return resultFromRecord(record, 'complete');
     if (record.cancelRequested) return resultFromRecord(record, 'cancelled');
 
@@ -106,15 +176,17 @@
     let pagesFetched = 0;
     let cancelRequested = false;
     while (true) {
+      throwIfAborted(signal);
       if (record.cancelRequested || cancelRequested) {
         record = await settings.cache.update(settings.cacheKey, { status: 'cancelled' });
         return resultFromRecord(record, 'cancelled');
       }
 
       const response = await withRetry(
-        () => settings.fetchPage(page),
-        settings.retry || { retries: 0 }
+        () => settings.fetchPage(page, signal),
+        Object.assign({}, settings.retry || { retries: 0 }, { signal })
       );
+      throwIfAborted(signal);
       const parsed = settings.parsePage(response, page);
       validateParsedPage(parsed, page);
       const nextPage = parsed.hasNext
@@ -126,6 +198,7 @@
         expectedCount: parsed.total,
         nextPage,
       });
+      throwIfAborted(signal);
       pagesFetched += 1;
 
       let cancelWrite = null;
@@ -184,8 +257,11 @@
   }
 
   return Object.freeze({
+    abortError,
     collectPaginated,
+    isAbortError,
     stableFingerprint,
+    throwIfAborted,
     withRetry,
   });
 });

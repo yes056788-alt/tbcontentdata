@@ -12,7 +12,7 @@ const origins = [
 ];
 const retiredHostedOrigin = ['https://taobao-business-team', 'sunset-camel-1085', 'chatgpt', 'site'].join('.');
 
-assert.equal(manifest.version, '2.37.11');
+assert.equal(manifest.version, '2.37.34');
 const bridgeScript = manifest.content_scripts.find((item) =>
   Array.isArray(item.js) && item.js.includes('web-tool-bridge.js')
 );
@@ -64,7 +64,7 @@ function evaluateBridge(origin, pathname) {
 
 for (const origin of origins) {
   for (const pathname of [
-    '/login', '/setup', '/change-password', '/admin',
+    '/setup',
     '/collect.html',
     '/_next/static/chunks/login.js', '/downloads/taobao-data-assistant.zip',
   ]) {
@@ -82,6 +82,18 @@ for (const origin of origins) {
     assert.equal(evaluated.windowObject.__taobaoFullChainBridgeV1, true, origin + pathname);
     assert.ok(evaluated.posted.some((message) => message.type === 'ready'), origin + pathname);
     assert.equal(evaluated.listeners.length, 1, origin + pathname);
+  }
+
+  for (const pathname of ['/login', '/change-password', '/admin', '/migration']) {
+    const lockOnly = evaluateBridge(origin, pathname);
+    assert.equal(lockOnly.windowObject.__taobaoFullChainBridgeV1, true, origin + pathname);
+    assert.ok(lockOnly.posted.some((message) => (
+      message.type === 'ready' &&
+      Array.isArray(message.capabilities) &&
+      message.capabilities.length === 1 &&
+      message.capabilities[0] === 'accountVaultLock'
+    )), origin + pathname);
+    assert.equal(lockOnly.listeners.length, 1, origin + pathname);
   }
 }
 

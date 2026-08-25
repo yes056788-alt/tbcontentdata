@@ -6,6 +6,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { ClientApiError, isLocalPreview, loginPath, requestJson } from "./auth-api";
 import { TeamTopbar } from "./team-topbar";
 import { ArrowIcon, CheckIcon, EyeIcon, EyeOffIcon, KeyIcon, LockIcon, PeopleIcon, ShieldIcon, UserIcon } from "./icons";
+import { lockVaultAndRedirect } from "./vault-session-lock";
 
 type Role = "owner" | "admin" | "operator" | "viewer";
 type MemberStatus = "active" | "disabled" | "invited";
@@ -168,7 +169,7 @@ export function AdminClient() {
       const sessionPayload = await requestJson("/api/session");
       const nextCurrent = normalizeCurrent(sessionPayload);
       if (nextCurrent.mustChangePassword) {
-        window.location.replace("/change-password");
+        await lockVaultAndRedirect("/change-password");
         return;
       }
       setCurrent(nextCurrent);
@@ -179,8 +180,9 @@ export function AdminClient() {
         setMembers([]);
       }
     } catch (loadError) {
-      if (loadError instanceof ClientApiError && loadError.status === 401 && !isLocalPreview()) {
-        window.location.replace(loginPath("/admin"));
+      if (loadError instanceof ClientApiError &&
+          (loadError.status === 401 || loadError.status === 403) && !isLocalPreview()) {
+        await lockVaultAndRedirect(loginPath("/admin"));
         return;
       }
       if (loadError instanceof ClientApiError && loadError.status === 401 && isLocalPreview()) {
@@ -235,6 +237,11 @@ export function AdminClient() {
       setTemporaryPassword("");
       await load();
     } catch (inviteError) {
+      if (inviteError instanceof ClientApiError &&
+          (inviteError.status === 401 || inviteError.status === 403) && !isLocalPreview()) {
+        await lockVaultAndRedirect(loginPath("/admin"));
+        return;
+      }
       setTemporaryPassword("");
       setError(inviteError instanceof Error ? inviteError.message : "成员开通失败。");
     } finally {
@@ -258,6 +265,11 @@ export function AdminClient() {
       setMembers((items) => items.map((item) => item.id === member.id ? { ...item, ...changes } : item));
       setNotice(`已更新 ${member.email || member.name} 的权限。`);
     } catch (updateError) {
+      if (updateError instanceof ClientApiError &&
+          (updateError.status === 401 || updateError.status === 403) && !isLocalPreview()) {
+        await lockVaultAndRedirect(loginPath("/admin"));
+        return;
+      }
       setError(updateError instanceof Error ? updateError.message : "成员权限更新失败。");
     } finally {
       setUpdatingId("");
@@ -280,6 +292,11 @@ export function AdminClient() {
       setResetPassword("");
       await load();
     } catch (resetError) {
+      if (resetError instanceof ClientApiError &&
+          (resetError.status === 401 || resetError.status === 403) && !isLocalPreview()) {
+        await lockVaultAndRedirect(loginPath("/admin"));
+        return;
+      }
       setResetPassword("");
       setError(resetError instanceof Error ? resetError.message : "临时密码重置失败。");
     } finally {
@@ -302,11 +319,11 @@ export function AdminClient() {
           <div>
             <span className="eyebrow"><ShieldIcon /> 访问控制</span>
             <h1 id="admin-title">团队权限管理</h1>
-            <p>首版为同事开通管理员账号，共同维护账号库、运行任务和历史记录。</p>
+            <p>为同事开通独立登录账号，共同维护团队加密密码库、运行任务和历史记录。</p>
           </div>
           {isOwner ? (
             <a className="admin-security-note" href="/migration" aria-label="打开加密业务数据迁移备份">
-              <KeyIcon /><span><strong>加密迁移备份</strong><small>导出账号库密文、项目目录与全部历史报告</small></span>
+              <KeyIcon /><span><strong>加密迁移备份</strong><small>导出团队密码库密文、项目目录与全部历史报告</small></span>
             </a>
           ) : current?.role === "admin" ? (
             <a className="admin-security-note" href="/owner-recovery" aria-label="使用部署恢复码恢复所有者密码">
@@ -402,8 +419,8 @@ export function AdminClient() {
               <article className="panel roles-panel">
                 <div className="panel__head"><div><span className="section-kicker">ROLE MATRIX</span><h2>角色权限说明</h2></div></div>
                 <div className="role-list">
-                  <div className="role-item role-item--owner"><span>所有者 · 当前开放</span><p>最高权限，可管理所有成员、共享账号库和历史记录。</p></div>
-                  <div className="role-item role-item--admin"><span>管理员 · 当前开放</span><p>可与所有者共同维护共享账号库，并读取、生成和管理团队历史记录。</p></div>
+                  <div className="role-item role-item--owner"><span>所有者 · 当前开放</span><p>最高权限，可管理所有成员、团队密码库和历史记录。</p></div>
+                  <div className="role-item role-item--admin"><span>管理员 · 当前开放</span><p>可与所有者共同维护团队密码库，并读取、生成和管理团队历史记录。</p></div>
                   <div className="role-item role-item--operator"><span>操作员 · 后续开放</span><p>首版暂不创建或分配；后续用于执行取数及生成团队历史。</p></div>
                   <div className="role-item role-item--viewer"><span>只读成员 · 后续开放</span><p>首版暂不创建或分配；后续用于查看共享历史和已生成报告。</p></div>
                 </div>

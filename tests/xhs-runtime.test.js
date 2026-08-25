@@ -57,7 +57,11 @@ function createFakeChrome(tabs = PLATFORM_TABS, options = {}) {
   const runtimeListeners = [];
   const tabQueries = [];
   const tabUpdates = [];
+  const tabCreates = [];
+  const tabRemovals = [];
   const scriptExecutions = [];
+  const mutableTabs = typeof tabs === 'function' ? null : clone(tabs);
+  let nextTabId = Math.max(100, ...(mutableTabs || []).map((tab) => Number(tab.id) || 0)) + 1;
   return {
     runtime: {
       id: 'fixture-extension-id',
@@ -77,11 +81,36 @@ function createFakeChrome(tabs = PLATFORM_TABS, options = {}) {
     tabs: {
       async query(query) {
         tabQueries.push(clone(query));
-        return clone(tabs);
+        return clone(typeof tabs === 'function' ? tabs(tabQueries.length) : mutableTabs);
+      },
+      async create(createProperties) {
+        const tab = {
+          id: nextTabId,
+          url: createProperties.url || 'about:blank',
+          status: 'complete',
+          active: createProperties.active !== false,
+        };
+        nextTabId += 1;
+        tabCreates.push({ properties: clone(createProperties), tab: clone(tab) });
+        if (mutableTabs) mutableTabs.push(tab);
+        return clone(tab);
       },
       async update(tabId, update) {
         tabUpdates.push({ tabId, update: clone(update) });
-        return { id: tabId, url: update.url };
+        if (mutableTabs) {
+          const tab = mutableTabs.find((entry) => Number(entry.id) === Number(tabId));
+          if (tab && update.url) tab.url = update.url;
+        }
+        return { id: tabId, url: update.url, status: 'complete' };
+      },
+      async remove(tabIds) {
+        const ids = (Array.isArray(tabIds) ? tabIds : [tabIds]).map(Number);
+        tabRemovals.push(ids);
+        if (mutableTabs) {
+          for (let index = mutableTabs.length - 1; index >= 0; index -= 1) {
+            if (ids.includes(Number(mutableTabs[index].id))) mutableTabs.splice(index, 1);
+          }
+        }
       },
     },
     scripting: {
@@ -99,7 +128,15 @@ function createFakeChrome(tabs = PLATFORM_TABS, options = {}) {
         return [{ result: { ok: true } }];
       },
     },
-    fixture: { runtimeListeners, storageWrites, tabQueries, tabUpdates, scriptExecutions },
+    fixture: {
+      runtimeListeners,
+      storageWrites,
+      tabQueries,
+      tabUpdates,
+      tabCreates,
+      tabRemovals,
+      scriptExecutions,
+    },
   };
 }
 
@@ -216,6 +253,7 @@ function createRuntimeOptions(overrides = {}) {
       transitionTimeoutMs: overrides.transitionTimeoutMs,
       identityProbeTimeoutMs: overrides.identityProbeTimeoutMs,
       monotonicNow: overrides.monotonicNow,
+      probeVerification: overrides.probeVerification,
     },
     cache,
     dependencies,
@@ -228,6 +266,7 @@ test('the standalone XHS runtime exists and exports the stable entry contract', 
   assert.equal(runtimeModule.MESSAGE_TYPE, MESSAGE_TYPE);
   assert.equal(runtimeModule.STATUS_KEY, STATUS_KEY);
   assert.equal(runtimeModule.RUN_KEY_PREFIX, RUN_KEY_PREFIX);
+  assert.equal(runtimeModule.VERIFICATION_REQUIRED_CODE, 'VERIFICATION_REQUIRED');
   assert.equal(typeof runtimeModule.createXhsRuntime, 'function');
 });
 
@@ -401,8 +440,338 @@ test('runtime invokes adstar and pgy collectors with their exact tabs and shared
   }
   assert.equal(fixture.dependencies.adstar.cache, fixture.cache);
   assert.equal(fixture.dependencies.pgy.cache, fixture.cache);
-  assert.equal(fixture.dependencies.adstar.pageClient, fixture.options.pageClient);
-  assert.equal(fixture.dependencies.pgy.pageClient, fixture.options.pageClient);
+  assert.equal(
+    fixture.dependencies.adstar.pageClient,
+    fixture.dependencies.pgy.pageClient,
+    'all collectors must share the same runtime-owned recovery client',
+  );
+  assert.equal(typeof fixture.dependencies.adstar.pageClient.request, 'function');
+});
+
+test('runtime creates, pins, and closes isolated temporary Juguang tabs for the collector', async () => {
+  const runtimeModule = loadRuntime();
+  const identities = new Map();
+  const requests = [];
+  const pageClient = {
+    async request(input) {
+      requests.push(clone(input));
+      if (input.endpoint === 'accounts.current') return clone(identities.get(Number(input.tabId)));
+      if (input.endpoint === 'reports.query') return { servedByTabId: Number(input.tabId) };
+      throw new Error(`unexpected fixture endpoint: ${input.endpoint}`);
+    },
+  };
+  const collectors = {
+    juguang: (dependencies) => ({
+      async collect(input) {
+        const tabIds = await dependencies.createConcurrentAccountTabs({
+          count: 2,
+          sourceTabId: input.tabId,
+          signal: input.signal,
+        });
+        assert.equal(tabIds.length, 2);
+        const targets = tabIds.map((tabId, index) => ({
+          vSellerId: `fixture-child-${index + 1}`,
+          advertiserId: 7001 + index,
+          accountType: 602,
+          name: `虚构临时账户${index + 1}`,
+        }));
+        for (let index = 0; index < tabIds.length; index += 1) {
+          identities.set(Number(tabIds[index]), clone(targets[index]));
+          await dependencies.switchAccount({
+            tabId: tabIds[index],
+            target: targets[index],
+            pinnedTabId: true,
+            signal: input.signal,
+          });
+        }
+        const report = await dependencies.pageClient.request({
+          tabId: tabIds[0],
+          platform: 'juguang',
+          endpoint: 'reports.query',
+          payload: {},
+          pinnedTabId: true,
+          signal: input.signal,
+        });
+        assert.equal(report.servedByTabId, tabIds[0],
+          'a temporary lane request must not be redirected to the original tab');
+        await dependencies.closeConcurrentAccountTabs({ tabIds });
+        return completeResult('juguang');
+      },
+    }),
+  };
+  const chrome = createFakeChrome([
+    { id: 13, url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note' },
+  ]);
+  identities.set(13, {
+    vSellerId: null, advertiserId: 7000, accountType: 4, name: '虚构主账户',
+  });
+  const fixture = createRuntimeOptions({ chrome, collectors, pageClient });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({
+    runId: 'fixture-juguang-temporary-tabs',
+    platforms: ['juguang'],
+  }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.equal(chrome.fixture.tabCreates.length, 2);
+  assert.deepEqual(chrome.fixture.tabCreates.map((entry) => entry.properties), [
+    { url: 'about:blank', active: false },
+    { url: 'about:blank', active: false },
+  ]);
+  assert.deepEqual(chrome.fixture.tabRemovals, [[101, 102]]);
+  assert.ok(requests.some((request) => (
+    request.endpoint === 'reports.query' && request.tabId === 101
+  )));
+});
+
+test('runtime rejects every XHS source with an enriched verification signal before collecting when the reader confirms a challenge', async (t) => {
+  const runtimeModule = loadRuntime();
+  for (const [platform, tabId] of [['adstar', 11], ['pgy', 12], ['juguang', 13]]) {
+    await t.test(platform, async () => {
+      const probes = [];
+      let collectCount = 0;
+      const fixture = createRuntimeOptions({
+        probeVerification(input) {
+          probes.push(clone(input));
+          return { kind: 'verification' };
+        },
+        collectByPlatform(selectedPlatform) {
+          collectCount += 1;
+          return completeResult(selectedPlatform);
+        },
+      });
+      const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+      await assert.rejects(
+        runtime.run(runInput({
+          runId: `fixture-pre-collection-verification-${platform}`,
+          platforms: [platform],
+        })),
+        (error) => {
+          assert.equal(error.code, 'VERIFICATION_REQUIRED');
+          assert.equal(error.platform, platform);
+          assert.equal(error.tabId, tabId);
+          assert.equal(error.retryable, false);
+          assert.match(error.message, /验证/);
+          return true;
+        },
+      );
+
+      assert.equal(collectCount, 0, '已确认的验证页不得继续调用采集器');
+      assert.deepEqual(probes, [{ platform, tabId }]);
+    });
+  }
+});
+
+test('runtime preserves Promise.allSettled before propagating verification confirmed after a collector error', async () => {
+  const runtimeModule = loadRuntime();
+  const releasePgy = deferred();
+  let adstarProbeCount = 0;
+  let verificationObserved = false;
+  let pgyStarted = false;
+  const fixture = createRuntimeOptions({
+    probeVerification({ platform, tabId }) {
+      if (platform === 'adstar') {
+        adstarProbeCount += 1;
+        if (adstarProbeCount === 2) {
+          verificationObserved = true;
+          return { kind: 'verification' };
+        }
+      }
+      assert.equal(tabId, platform === 'adstar' ? 11 : 12);
+      return { kind: 'productReady' };
+    },
+    async collectByPlatform(platform) {
+      if (platform === 'adstar') {
+        const error = new Error('fixture HTTP 403');
+        error.code = 'ADSTAR_API_ERROR';
+        error.retryable = false;
+        throw error;
+      }
+      pgyStarted = true;
+      await releasePgy.promise;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+  const running = runtime.run(runInput({ platforms: ['adstar', 'pgy'] }));
+  let settled = false;
+  running.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+
+  try {
+    for (let turn = 0; turn < 30 && (!verificationObserved || !pgyStarted); turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(verificationObserved, true, '采集异常后未执行验证状态探针');
+    assert.equal(pgyStarted, true, '并行的蒲公英采集未启动');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false, '验证信号不得跳过仍在运行的并行平台');
+    releasePgy.resolve();
+    await assert.rejects(running, (error) => (
+      error && error.code === 'VERIFICATION_REQUIRED' &&
+      error.platform === 'adstar' && error.tabId === 11 && error.retryable === false
+    ));
+  } finally {
+    releasePgy.resolve();
+    await running.catch(() => {});
+  }
+});
+
+test('runtime probes a non-success collector result and propagates only a confirmed verification state', async () => {
+  const runtimeModule = loadRuntime();
+  let probeCount = 0;
+  const fixture = createRuntimeOptions({
+    probeVerification() {
+      probeCount += 1;
+      return probeCount === 1 ? { kind: 'productReady' } : { kind: 'verification' };
+    },
+    collectByPlatform(platform) {
+      return completeResult(platform, {
+        status: 'failed',
+        schemaValid: false,
+        paginationComplete: false,
+        reconciled: false,
+        errors: [{ code: 'identity_unavailable', message: 'fixture identity unavailable' }],
+      });
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  await assert.rejects(
+    runtime.run(runInput({ platforms: ['pgy'] })),
+    (error) => error && error.code === 'VERIFICATION_REQUIRED' &&
+      error.platform === 'pgy' && error.tabId === 12 && error.retryable === false,
+  );
+  assert.equal(probeCount, 2);
+});
+
+test('runtime keeps a generic 401/403 collection failure when the reader does not confirm verification', async () => {
+  const runtimeModule = loadRuntime();
+  let probeCount = 0;
+  const fixture = createRuntimeOptions({
+    probeVerification() {
+      probeCount += 1;
+      return { kind: 'login' };
+    },
+    collectByPlatform() {
+      const error = new Error('fixture HTTP 403');
+      error.code = 'PGY_API_ERROR';
+      error.retryable = false;
+      throw error;
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['pgy'] }));
+
+  assert.equal(probeCount, 2, '采集前后均应由 reader 做明确状态判定');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.platforms.pgy.status, 'failed');
+  assert.equal(result.platforms.pgy.errors[0].code, 'PGY_API_ERROR');
+  assert.equal(result.platforms.pgy.errors[0].retryable, false);
+});
+
+test('runtime does not trust a collector-created verification-shaped error without reader confirmation', async () => {
+  const runtimeModule = loadRuntime();
+  let probeCount = 0;
+  const fixture = createRuntimeOptions({
+    probeVerification() {
+      probeCount += 1;
+      return { kind: 'login' };
+    },
+    collectByPlatform() {
+      const error = new Error('fixture unconfirmed verification-shaped failure');
+      error.code = 'VERIFICATION_REQUIRED';
+      error.platform = 'pgy';
+      error.tabId = 12;
+      error.retryable = false;
+      throw error;
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['pgy'] }));
+
+  assert.equal(probeCount, 2);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.platforms.pgy.status, 'failed');
+  assert.equal(result.platforms.pgy.errors[0].code, 'VERIFICATION_REQUIRED');
+  assert.match(result.platforms.pgy.errors[0].message, /unconfirmed/);
+});
+
+test('runtime preserves the collection failure when the verification reader cannot return a state', async () => {
+  const runtimeModule = loadRuntime();
+  let probeCount = 0;
+  const fixture = createRuntimeOptions({
+    probeVerification() {
+      probeCount += 1;
+      throw new Error('fixture login state unavailable');
+    },
+    collectByPlatform() {
+      const error = new Error('fixture HTTP 401');
+      error.code = 'JUGUANG_API_ERROR';
+      error.retryable = false;
+      throw error;
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(probeCount, 2);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.platforms.juguang.errors[0].code, 'JUGUANG_API_ERROR');
+  assert.match(result.platforms.juguang.errors[0].message, /HTTP 401/);
+});
+
+test('runtime cancellation wins while a verification probe is pending and releases the active run', { timeout: 1500 }, async () => {
+  const runtimeModule = loadRuntime();
+  let probeStarted = false;
+  let probeCount = 0;
+  let collectCount = 0;
+  const fixture = createRuntimeOptions({
+    probeVerification() {
+      probeCount += 1;
+      if (probeCount === 1) {
+        probeStarted = true;
+        return new Promise(() => {});
+      }
+      return { kind: 'productReady' };
+    },
+    collectByPlatform(platform) {
+      collectCount += 1;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+  const controller = new AbortController();
+  const first = runtime.run(runInput({
+    runId: 'fixture-verification-probe-abort',
+    platforms: ['pgy'],
+    signal: controller.signal,
+  }));
+
+  for (let turn = 0; turn < 30 && !probeStarted; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(probeStarted, true, '运行时未启动验证状态探针');
+  controller.abort();
+  await assert.rejects(first, (error) => (
+    error && (error.name === 'AbortError' || error.code === 'ABORT_ERR') &&
+    error.code !== 'VERIFICATION_REQUIRED'
+  ));
+  assert.equal(collectCount, 0);
+
+  const second = await runtime.run(runInput({
+    runId: 'fixture-verification-probe-after-abort',
+    platforms: ['pgy'],
+  }));
+  assert.equal(second.status, 'complete');
+  assert.equal(collectCount, 1);
 });
 
 test('runtime gives juguang a real tabs.update switch, waits for its bridge, and strongly verifies identity', async () => {
@@ -848,9 +1217,13 @@ test('runtime marks juguang failed when post-navigation account identity does no
   assert.match(result.platforms.juguang.errors[0].message, /vSellerId|identity|账户/i);
 });
 
-test('runtime runs three sources serially, propagates partial independently, and stores only compact output', async () => {
+test('runtime runs three sources concurrently, waits for every source, and stores only compact output', async () => {
   const runtimeModule = loadRuntime();
   const lifecycle = [];
+  const startedPlatforms = new Set();
+  const releases = Object.fromEntries([
+    'adstar', 'pgy', 'juguang',
+  ].map((platform) => [platform, deferred()]));
   let active = 0;
   let maxActive = 0;
   const fixture = createRuntimeOptions({
@@ -858,7 +1231,8 @@ test('runtime runs three sources serially, propagates partial independently, and
       active += 1;
       maxActive = Math.max(maxActive, active);
       lifecycle.push(`start:${platform}`);
-      await new Promise((resolve) => setImmediate(resolve));
+      startedPlatforms.add(platform);
+      await releases[platform].promise;
       lifecycle.push(`finish:${platform}`);
       active -= 1;
       const status = platform === 'pgy' ? 'partial' : 'complete';
@@ -891,18 +1265,65 @@ test('runtime runs three sources serially, propagates partial independently, and
     },
   });
   const runtime = runtimeModule.createXhsRuntime(fixture.options);
-  const result = await runtime.run(runInput());
+  const runPromise = runtime.run(runInput());
+  let runSettled = false;
+  runPromise.then(
+    () => { runSettled = true; },
+    () => { runSettled = true; },
+  );
+  let result;
 
-  assert.equal(maxActive, 1);
-  assert.deepEqual(lifecycle, [
-    'start:adstar', 'finish:adstar',
-    'start:pgy', 'finish:pgy',
-    'start:juguang', 'finish:juguang',
-  ]);
+  try {
+    for (let turn = 0; turn < 20 && startedPlatforms.size < 3; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const initialStatus = fixture.chrome.fixture.storageWrites
+      .find((write) => Object.prototype.hasOwnProperty.call(write, STATUS_KEY))[STATUS_KEY];
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(initialStatus.platforms).map(([platform, value]) => (
+        [platform, value.status]
+      ))),
+      { adstar: 'running', pgy: 'running', juguang: 'running' },
+    );
+    assert.deepEqual(
+      Array.from(startedPlatforms).sort(),
+      ['adstar', 'juguang', 'pgy'],
+      'all requested platforms must start before any platform finishes',
+    );
+    assert.equal(maxActive, 3);
+
+    releases.adstar.resolve();
+    releases.pgy.resolve();
+    for (let turn = 0; turn < 5; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(runSettled, false, 'the run must wait for the final platform before aggregation');
+    assert.equal(
+      fixture.chrome.fixture.storageWrites.some((write) => (
+        Object.prototype.hasOwnProperty.call(write, `${RUN_KEY_PREFIX}fixture-xhs-run-001`)
+      )),
+      false,
+      'the compact run archive must not be written before every platform settles',
+    );
+
+    releases.juguang.resolve();
+    result = await runPromise;
+  } finally {
+    releases.adstar.resolve();
+    releases.pgy.resolve();
+    releases.juguang.resolve();
+    if (!runSettled) await runPromise;
+  }
+
+  assert.deepEqual(
+    lifecycle.filter((entry) => entry.startsWith('finish:')).sort(),
+    ['finish:adstar', 'finish:juguang', 'finish:pgy'],
+  );
   assert.equal(result.status, 'partial');
   assert.equal(result.platforms.adstar.status, 'complete');
   assert.equal(result.platforms.pgy.status, 'partial');
   assert.equal(result.platforms.juguang.status, 'complete');
+  assert.deepEqual(Object.keys(result.platforms), ['adstar', 'pgy', 'juguang']);
 
   const statusWrites = fixture.chrome.fixture.storageWrites
     .filter((write) => Object.prototype.hasOwnProperty.call(write, STATUS_KEY));
@@ -941,6 +1362,183 @@ test('runtime runs three sources serially, propagates partial independently, and
   assert.equal(Object.prototype.hasOwnProperty.call(compactRun.platforms.pgy, 'pages'), false);
   assert.equal(Object.prototype.hasOwnProperty.call(compactRun.platforms.pgy, 'indexedDb'), false);
   assert.deepEqual(compactRun.platforms.pgy.qualityEvidence, { safeMetric: 7 });
+});
+
+test('runtime keeps collecting parallel sources after one collector fails', async () => {
+  const runtimeModule = loadRuntime();
+  const startedPlatforms = new Set();
+  const releases = {
+    pgy: deferred(),
+    juguang: deferred(),
+  };
+  const fixture = createRuntimeOptions({
+    collectByPlatform: async (platform) => {
+      startedPlatforms.add(platform);
+      if (platform === 'adstar') throw new Error('fixture Star collector failure');
+      await releases[platform].promise;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+  const runPromise = runtime.run(runInput());
+  let runSettled = false;
+  runPromise.then(
+    () => { runSettled = true; },
+    () => { runSettled = true; },
+  );
+  let result;
+
+  try {
+    for (let turn = 0; turn < 20 && startedPlatforms.size < 3; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(Array.from(startedPlatforms).sort(), ['adstar', 'juguang', 'pgy']);
+    assert.equal(runSettled, false, 'one failed source must not short-circuit sources still collecting');
+    releases.pgy.resolve();
+    releases.juguang.resolve();
+    result = await runPromise;
+  } finally {
+    releases.pgy.resolve();
+    releases.juguang.resolve();
+    if (!runSettled) await runPromise;
+  }
+
+  assert.equal(result.status, 'partial');
+  assert.equal(result.platforms.adstar.status, 'failed');
+  assert.equal(result.platforms.pgy.status, 'complete');
+  assert.equal(result.platforms.juguang.status, 'complete');
+});
+
+test('runtime contains one platform discovery failure and preserves successful sibling results', async () => {
+  const runtimeModule = loadRuntime();
+  const chrome = createFakeChrome();
+  const originalQuery = chrome.tabs.query.bind(chrome.tabs);
+  let queryCount = 0;
+  chrome.tabs.query = async (query) => {
+    queryCount += 1;
+    if (queryCount === 1) {
+      const error = new Error('fixture Star tab discovery transport failure');
+      error.code = 'ADSTAR_TAB_DISCOVERY_FAILED';
+      error.retryable = true;
+      throw error;
+    }
+    return originalQuery(query);
+  };
+  const collected = [];
+  const fixture = createRuntimeOptions({
+    chrome,
+    collectByPlatform(platform) {
+      collected.push(platform);
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput());
+
+  assert.equal(result.status, 'partial');
+  assert.deepEqual(collected.sort(), ['juguang', 'pgy']);
+  assert.equal(result.platforms.adstar.status, 'failed');
+  assert.equal(result.platforms.adstar.errors[0].code, 'ADSTAR_TAB_DISCOVERY_FAILED');
+  assert.equal(result.platforms.pgy.status, 'complete');
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.ok(
+    Object.hasOwn(chrome.fixture.storageWrites.at(-2), `${RUN_KEY_PREFIX}fixture-xhs-run-001`),
+    'partial run with successful siblings must remain archived',
+  );
+});
+
+test('runtime treats a collector-local AbortError as one platform failure while the run signal remains active', async () => {
+  const runtimeModule = loadRuntime();
+  const controller = new AbortController();
+  const collected = [];
+  const fixture = createRuntimeOptions({
+    collectByPlatform(platform) {
+      collected.push(platform);
+      if (platform === 'adstar') {
+        const error = new Error('fixture Star request-local timeout abort');
+        error.name = 'AbortError';
+        error.code = 'ABORT_ERR';
+        error.retryable = true;
+        throw error;
+      }
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ signal: controller.signal }));
+
+  assert.equal(controller.signal.aborted, false);
+  assert.equal(result.status, 'partial');
+  assert.deepEqual(collected.sort(), ['adstar', 'juguang', 'pgy']);
+  assert.equal(result.platforms.adstar.status, 'failed');
+  assert.equal(result.platforms.adstar.errors[0].code, 'ABORT_ERR');
+  assert.equal(result.platforms.pgy.status, 'complete');
+  assert.equal(result.platforms.juguang.status, 'complete');
+});
+
+test('parallel platform progress writes are monotonic even when an earlier storage write is delayed', async () => {
+  const runtimeModule = loadRuntime();
+  const chrome = createFakeChrome();
+  const originalSet = chrome.storage.local.set.bind(chrome.storage.local);
+  const firstProgressWriteStarted = deferred();
+  const releaseFirstProgressWrite = deferred();
+  let gatedProgressWrite = false;
+  chrome.storage.local.set = async (value) => {
+    const status = value && value[STATUS_KEY];
+    const hasFinishedPlatform = status && status.running === true &&
+      Object.values(status.platforms || {}).some((platform) => platform.status === 'complete');
+    if (!gatedProgressWrite && hasFinishedPlatform) {
+      gatedProgressWrite = true;
+      firstProgressWriteStarted.resolve();
+      await releaseFirstProgressWrite.promise;
+    }
+    return originalSet(value);
+  };
+  const releases = Object.fromEntries([
+    'adstar', 'pgy', 'juguang',
+  ].map((platform) => [platform, deferred()]));
+  const startedPlatforms = new Set();
+  const fixture = createRuntimeOptions({
+    chrome,
+    collectByPlatform: async (platform) => {
+      startedPlatforms.add(platform);
+      await releases[platform].promise;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+  const runPromise = runtime.run(runInput());
+
+  for (let turn = 0; turn < 20 && startedPlatforms.size < 3; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  try {
+    assert.equal(startedPlatforms.size, 3);
+    releases.adstar.resolve();
+    await firstProgressWriteStarted.promise;
+    releases.pgy.resolve();
+    releases.juguang.resolve();
+    for (let turn = 0; turn < 5; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  } finally {
+    releases.adstar.resolve();
+    releases.pgy.resolve();
+    releases.juguang.resolve();
+    releaseFirstProgressWrite.resolve();
+  }
+  await runPromise;
+
+  const completedCounts = chrome.fixture.storageWrites
+    .filter((write) => write[STATUS_KEY] && write[STATUS_KEY].running === true)
+    .map((write) => Object.values(write[STATUS_KEY].platforms || {})
+      .filter((platform) => platform.status === 'complete').length);
+  assert.ok(completedCounts.length >= 2);
+  assert.ok(completedCounts.every((count, index) => (
+    index === 0 || count >= completedCounts[index - 1]
+  )), `parallel progress regressed: ${completedCounts.join(' -> ')}`);
 });
 
 test('status snapshot preserves safe source time and account labels without account identifiers', async () => {
@@ -1116,6 +1714,1549 @@ test('runtime register redacts tokenized errors even when guarded dispatch itsel
 
   assert.equal(serialized.includes(secret), false);
   assert.equal(serialized.includes('access_token'), false);
+});
+
+test('runtime accepts a strongly verified Juguang main account after a same-document SPA return even when vSellerId remains in the URL', async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-spa-return',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const main = {
+    vSellerId: 'fictional-main-vseller-spa-return',
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构原主账户',
+  };
+  const retainedUrl =
+    `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`;
+  const committedListeners = new Set();
+  let current = clone(child);
+  let returnActionClicked = false;
+  let identityCalls = 0;
+  const chrome = createFakeChrome(PLATFORM_TABS, {
+    executeScript(details) {
+      if (typeof details.func === 'function') {
+        returnActionClicked = true;
+        current = clone(main);
+        return [{ result: true }];
+      }
+      return [{ result: { ok: true } }];
+    },
+  });
+  chrome.tabs.get = async (tabId) => ({
+    id: tabId,
+    status: 'complete',
+    url: retainedUrl,
+  });
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return {
+        tabId: 13,
+        frameId: 0,
+        documentId: 'fixture-doc-spa-return',
+        documentLifecycle: 'active',
+        url: retainedUrl,
+      };
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 500,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        identityCalls += 1;
+        return clone(current);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      assert.equal(verified.accountType, 4);
+      assert.equal(verified.advertiserId, main.advertiserId);
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(
+    result.platforms.juguang.status,
+    'complete',
+    result.platforms.juguang.errors[0] && result.platforms.juguang.errors[0].message,
+  );
+  assert.equal(returnActionClicked, true);
+  assert.ok(identityCalls >= 1, 'same-document success must strongly verify accounts.current');
+  assert.equal(new URL(retainedUrl).searchParams.get('vSellerId'), child.vSellerId);
+  assert.equal(committedListeners.size, 0, 'same-document success must remove the lifecycle listener');
+});
+
+test('runtime re-probes a pure-SPA Juguang return when the main identity appears after the first probe batch', { timeout: 1500 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-delayed-main-identity',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const main = {
+    vSellerId: 'fictional-main-vseller-delayed-identity',
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构延迟收敛主账户',
+  };
+  const retainedUrl =
+    `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`;
+  const committedListeners = new Set();
+  let current = clone(child);
+  let identityCalls = 0;
+  let mainBecameAvailable = false;
+  let verifiedAdvertiserId = null;
+  const chrome = createFakeChrome(PLATFORM_TABS, {
+    executeScript() {
+      return [{ result: true }];
+    },
+  });
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return {
+        tabId: 13,
+        frameId: 0,
+        documentId: 'fixture-doc-delayed-main-identity',
+        documentLifecycle: 'active',
+        url: retainedUrl,
+      };
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 160,
+    bridgeRetry: { attempts: 1, delayMs: 5 },
+    wait: (delayMs) => new Promise((resolve) => {
+      setTimeout(resolve, Math.max(1, Number(delayMs) || 0));
+    }),
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        identityCalls += 1;
+        if (identityCalls === 1) {
+          setTimeout(() => {
+            current = clone(main);
+            mainBecameAvailable = true;
+          }, 15);
+        }
+        return clone(current);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      verifiedAdvertiserId = verified.advertiserId;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(mainBecameAvailable, true, 'the main identity must appear before the transition deadline');
+  assert.equal(
+    result.platforms.juguang.status,
+    'complete',
+    result.platforms.juguang.errors[0] && result.platforms.juguang.errors[0].message,
+  );
+  assert.equal(verifiedAdvertiserId, main.advertiserId);
+  assert.ok(identityCalls > 1, 'identity probing must continue beyond the exhausted first batch');
+  assert.equal(committedListeners.size, 0, 'delayed same-document success must remove the lifecycle listener');
+});
+
+test('runtime rejects a same-document Juguang return when the verified account stays child and removes the lifecycle listener', async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-spa-not-returned',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构未切回子账户',
+  };
+  const retainedUrl =
+    `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`;
+  const committedListeners = new Set();
+  let returnActionClicked = false;
+  let identityCalls = 0;
+  const chrome = createFakeChrome(PLATFORM_TABS, {
+    executeScript(details) {
+      if (typeof details.func === 'function') returnActionClicked = true;
+      return [{ result: true }];
+    },
+  });
+  chrome.tabs.get = async (tabId) => ({
+    id: tabId,
+    status: 'complete',
+    url: retainedUrl,
+  });
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return {
+        tabId: 13,
+        frameId: 0,
+        documentId: 'fixture-doc-spa-not-returned',
+        documentLifecycle: 'active',
+        url: retainedUrl,
+      };
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 30,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        identityCalls += 1;
+        return clone(child);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      throw new Error(`collector must not continue for ${platform}`);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'failed');
+  assert.match(
+    result.platforms.juguang.errors[0].message,
+    /accountType|identity|main-account|commit|document|navigation/i,
+  );
+  assert.equal(returnActionClicked, true);
+  assert.ok(identityCalls >= 1, 'same-document failure must reject the verified child identity');
+  assert.equal(committedListeners.size, 0, 'same-document failure must remove the lifecycle listener');
+});
+
+test('runtime rejects a same-document Juguang main identity without advertiserId before the collector continues', { timeout: 1500 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-main-missing-advertiser',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const weakMainIdentity = {
+    vSellerId: 'fictional-main-vseller-missing-advertiser',
+    accountType: 4,
+    name: '虚构缺失广告主标识的主账户',
+  };
+  const retainedUrl =
+    `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`;
+  const committedListeners = new Set();
+  let current = clone(child);
+  let collectorContinued = false;
+  let identityCalls = 0;
+  const chrome = createFakeChrome(PLATFORM_TABS, {
+    executeScript(details) {
+      if (typeof details.func === 'function') current = clone(weakMainIdentity);
+      return [{ result: true }];
+    },
+  });
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return {
+        tabId: 13,
+        frameId: 0,
+        documentId: 'fixture-doc-main-missing-advertiser',
+        documentLifecycle: 'active',
+        url: retainedUrl,
+      };
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 80,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        identityCalls += 1;
+        return clone(current);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      collectorContinued = true;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'failed');
+  assert.match(result.platforms.juguang.errors[0].message, /advertiserId|identity|missing/i);
+  assert.ok(identityCalls >= 1, 'the same-document result must be strongly verified');
+  assert.equal(collectorContinued, false, 'collection must stop after a weak main identity');
+  assert.equal(committedListeners.size, 0, 'rejected identity must remove the lifecycle listener');
+});
+
+test('runtime waits for a main document committed inside the same-document stability window before accepting identity', { timeout: 1500 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-stability-window',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const oldDocumentMain = {
+    vSellerId: 'fictional-old-document-main-vseller',
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构旧文档主账户',
+  };
+  const newDocumentMain = {
+    vSellerId: 'fictional-new-document-main-vseller',
+    advertiserId: 1002,
+    accountType: 4,
+    name: '虚构新文档主账户',
+  };
+  const committedDocumentId = 'fixture-doc-main-inside-stability-window';
+  const committedListeners = new Set();
+  const identityStages = [];
+  let identityStage = 'child';
+  let commitScheduled = false;
+  let verifiedAdvertiserId = null;
+  let currentFrame = {
+    tabId: 13,
+    frameId: 0,
+    documentId: 'fixture-doc-before-stability-window',
+    documentLifecycle: 'active',
+    url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`,
+  };
+  const chrome = createFakeChrome();
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return clone(currentFrame);
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const emitCommitted = (details) => {
+    currentFrame = Object.assign({}, currentFrame, details);
+    for (const listener of Array.from(committedListeners)) listener(clone(details));
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (details) => {
+    const result = await originalExecuteScript(details);
+    if (typeof details.func === 'function') identityStage = 'old-main';
+    return result;
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 200,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        if (identityStage === 'old-main') {
+          identityStages.push('old-document');
+          if (!commitScheduled) {
+            commitScheduled = true;
+            setTimeout(() => {
+              identityStage = 'new-main';
+              emitCommitted({
+                tabId: 13,
+                frameId: 0,
+                documentId: committedDocumentId,
+                documentLifecycle: 'active',
+                url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+              });
+            }, 0);
+          }
+          return clone(oldDocumentMain);
+        }
+        assert.equal(identityStage, 'new-main');
+        const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+          entry.target && Array.isArray(entry.target.documentIds) &&
+          entry.target.documentIds.includes(committedDocumentId)
+        ));
+        assert.deepEqual(
+          documentInjections.map((entry) => entry.world),
+          ['MAIN', 'ISOLATED'],
+          'the new document bridge must be fully recovered before its identity is read',
+        );
+        identityStages.push('new-document');
+        return clone(newDocumentMain);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      verifiedAdvertiserId = verified.advertiserId;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.equal(verifiedAdvertiserId, newDocumentMain.advertiserId);
+  assert.deepEqual(identityStages, ['old-document', 'new-document']);
+  assert.equal(committedListeners.size, 0, 'stability-window commit must remove the lifecycle listener');
+});
+
+test('runtime waits past the fixed stability window for an onBeforeNavigate main document before accepting identity', { timeout: 2500 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-before-navigate',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const oldDocumentMain = {
+    vSellerId: 'fictional-old-document-main-before-navigate',
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构旧文档主账户',
+  };
+  const newDocumentMain = {
+    vSellerId: 'fictional-new-document-main-before-navigate',
+    advertiserId: 1002,
+    accountType: 4,
+    name: '虚构新文档主账户',
+  };
+  const committedDocumentId = 'fixture-doc-after-before-navigate';
+  const beforeNavigateListeners = new Set();
+  const committedListeners = new Set();
+  const commitDone = deferred();
+  const identityStages = [];
+  let identityStage = 'child';
+  let commitScheduled = false;
+  let commitAt = null;
+  let resultResolvedAt = null;
+  let verifiedAdvertiserId = null;
+  let beforeNavigateRegistrations = 0;
+  let beforeNavigateEmissions = 0;
+  let currentFrame = {
+    tabId: 13,
+    frameId: 0,
+    documentId: 'fixture-doc-before-before-navigate',
+    documentLifecycle: 'active',
+    url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`,
+  };
+  const chrome = createFakeChrome();
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return clone(currentFrame);
+    },
+    onBeforeNavigate: {
+      addListener(listener) {
+        beforeNavigateRegistrations += 1;
+        beforeNavigateListeners.add(listener);
+      },
+      removeListener(listener) {
+        beforeNavigateListeners.delete(listener);
+      },
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const emitBeforeNavigate = (details) => {
+    beforeNavigateEmissions += 1;
+    for (const listener of Array.from(beforeNavigateListeners)) listener(clone(details));
+  };
+  const emitCommitted = (details) => {
+    currentFrame = Object.assign({}, currentFrame, details);
+    for (const listener of Array.from(committedListeners)) listener(clone(details));
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (details) => {
+    const result = await originalExecuteScript(details);
+    if (typeof details.func === 'function') {
+      identityStage = 'old-main';
+      emitBeforeNavigate({
+        tabId: 13,
+        frameId: 0,
+        parentFrameId: -1,
+        url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${newDocumentMain.vSellerId}`,
+      });
+    }
+    return result;
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 1600,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        if (identityStage === 'old-main') {
+          identityStages.push('old-document');
+          if (!commitScheduled) {
+            commitScheduled = true;
+            setTimeout(() => {
+              identityStage = 'new-main';
+              commitAt = Date.now();
+              emitCommitted({
+                tabId: 13,
+                frameId: 0,
+                documentId: committedDocumentId,
+                documentLifecycle: 'active',
+                url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${newDocumentMain.vSellerId}`,
+              });
+              commitDone.resolve();
+            }, 350);
+          }
+          return clone(oldDocumentMain);
+        }
+        assert.equal(identityStage, 'new-main');
+        const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+          entry.target && Array.isArray(entry.target.documentIds) &&
+          entry.target.documentIds.includes(committedDocumentId)
+        ));
+        assert.deepEqual(
+          documentInjections.map((entry) => entry.world),
+          ['MAIN', 'ISOLATED'],
+          'the pending new document must be fully recovered before its identity is read',
+        );
+        identityStages.push('new-document');
+        return clone(newDocumentMain);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      verifiedAdvertiserId = verified.advertiserId;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+  resultResolvedAt = Date.now();
+  await commitDone.promise;
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.equal(
+    verifiedAdvertiserId,
+    newDocumentMain.advertiserId,
+    'a pending navigation must prevent the old-document main identity from being accepted',
+  );
+  assert.ok(resultResolvedAt >= commitAt, 'the return must not resolve before the pending document commits');
+  assert.deepEqual(identityStages, ['old-document', 'new-document']);
+  assert.equal(beforeNavigateEmissions, 1);
+  assert.ok(beforeNavigateRegistrations >= 1, 'return-to-main must observe top-frame onBeforeNavigate');
+  assert.equal(beforeNavigateListeners.size, 0, 'onBeforeNavigate listeners must be cleaned up');
+  assert.equal(committedListeners.size, 0, 'onCommitted listeners must be cleaned up');
+});
+
+test('runtime reconciles a completed Juguang main document when onCommitted is missed after onBeforeNavigate', { timeout: 2000 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-missed-commit',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const main = {
+    vSellerId: null,
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构原主账户',
+  };
+  const mainUrl = 'https://ad.xiaohongshu.com/aurora/ad/manage/campaign';
+  const newDocumentId = 'fixture-doc-main-missed-commit';
+  const beforeNavigateListeners = new Set();
+  const committedListeners = new Set();
+  const observedIdentities = [];
+  let beforeNavigateEmissions = 0;
+  let currentTab = {
+    id: 13,
+    status: 'complete',
+    url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`,
+  };
+  let currentFrame = {
+    tabId: 13,
+    frameId: 0,
+    documentId: 'fixture-doc-child-before-missed-commit',
+    documentLifecycle: 'active',
+    url: currentTab.url,
+  };
+  let acceptedIdentity = null;
+  const chrome = createFakeChrome();
+  chrome.tabs.get = async (tabId) => {
+    assert.equal(tabId, 13);
+    return clone(currentTab);
+  };
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return clone(currentFrame);
+    },
+    onBeforeNavigate: {
+      addListener(listener) {
+        beforeNavigateListeners.add(listener);
+      },
+      removeListener(listener) {
+        beforeNavigateListeners.delete(listener);
+      },
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const emitBeforeNavigate = (details) => {
+    beforeNavigateEmissions += 1;
+    for (const listener of Array.from(beforeNavigateListeners)) listener(clone(details));
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (details) => {
+    const result = await originalExecuteScript(details);
+    if (typeof details.func === 'function') {
+      emitBeforeNavigate({
+        tabId: 13,
+        frameId: 0,
+        parentFrameId: -1,
+        url: mainUrl,
+      });
+      currentTab = { id: 13, status: 'complete', url: mainUrl };
+      currentFrame = {
+        tabId: 13,
+        frameId: 0,
+        documentId: newDocumentId,
+        documentLifecycle: 'active',
+        url: mainUrl,
+      };
+      // Intentionally omit onCommitted: this reproduces the observed browser state.
+    }
+    return result;
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 250,
+    bridgeRetry: { attempts: 2, delayMs: 1 },
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+          entry.target && Array.isArray(entry.target.documentIds) &&
+          entry.target.documentIds.includes(newDocumentId)
+        ));
+        const recoveredWorlds = documentInjections.map((entry) => entry.world);
+        if (!recoveredWorlds.includes('MAIN') || !recoveredWorlds.includes('ISOLATED')) {
+          observedIdentities.push(clone(child));
+          return clone(child);
+        }
+        observedIdentities.push(clone(main));
+        return clone(main);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      acceptedIdentity = clone(verified);
+      assert.equal(verified.accountType, 4, 'a child account must never be accepted as main');
+      assert.equal(
+        verified.advertiserId,
+        main.advertiserId,
+        'the verified main advertiserId must match the recovered document identity',
+      );
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(beforeNavigateEmissions, 1);
+  assert.equal(currentTab.status, 'complete');
+  assert.equal(currentTab.url, mainUrl);
+  assert.equal(currentFrame.documentId, newDocumentId);
+  assert.equal(
+    Boolean(acceptedIdentity && acceptedIdentity.advertiserId === child.advertiserId),
+    false,
+    'the stale child identity must never be released to the collector',
+  );
+  assert.equal(beforeNavigateListeners.size, 0, 'missed-commit recovery must clean onBeforeNavigate');
+  assert.equal(committedListeners.size, 0, 'missed-commit recovery must clean onCommitted');
+  assert.equal(
+    result.platforms.juguang.status,
+    'complete',
+    result.platforms.juguang.errors[0] && result.platforms.juguang.errors[0].message,
+  );
+  assert.deepEqual(acceptedIdentity, main);
+  assert.ok(observedIdentities.length >= 1, 'the recovered document identity must be verified');
+  assert.equal(
+    observedIdentities.every((identity) => identity.accountType === 4),
+    true,
+    'the stale child document must not be queried once the new document is observed',
+  );
+  const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+    entry.target && Array.isArray(entry.target.documentIds) &&
+    entry.target.documentIds.includes(newDocumentId)
+  ));
+  assert.deepEqual(
+    documentInjections.map((entry) => entry.world),
+    ['MAIN', 'ISOLATED'],
+    'the newly observed main document bridge must be recovered before identity verification',
+  );
+});
+
+test('runtime verifies a same-document Juguang main identity when a hanging action emits only history state', { timeout: 2000 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-history-only',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const main = {
+    vSellerId: null,
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构原主账户',
+  };
+  const baselineDocumentId = 'fixture-doc-history-only-return';
+  const mainUrl = 'https://ad.xiaohongshu.com/aurora/ad/manage/campaign';
+  const actionDeferred = deferred();
+  const historyListeners = new Set();
+  const committedListeners = new Set();
+  let historyRegistrations = 0;
+  let historyEmissions = 0;
+  let identityCalls = 0;
+  let monotonicClock = 0;
+  let current = clone(child);
+  let currentTab = {
+    id: 13,
+    status: 'complete',
+    url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`,
+  };
+  let currentFrame = {
+    tabId: 13,
+    frameId: 0,
+    documentId: baselineDocumentId,
+    documentLifecycle: 'active',
+    url: currentTab.url,
+  };
+  const chrome = createFakeChrome();
+  chrome.tabs.get = async (tabId) => {
+    assert.equal(tabId, 13);
+    return clone(currentTab);
+  };
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return clone(currentFrame);
+    },
+    onHistoryStateUpdated: {
+      addListener(listener) {
+        historyRegistrations += 1;
+        historyListeners.add(listener);
+      },
+      removeListener(listener) {
+        historyListeners.delete(listener);
+      },
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const emitHistoryStateUpdated = (details) => {
+    historyEmissions += 1;
+    for (const listener of Array.from(historyListeners)) listener(clone(details));
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = (details) => {
+    const recorded = originalExecuteScript(details);
+    if (typeof details.func !== 'function') return recorded;
+    current = clone(main);
+    currentTab = { id: 13, status: 'complete', url: mainUrl };
+    currentFrame = Object.assign({}, currentFrame, { url: mainUrl });
+    emitHistoryStateUpdated({
+      tabId: 13,
+      frameId: 0,
+      documentId: baselineDocumentId,
+      documentLifecycle: 'active',
+      url: mainUrl,
+    });
+    return actionDeferred.promise;
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 250,
+    monotonicNow: () => {
+      monotonicClock += 10;
+      return monotonicClock;
+    },
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        identityCalls += 1;
+        return clone(current);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      assert.equal(verified.accountType, 4, 'history-only return must strongly verify accountType');
+      assert.equal(
+        verified.advertiserId,
+        main.advertiserId,
+        'history-only return must strongly verify advertiserId',
+      );
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+  actionDeferred.resolve([{ result: true }]);
+  await Promise.resolve();
+
+  assert.equal(historyEmissions, 1);
+  assert.equal(currentFrame.documentId, baselineDocumentId, 'history update must stay in one document');
+  assert.equal(currentFrame.url, mainUrl);
+  assert.equal(historyListeners.size, 0, 'history-state listener must be cleaned up');
+  assert.equal(committedListeners.size, 0, 'history-only completion must clean onCommitted');
+  assert.equal(
+    result.platforms.juguang.status,
+    'complete',
+    `${result.platforms.juguang.errors[0] && result.platforms.juguang.errors[0].message}; ` +
+      `identityCalls=${identityCalls}`,
+  );
+  assert.ok(historyRegistrations >= 1, 'return-to-main must observe same-document history updates');
+  assert.ok(identityCalls >= 1, 'history-only completion must strongly probe accounts.current');
+});
+
+test('runtime reconciles a delayed completed Juguang document when navigation events are missed and the return action hangs', { timeout: 2000 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-delayed-missed-events',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const main = {
+    vSellerId: null,
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构原主账户',
+  };
+  const mainUrl = 'https://ad.xiaohongshu.com/aurora/ad/manage/campaign';
+  const newDocumentId = 'fixture-doc-main-delayed-missed-events';
+  const hangingAction = deferred();
+  const beforeNavigateListeners = new Set();
+  const historyListeners = new Set();
+  const committedListeners = new Set();
+  const observedIdentities = [];
+  let beforeNavigateRegistrations = 0;
+  let beforeNavigateEmissions = 0;
+  let historyEmissions = 0;
+  let committedEmissions = 0;
+  let transitionApplied = false;
+  let acceptedIdentity = null;
+  let currentTab = {
+    id: 13,
+    status: 'complete',
+    url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`,
+  };
+  let currentFrame = {
+    tabId: 13,
+    frameId: 0,
+    documentId: 'fixture-doc-child-before-delayed-missed-events',
+    documentLifecycle: 'active',
+    url: currentTab.url,
+  };
+  const chrome = createFakeChrome();
+  chrome.tabs.get = async (tabId) => {
+    assert.equal(tabId, 13);
+    return clone(currentTab);
+  };
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return clone(currentFrame);
+    },
+    onBeforeNavigate: {
+      addListener(listener) {
+        beforeNavigateRegistrations += 1;
+        beforeNavigateListeners.add(listener);
+      },
+      removeListener(listener) {
+        beforeNavigateListeners.delete(listener);
+      },
+    },
+    onHistoryStateUpdated: {
+      addListener(listener) {
+        historyListeners.add(listener);
+      },
+      removeListener(listener) {
+        historyListeners.delete(listener);
+      },
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const emitBeforeNavigate = (details) => {
+    beforeNavigateEmissions += 1;
+    for (const listener of Array.from(beforeNavigateListeners)) listener(clone(details));
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = (details) => {
+    const recorded = originalExecuteScript(details);
+    if (typeof details.func !== 'function') return recorded;
+    emitBeforeNavigate({
+      tabId: 13,
+      frameId: 0,
+      parentFrameId: -1,
+      url: mainUrl,
+    });
+    setTimeout(() => {
+      transitionApplied = true;
+      currentTab = { id: 13, status: 'complete', url: mainUrl };
+      currentFrame = {
+        tabId: 13,
+        frameId: 0,
+        documentId: newDocumentId,
+        documentLifecycle: 'active',
+        url: mainUrl,
+      };
+      // Intentionally emit neither onHistoryStateUpdated nor onCommitted.
+    }, 20);
+    return hangingAction.promise;
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 300,
+    bridgeRetry: { attempts: 2, delayMs: 5 },
+    wait: (delayMs) => new Promise((resolve) => {
+      setTimeout(resolve, Math.max(1, Number(delayMs) || 0));
+    }),
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+          entry.target && Array.isArray(entry.target.documentIds) &&
+          entry.target.documentIds.includes(newDocumentId)
+        ));
+        const recoveredWorlds = documentInjections.map((entry) => entry.world);
+        if (!recoveredWorlds.includes('MAIN') || !recoveredWorlds.includes('ISOLATED')) {
+          observedIdentities.push(clone(child));
+          return clone(child);
+        }
+        observedIdentities.push(clone(main));
+        return clone(main);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      acceptedIdentity = clone(verified);
+      assert.equal(verified.accountType, 4, 'delayed reconciliation must verify main accountType');
+      assert.equal(
+        verified.advertiserId,
+        main.advertiserId,
+        'delayed reconciliation must verify the main advertiserId',
+      );
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(transitionApplied, true, 'the browser must reach the delayed new document');
+  assert.equal(beforeNavigateEmissions, 1);
+  assert.equal(historyEmissions, 0);
+  assert.equal(committedEmissions, 0);
+  assert.equal(currentTab.status, 'complete');
+  assert.equal(currentTab.url, mainUrl);
+  assert.equal(currentFrame.documentId, newDocumentId);
+  assert.equal(beforeNavigateListeners.size, 0, 'delayed reconciliation must clean onBeforeNavigate');
+  assert.equal(historyListeners.size, 0, 'delayed reconciliation must clean onHistoryStateUpdated');
+  assert.equal(committedListeners.size, 0, 'delayed reconciliation must clean onCommitted');
+  assert.equal(
+    result.platforms.juguang.status,
+    'complete',
+    result.platforms.juguang.errors[0] && result.platforms.juguang.errors[0].message,
+  );
+  assert.ok(beforeNavigateRegistrations >= 1, 'the pending navigation must be observed');
+  assert.deepEqual(acceptedIdentity, main);
+  assert.ok(observedIdentities.length >= 1, 'the recovered document identity must be verified');
+  assert.equal(
+    observedIdentities.every((identity) => identity.accountType === 4),
+    true,
+    'the old child identity must not be queried before exact-document bridge recovery',
+  );
+  const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+    entry.target && Array.isArray(entry.target.documentIds) &&
+    entry.target.documentIds.includes(newDocumentId)
+  ));
+  assert.deepEqual(
+    documentInjections.map((entry) => entry.world),
+    ['MAIN', 'ISOLATED'],
+    'the delayed document must receive exact-document MAIN and ISOLATED injection',
+  );
+});
+
+test('runtime rejects a transient baseline main identity while a missed-beforeNavigate commit is pending', { timeout: 2000 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-missed-before-navigate',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const transientBaselineMain = {
+    vSellerId: null,
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构旧文档临时主账户',
+  };
+  const committedMain = {
+    vSellerId: null,
+    advertiserId: 1002,
+    accountType: 4,
+    name: '虚构新文档主账户',
+  };
+  const baselineDocumentId = 'fixture-doc-before-missed-before-navigate';
+  const committedDocumentId = 'fixture-doc-after-missed-before-navigate';
+  const childUrl =
+    `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`;
+  const mainUrl = 'https://ad.xiaohongshu.com/aurora/ad/manage/campaign';
+  const beforeNavigateListeners = new Set();
+  const historyListeners = new Set();
+  const committedListeners = new Set();
+  const commitDone = deferred();
+  const observedAdvertiserIds = [];
+  let beforeNavigateEmissions = 0;
+  let committedEmissions = 0;
+  let loadingTabChecks = 0;
+  let commitAt = null;
+  let resultResolvedAt = null;
+  let acceptedAdvertiserId = null;
+  let current = clone(child);
+  let currentTab = { id: 13, status: 'complete', url: childUrl };
+  let currentFrame = {
+    tabId: 13,
+    frameId: 0,
+    documentId: baselineDocumentId,
+    documentLifecycle: 'active',
+    url: childUrl,
+  };
+  const chrome = createFakeChrome();
+  chrome.tabs.get = async (tabId) => {
+    assert.equal(tabId, 13);
+    if (currentTab.status === 'loading' && currentTab.pendingUrl === mainUrl) {
+      loadingTabChecks += 1;
+    }
+    return clone(currentTab);
+  };
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return clone(currentFrame);
+    },
+    onBeforeNavigate: {
+      addListener(listener) {
+        beforeNavigateListeners.add(listener);
+      },
+      removeListener(listener) {
+        beforeNavigateListeners.delete(listener);
+      },
+    },
+    onHistoryStateUpdated: {
+      addListener(listener) {
+        historyListeners.add(listener);
+      },
+      removeListener(listener) {
+        historyListeners.delete(listener);
+      },
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const emitCommitted = (details) => {
+    committedEmissions += 1;
+    currentFrame = Object.assign({}, currentFrame, details);
+    for (const listener of Array.from(committedListeners)) listener(clone(details));
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = async (details) => {
+    const result = await originalExecuteScript(details);
+    if (typeof details.func !== 'function') return result;
+    current = clone(transientBaselineMain);
+    currentTab = {
+      id: 13,
+      status: 'loading',
+      url: childUrl,
+      pendingUrl: mainUrl,
+    };
+    setTimeout(() => {
+      current = clone(committedMain);
+      currentTab = { id: 13, status: 'complete', url: mainUrl };
+      commitAt = Date.now();
+      emitCommitted({
+        tabId: 13,
+        frameId: 0,
+        documentId: committedDocumentId,
+        documentLifecycle: 'active',
+        url: mainUrl,
+      });
+      commitDone.resolve();
+    }, 280);
+    return result;
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 500,
+    bridgeRetry: { attempts: 2, delayMs: 5 },
+    wait: (delayMs) => new Promise((resolve) => {
+      setTimeout(resolve, Math.max(1, Number(delayMs) || 0));
+    }),
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        if (currentFrame.documentId !== committedDocumentId) {
+          observedAdvertiserIds.push(transientBaselineMain.advertiserId);
+          return clone(transientBaselineMain);
+        }
+        const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+          entry.target && Array.isArray(entry.target.documentIds) &&
+          entry.target.documentIds.includes(committedDocumentId)
+        ));
+        const recoveredWorlds = documentInjections.map((entry) => entry.world);
+        if (!recoveredWorlds.includes('MAIN') || !recoveredWorlds.includes('ISOLATED')) {
+          observedAdvertiserIds.push(child.advertiserId);
+          return clone(child);
+        }
+        observedAdvertiserIds.push(committedMain.advertiserId);
+        return clone(current);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      acceptedAdvertiserId = verified.advertiserId;
+      assert.equal(verified.accountType, 4);
+      assert.equal(
+        verified.advertiserId,
+        committedMain.advertiserId,
+        'the transient baseline main identity must never be accepted',
+      );
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+  resultResolvedAt = Date.now();
+  await commitDone.promise;
+
+  assert.equal(beforeNavigateEmissions, 0, 'the fixture must miss onBeforeNavigate entirely');
+  assert.equal(committedEmissions, 1);
+  assert.ok(loadingTabChecks >= 1, 'the pendingUrl/loading baseline must be checked before identity');
+  assert.ok(resultResolvedAt >= commitAt, 'return-to-main must not resolve before the new document commits');
+  assert.equal(
+    result.platforms.juguang.status,
+    'complete',
+    result.platforms.juguang.errors[0] && result.platforms.juguang.errors[0].message,
+  );
+  assert.equal(acceptedAdvertiserId, committedMain.advertiserId);
+  assert.deepEqual(
+    observedAdvertiserIds,
+    [committedMain.advertiserId],
+    'only the committed document identity may be queried and accepted',
+  );
+  assert.equal(beforeNavigateListeners.size, 0, 'missed onBeforeNavigate listener must be cleaned up');
+  assert.equal(historyListeners.size, 0, 'unused history listener must be cleaned up');
+  assert.equal(committedListeners.size, 0, 'committed listener must be cleaned up');
+  const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+    entry.target && Array.isArray(entry.target.documentIds) &&
+    entry.target.documentIds.includes(committedDocumentId)
+  ));
+  assert.deepEqual(
+    documentInjections.map((entry) => entry.world),
+    ['MAIN', 'ISOLATED'],
+    'the committed document must receive exact-document MAIN and ISOLATED injection',
+  );
+});
+
+test('runtime accepts a committed Juguang main document whose URL retains vSellerId after strong identity verification', { timeout: 1500 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-hard-navigation',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const main = {
+    vSellerId: 'fictional-main-vseller-retained-after-navigation',
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构导航后主账户',
+  };
+  const committedDocumentId = 'fixture-doc-main-retains-vseller';
+  const committedListeners = new Set();
+  let current = clone(child);
+  let verifiedAdvertiserId = null;
+  let currentFrame = {
+    tabId: 13,
+    frameId: 0,
+    documentId: 'fixture-doc-before-main-retains-vseller',
+    documentLifecycle: 'active',
+    url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`,
+  };
+  const chrome = createFakeChrome();
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return clone(currentFrame);
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const emitCommitted = (details) => {
+    currentFrame = Object.assign({}, currentFrame, details);
+    for (const listener of Array.from(committedListeners)) listener(clone(details));
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = (details) => {
+    const recorded = originalExecuteScript(details);
+    if (typeof details.func !== 'function') return recorded;
+    current = clone(main);
+    emitCommitted({
+      tabId: 13,
+      frameId: 0,
+      documentId: committedDocumentId,
+      documentLifecycle: 'active',
+      url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${main.vSellerId}`,
+    });
+    return new Promise(() => {});
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 100,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        return clone(current);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      verifiedAdvertiserId = verified.advertiserId;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.equal(verifiedAdvertiserId, main.advertiserId);
+  assert.equal(new URL(currentFrame.url).searchParams.get('vSellerId'), main.vSellerId);
+  assert.equal(committedListeners.size, 0, 'verified hard navigation must remove the lifecycle listener');
+  const documentInjections = chrome.fixture.scriptExecutions.filter((entry) => (
+    entry.target && Array.isArray(entry.target.documentIds)
+  ));
+  assert.deepEqual(documentInjections.map((entry) => ({
+    documentIds: entry.target.documentIds,
+    world: entry.world,
+  })), [
+    { documentIds: [committedDocumentId], world: 'MAIN' },
+    { documentIds: [committedDocumentId], world: 'ISOLATED' },
+  ]);
+});
+
+test('runtime completes a Juguang return within budget when the DOM action hangs but a new main-account document commits', { timeout: 1500 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-hanging-action-commit',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构当前子账户',
+  };
+  const main = {
+    vSellerId: 'fictional-main-vseller-hanging-action-commit',
+    advertiserId: 1001,
+    accountType: 4,
+    name: '虚构原主账户',
+  };
+  const committedListeners = new Set();
+  let current = clone(child);
+  let currentFrame = {
+    tabId: 13,
+    frameId: 0,
+    documentId: 'fixture-doc-before-hanging-return-action',
+    documentLifecycle: 'active',
+    url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`,
+  };
+  let hangingActionCalls = 0;
+  let identityCalls = 0;
+  const chrome = createFakeChrome();
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return clone(currentFrame);
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const emitCommitted = (details) => {
+    currentFrame = Object.assign({}, currentFrame, details);
+    for (const listener of Array.from(committedListeners)) listener(clone(details));
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = (details) => {
+    const recorded = originalExecuteScript(details);
+    if (typeof details.func !== 'function') return recorded;
+    hangingActionCalls += 1;
+    setTimeout(() => {
+      current = clone(main);
+      emitCommitted({
+        tabId: 13,
+        frameId: 0,
+        documentId: 'fixture-doc-after-hanging-return-action',
+        documentLifecycle: 'active',
+        url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+      });
+    }, 0);
+    return new Promise(() => {});
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 100,
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        identityCalls += 1;
+        return clone(current);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      assert.equal(verified.accountType, 4);
+      assert.equal(verified.advertiserId, main.advertiserId);
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+  const startedAt = Date.now();
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.ok(Date.now() - startedAt < 1000, 'the hanging DOM action must not escape the transition budget');
+  assert.equal(hangingActionCalls, 1);
+  assert.ok(identityCalls >= 1, 'the committed main document must be strongly verified');
+  assert.equal(committedListeners.size, 0, 'successful commit must remove the lifecycle listener');
+});
+
+test('runtime times out a Juguang return within budget when both the DOM action and document commit hang', { timeout: 1500 }, async () => {
+  const runtimeModule = loadRuntime();
+  const child = {
+    vSellerId: 'fictional-child-vseller-hanging-action-no-commit',
+    advertiserId: 2001,
+    accountType: 602,
+    name: '虚构未切回子账户',
+  };
+  const committedListeners = new Set();
+  let hangingActionCalls = 0;
+  const chrome = createFakeChrome();
+  chrome.webNavigation = {
+    async getFrame(input) {
+      assert.deepEqual(input, { tabId: 13, frameId: 0 });
+      return {
+        tabId: 13,
+        frameId: 0,
+        documentId: 'fixture-doc-hanging-return-no-commit',
+        documentLifecycle: 'active',
+        url: `https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note?vSellerId=${child.vSellerId}`,
+      };
+    },
+    onCommitted: {
+      addListener(listener) {
+        committedListeners.add(listener);
+      },
+      removeListener(listener) {
+        committedListeners.delete(listener);
+      },
+    },
+  };
+  const originalExecuteScript = chrome.scripting.executeScript;
+  chrome.scripting.executeScript = (details) => {
+    const recorded = originalExecuteScript(details);
+    if (typeof details.func !== 'function') return recorded;
+    hangingActionCalls += 1;
+    return new Promise(() => {});
+  };
+  const fixture = createRuntimeOptions({
+    chrome,
+    allowLegacyNavigationFallback: false,
+    transitionTimeoutMs: 50,
+    pageClient: {
+      async request() {
+        return clone(child);
+      },
+    },
+    collectByPlatform: async (platform, input, dependencies) => {
+      await dependencies.returnToMainAccount({
+        tabId: input.tabId,
+        current: child,
+      });
+      throw new Error(`collector must not continue for ${platform}`);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+  const startedAt = Date.now();
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'failed');
+  assert.match(
+    result.platforms.juguang.errors[0].message,
+    /timed out|commit|document|navigation/i,
+  );
+  assert.ok(Date.now() - startedAt < 1000, 'the double hang must not escape the transition budget');
+  assert.equal(hangingActionCalls, 1);
+  assert.equal(committedListeners.size, 0, 'timed-out return must remove the lifecycle listener');
 });
 
 test('runtime injects a fixed DOM return-to-main workflow and verifies Juguang accountType 4', async () => {
@@ -1315,7 +3456,7 @@ test('runtime ignores a mounted but hidden Juguang return action until the accou
   const fixture = createRuntimeOptions({
     chrome,
     allowLegacyNavigationFallback: false,
-    transitionTimeoutMs: 30,
+    transitionTimeoutMs: 100,
     pageClient: {
       async request(input) {
         assert.equal(input.platform, 'juguang');
@@ -1745,5 +3886,390 @@ test('runtime does not accept a lost DOM execution result while the verified ide
 
   assert.equal(result.platforms.juguang.status, 'failed');
   assert.match(result.platforms.juguang.errors[0].message, /accountType|identity|main-account/i);
-  assert.equal(currentAttempts, 3);
+  assert.ok(
+    currentAttempts >= 3 && currentAttempts <= 64,
+    `same-document identity polling must stay bounded, received ${currentAttempts} probes`,
+  );
+});
+
+test('runtime resolves each exact-origin tab at parallel start and keeps platform tab state isolated', async () => {
+  const runtimeModule = loadRuntime();
+  let juguangTabId = 13;
+  const queriedTabs = () => [
+    PLATFORM_TABS[0],
+    PLATFORM_TABS[1],
+    {
+      id: juguangTabId,
+      url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+    },
+  ];
+  const calls = [];
+  const chrome = createFakeChrome(queriedTabs);
+  const fixture = createRuntimeOptions({
+    chrome,
+    collectByPlatform(platform, input) {
+      calls.push({ platform, tabId: input.tabId });
+      if (platform === 'adstar') juguangTabId = 31;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput());
+
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(calls, [
+    { platform: 'adstar', tabId: 11 },
+    { platform: 'pgy', tabId: 12 },
+    { platform: 'juguang', tabId: 13 },
+  ]);
+  assert.equal(chrome.fixture.tabQueries.length, 3, 'each parallel platform must resolve its own exact-origin tab');
+  assert.deepEqual(
+    chrome.fixture.scriptExecutions
+      .filter((entry) => entry.target.tabId === 13)
+      .map((entry) => entry.world),
+    ['MAIN', 'ISOLATED'],
+    'the Juguang tab selected at parallel start must receive both bridge layers before collection',
+  );
+});
+
+test('runtime recovers one stale receiver on the current unique tab and retries the bridge request once', async () => {
+  const runtimeModule = loadRuntime();
+  const { createPageClient } = require(path.join(root, 'xhs', 'page-client.js'));
+  let currentTabId = 13;
+  const sends = [];
+  const pageClient = createPageClient({
+    timeoutMs: 100,
+    async sendMessage(tabId, message) {
+      sends.push({ tabId, endpoint: message.endpoint });
+      if (sends.length === 1) {
+        currentTabId = 31;
+        return undefined;
+      }
+      return {
+        channel: 'xhs-page-bridge-v2',
+        type: 'XHS_PAGE_RESPONSE',
+        requestId: message.requestId,
+        platform: message.platform,
+        ok: true,
+        data: { advertiserId: 1001, accountType: 4 },
+      };
+    },
+  });
+  const chrome = createFakeChrome(() => [{
+    id: currentTabId,
+    url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+  }]);
+  const collectors = {
+    juguang: (dependencies) => ({
+      async collect(input) {
+        const identity = await dependencies.pageClient.request({
+          tabId: input.tabId,
+          platform: 'juguang',
+          endpoint: 'accounts.current',
+          payload: {},
+          signal: input.signal,
+        });
+        assert.equal(identity.advertiserId, 1001);
+        return completeResult('juguang');
+      },
+    }),
+  };
+  const fixture = createRuntimeOptions({ chrome, collectors, pageClient });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({
+    runId: 'fixture-stale-receiver-tab-replaced',
+    platforms: ['juguang'],
+  }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.deepEqual(sends, [
+    { tabId: 13, endpoint: 'accounts.current' },
+    { tabId: 31, endpoint: 'accounts.current' },
+  ]);
+  assert.equal(chrome.fixture.tabQueries.length, 2, 'recovery must re-query tabs exactly once');
+  assert.deepEqual(
+    chrome.fixture.scriptExecutions.map((entry) => entry.target.tabId),
+    [13, 13, 31, 31],
+    'recovery must reinstall MAIN and ISOLATED bridges only on the newly selected tab',
+  );
+});
+
+test('runtime bounds same-tab stale-receiver recovery to one reinjection and one replay', async () => {
+  const runtimeModule = loadRuntime();
+  const { createPageClient } = require(path.join(root, 'xhs', 'page-client.js'));
+  let sendCount = 0;
+  const pageClient = createPageClient({
+    timeoutMs: 100,
+    async sendMessage() {
+      sendCount += 1;
+      return undefined;
+    },
+  });
+  const chrome = createFakeChrome([
+    { id: 13, url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note' },
+  ]);
+  const collectors = {
+    juguang: (dependencies) => ({
+      async collect(input) {
+        await dependencies.pageClient.request({
+          tabId: input.tabId,
+          platform: 'juguang',
+          endpoint: 'accounts.current',
+          payload: {},
+          signal: input.signal,
+        });
+        return completeResult('juguang');
+      },
+    }),
+  };
+  const fixture = createRuntimeOptions({ chrome, collectors, pageClient });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({
+    runId: 'fixture-stale-receiver-bounded',
+    platforms: ['juguang'],
+  }));
+
+  assert.equal(result.platforms.juguang.status, 'failed');
+  assert.equal(result.platforms.juguang.errors[0].code, 'XHS_PAGE_BRIDGE_UNAVAILABLE');
+  assert.equal(sendCount, 2, 'a second missing receiver must surface instead of looping');
+  assert.equal(chrome.fixture.tabQueries.length, 2);
+  assert.equal(chrome.fixture.scriptExecutions.length, 4);
+});
+
+test('runtime fails closed when stale-receiver recovery finds multiple exact-origin tabs', async () => {
+  const runtimeModule = loadRuntime();
+  const { createPageClient } = require(path.join(root, 'xhs', 'page-client.js'));
+  let receiverFailed = false;
+  let sendCount = 0;
+  const pageClient = createPageClient({
+    timeoutMs: 100,
+    async sendMessage() {
+      sendCount += 1;
+      receiverFailed = true;
+      return undefined;
+    },
+  });
+  const chrome = createFakeChrome(() => receiverFailed
+    ? [
+      { id: 31, url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note' },
+      { id: 32, url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/account' },
+    ]
+    : [{ id: 13, url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note' }]);
+  const collectors = {
+    juguang: (dependencies) => ({
+      async collect(input) {
+        await dependencies.pageClient.request({
+          tabId: input.tabId,
+          platform: 'juguang',
+          endpoint: 'accounts.current',
+          payload: {},
+          signal: input.signal,
+        });
+        return completeResult('juguang');
+      },
+    }),
+  };
+  const fixture = createRuntimeOptions({ chrome, collectors, pageClient });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({
+    runId: 'fixture-stale-receiver-ambiguous',
+    platforms: ['juguang'],
+  }));
+
+  assert.equal(result.platforms.juguang.status, 'failed');
+  assert.equal(result.platforms.juguang.errors[0].code, 'XHS_PLATFORM_TAB_AMBIGUOUS');
+  assert.equal(sendCount, 1, 'an ambiguous replacement must never be guessed or retried');
+  assert.equal(chrome.fixture.scriptExecutions.length, 2, 'ambiguous tabs must not receive recovery injection');
+});
+
+test('runtime does not recover or duplicate a bridge request rejected by the platform API', async () => {
+  const runtimeModule = loadRuntime();
+  const { createPageClient } = require(path.join(root, 'xhs', 'page-client.js'));
+  let sendCount = 0;
+  const pageClient = createPageClient({
+    timeoutMs: 100,
+    async sendMessage(tabId, message) {
+      sendCount += 1;
+      return {
+        channel: 'xhs-page-bridge-v2',
+        type: 'XHS_PAGE_RESPONSE',
+        requestId: message.requestId,
+        platform: message.platform,
+        ok: false,
+        code: 'FICTIONAL_JUGUANG_API_DENIED',
+        message: 'fictional API returned no response',
+        retryable: true,
+      };
+    },
+  });
+  const chrome = createFakeChrome([
+    { id: 13, url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note' },
+  ]);
+  const collectors = {
+    juguang: (dependencies) => ({
+      async collect(input) {
+        await dependencies.pageClient.request({
+          tabId: input.tabId,
+          platform: 'juguang',
+          endpoint: 'reports.query',
+          payload: { pageNum: 1 },
+          signal: input.signal,
+        });
+        return completeResult('juguang');
+      },
+    }),
+  };
+  const fixture = createRuntimeOptions({ chrome, collectors, pageClient });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({
+    runId: 'fixture-api-error-not-recovered',
+    platforms: ['juguang'],
+  }));
+
+  assert.equal(result.platforms.juguang.status, 'failed');
+  assert.equal(result.platforms.juguang.errors[0].code, 'FICTIONAL_JUGUANG_API_DENIED');
+  assert.equal(sendCount, 1, 'an API response must never be replayed as bridge recovery');
+  assert.equal(chrome.fixture.tabQueries.length, 1);
+  assert.equal(chrome.fixture.scriptExecutions.length, 2);
+});
+
+test('runtime fails closed instead of replaying a data endpoint on a replacement tab from another account', async () => {
+  const runtimeModule = loadRuntime();
+  const { createPageClient } = require(path.join(root, 'xhs', 'page-client.js'));
+  let currentTabId = 13;
+  let observedReport = null;
+  const sends = [];
+  const pageClient = createPageClient({
+    timeoutMs: 100,
+    async sendMessage(tabId, message) {
+      sends.push({ tabId, endpoint: message.endpoint });
+      if (message.endpoint === 'accounts.current') {
+        return {
+          channel: 'xhs-page-bridge-v2',
+          type: 'XHS_PAGE_RESPONSE',
+          requestId: message.requestId,
+          platform: message.platform,
+          ok: true,
+          data: {
+            accountMarker: 'fictional-original-account',
+            advertiserId: 1001,
+            accountType: 4,
+          },
+        };
+      }
+      if (tabId === 13) {
+        currentTabId = 31;
+        return undefined;
+      }
+      return {
+        channel: 'xhs-page-bridge-v2',
+        type: 'XHS_PAGE_RESPONSE',
+        requestId: message.requestId,
+        platform: message.platform,
+        ok: true,
+        data: {
+          accountMarker: 'fictional-other-account',
+          data: { dataList: [{ noteId: 'fictional-cross-account-note', fee: 9999 }] },
+        },
+      };
+    },
+  });
+  const chrome = createFakeChrome(() => [{
+    id: currentTabId,
+    url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+  }]);
+  const collectors = {
+    juguang: (dependencies) => ({
+      async collect(input) {
+        const identity = await dependencies.pageClient.request({
+          tabId: input.tabId,
+          platform: 'juguang',
+          endpoint: 'accounts.current',
+          payload: {},
+          signal: input.signal,
+        });
+        assert.equal(identity.accountMarker, 'fictional-original-account');
+        observedReport = await dependencies.pageClient.request({
+          tabId: input.tabId,
+          platform: 'juguang',
+          endpoint: 'reports.query',
+          payload: { pageNum: 2 },
+          signal: input.signal,
+        });
+        return completeResult('juguang');
+      },
+    }),
+  };
+  const fixture = createRuntimeOptions({ chrome, collectors, pageClient });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({
+    runId: 'fixture-cross-account-data-tab-replacement',
+    platforms: ['juguang'],
+  }));
+
+  assert.equal(result.platforms.juguang.status, 'failed');
+  assert.equal(result.platforms.juguang.errors[0].code, 'XHS_PLATFORM_TAB_CHANGED');
+  assert.equal(observedReport, null, 'another account response must never reach the collector');
+  assert.deepEqual(sends, [
+    { tabId: 13, endpoint: 'accounts.current' },
+    { tabId: 13, endpoint: 'reports.query' },
+  ]);
+  assert.equal(chrome.fixture.tabQueries.length, 2, 'the replacement may be inspected but not selected');
+  assert.equal(chrome.fixture.scriptExecutions.length, 2, 'the other account tab must not be injected');
+});
+
+test('runtime may reinstall and replay a data endpoint once when the unique tab id is unchanged', async () => {
+  const runtimeModule = loadRuntime();
+  const { createPageClient } = require(path.join(root, 'xhs', 'page-client.js'));
+  let sendCount = 0;
+  const pageClient = createPageClient({
+    timeoutMs: 100,
+    async sendMessage(tabId, message) {
+      sendCount += 1;
+      if (sendCount === 1) return undefined;
+      return {
+        channel: 'xhs-page-bridge-v2',
+        type: 'XHS_PAGE_RESPONSE',
+        requestId: message.requestId,
+        platform: message.platform,
+        ok: true,
+        data: { data: { dataList: [], page: { totalCount: 0 } } },
+      };
+    },
+  });
+  const chrome = createFakeChrome([
+    { id: 13, url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note' },
+  ]);
+  const collectors = {
+    juguang: (dependencies) => ({
+      async collect(input) {
+        await dependencies.pageClient.request({
+          tabId: input.tabId,
+          platform: 'juguang',
+          endpoint: 'reports.query',
+          payload: { pageNum: 1 },
+          signal: input.signal,
+        });
+        return completeResult('juguang');
+      },
+    }),
+  };
+  const fixture = createRuntimeOptions({ chrome, collectors, pageClient });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({
+    runId: 'fixture-same-tab-data-bridge-recovery',
+    platforms: ['juguang'],
+  }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.equal(sendCount, 2);
+  assert.equal(chrome.fixture.tabQueries.length, 2);
+  assert.equal(chrome.fixture.scriptExecutions.length, 4);
 });

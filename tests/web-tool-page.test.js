@@ -13,8 +13,11 @@ const portalCss = fs.readFileSync(path.join(root, 'web-tool', 'portal.css'), 'ut
 const appCss = fs.readFileSync(path.join(root, 'web-tool', 'app.css'), 'utf8');
 const projectPage = fs.readFileSync(path.join(root, 'web-tool', 'project.js'), 'utf8');
 const taskPage = fs.readFileSync(path.join(root, 'web-tool', 'task.js'), 'utf8');
+const cloudProjectPage = fs.readFileSync(path.join(root, 'cloud-tool', 'public', 'project.js'), 'utf8');
+const cloudTaskPage = fs.readFileSync(path.join(root, 'cloud-tool', 'public', 'task.js'), 'utf8');
 const dashboard = fs.readFileSync(path.join(root, 'diagnosis-popup.js'), 'utf8');
 const background = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
+const bridge = fs.readFileSync(path.join(root, 'web-tool-bridge.js'), 'utf8');
 const server = fs.readFileSync(path.join(root, 'web-tool', 'server.mjs'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
 
@@ -47,9 +50,10 @@ for (const html of [projectHtml, reportTaskHtml, dataHtml, reportViewHtml, accou
 
 for (const html of [reportTaskHtml]) {
   for (const id of [
-    'taskGroupSelect', 'taskStoreSelect', 'startCurrentTaskBtn', 'taskRunRows',
+    'taskGroupSelect', 'taskStoreSelect', 'startCurrentTaskBtn', 'cancelCurrentTaskBtn', 'taskRunRows',
     'batchSessionNotice', 'batchGroupSelect', 'batchAccountList', 'batchAccountSummary',
     'batchSelectAllBtn', 'batchClearSelectionBtn', 'startBatchTaskBtn',
+    'juguangConcurrentTabs',
   ]) {
     assert.match(html, new RegExp('id="' + id + '"'));
   }
@@ -71,6 +75,12 @@ assert.match(reportTaskHtml, /data-task-type="report"/);
 assert.match(reportTaskHtml, /<h1>一键取数<\/h1>/);
 assert.match(reportTaskHtml, />开始一键取数<\/button>/);
 assert.match(reportTaskHtml, />开始批量一键取数<\/button>/);
+assert.match(reportTaskHtml, /人工完成验证后任务自动继续/);
+assert.match(reportTaskHtml, /所选平台同时启动取数/);
+assert.match(reportTaskHtml, /任一平台的普通失败只影响该平台/);
+assert.match(reportTaskHtml, /id="juguangConcurrentTabs"[\s\S]*?单标签安全扫描（默认）/);
+assert.match(reportTaskHtml, /value="2">2 标签并发（先自检）/);
+assert.match(reportTaskHtml, /value="3">3 标签并发（先自检）/);
 
 for (const id of [
   'refreshBtn', 'copyBtn', 'exportBtn', 'clearBtn',
@@ -102,6 +112,9 @@ assert.match(projectPage, /function exportActiveView/);
 assert.match(projectPage, /function startBatchExport/);
 assert.match(projectPage, /TaobaoReportExport/);
 assert.match(projectPage, /createStoredZip/);
+assert.match(projectPage, /function deleteStoreRun\(runId\)/);
+assert.match(projectPage, /cloudSync\.deleteRun\(runId\)/);
+assert.match(cloudProjectPage, /cloudSync\.deleteRun\(runId\)/);
 assert.match(projectPage, /exportReportBtn/);
 assert.match(projectPage, /exportBtn/);
 assert.match(projectPage, /data-project-group/);
@@ -109,6 +122,25 @@ assert.match(projectPage, /'\/report-view\.html'/);
 assert.match(projectPage, /'\/data\.html'/);
 assert.match(projectPage, /'\?embed=1&archive='/);
 assert.match(taskPage, /startProjectTask/);
+assert.match(taskPage, /concurrentAccountTabs:\s*platforms\.includes\('juguang'\)/);
+assert.match(cloudTaskPage, /concurrentAccountTabs:\s*platforms\.includes\('juguang'\)/);
+assert.match(taskPage, /cancelProjectTask/);
+assert.match(taskPage, /cancelCurrentTaskBtn/);
+assert.match(taskPage, /status\.cancelled\s*\?\s*'\u5df2\u53d6\u6d88'/);
+assert.match(taskPage, /cancelButton\.hidden\s*=\s*!\(active \|\| cancelling\)/);
+assert.match(taskPage, /cancelButton\.disabled\s*=\s*!connected \|\| cancelling/);
+assert.match(taskPage, /cancelButton\.textContent\s*=\s*cancelling\s*\?\s*'\u6b63\u5728\u53d6\u6d88'/);
+assert.match(taskPage, /status\.waitingForVerification \|\| status\.paused/);
+assert.match(taskPage, /const terminal = Boolean\(status && status\.running !== true/);
+assert.match(taskPage, /status && status\.running === true && !terminal/);
+assert.match(taskPage, /waitingForVerification\s*\?\s*'\u7b49\u5f85\u9a8c\u8bc1'/);
+assert.match(taskPage, /status\.pauseReason \|\| status\.error \|\| status\.phase/);
+assert.match(taskPage, /terminal\s*\?\s*\(status\.error \|\| status\.phase/);
+assert.match(taskPage, /taskId:\s*status\.taskId/);
+assert.match(taskPage, /function deleteStoreRun\(runId\)/);
+assert.match(taskPage, /cloudSync\.deleteRun\(runId\)/);
+assert.match(cloudTaskPage, /cloudSync\.deleteRun\(runId\)/);
+assert.doesNotMatch(taskPage, /cancelProjectTask[\s\S]{0,240}confirmed\s*:/);
 assert.match(taskPage, /startAccountBatchFromSession/);
 assert.match(taskPage, /getAccountSessionSummary/);
 assert.match(taskPage, /let selectedBatchAccountIds = new Set\(\)/);
@@ -139,6 +171,8 @@ assert.match(dashboard, /部分完成/);
 assert.match(appCss, /\.platform-step\.partial/);
 assert.match(background, /async function runProjectTask/);
 assert.match(background, /PROJECT_TASK_START/);
+assert.match(background, /concurrentAccountTabs:\s*source\.concurrentAccountTabs/);
+assert.match(bridge, /concurrentAccountTabs:\s*platforms\.includes\('juguang'\)/);
 
 for (const route of ['/data.html', '/report-view.html', '/portal.css', '/batch-report-export.js', '/project.js', '/task.js']) {
   assert.ok(server.includes("['" + route + "'"), 'missing server route ' + route);
@@ -152,6 +186,6 @@ assert.ok(bridgeContentScript);
 assert.ok(bridgeContentScript.matches.includes('http://127.0.0.1:3400/*'));
 assert.equal(bridgeContentScript.all_frames, true);
 assert.match(server, /frame-ancestors 'self'/);
-assert.equal(manifest.version, '2.37.11');
+assert.equal(manifest.version, '2.37.34');
 
 console.log('project and task page guards passed');

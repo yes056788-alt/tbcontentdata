@@ -50,7 +50,7 @@ assert.match(content, /IS_GUANGHE_DATA_PAGE/);
 assert.match(content, /IS_GUANGHE_SETTINGS_APP/);
 assert.match(content, /if \(event\.source !== window\) return;/);
 
-const retryStart = background.indexOf('function shouldRetryPlatformError(');
+const retryStart = background.indexOf('function projectVerificationChallenge(');
 const retryEnd = background.indexOf('async function runPlatformStepWithRetry(', retryStart);
 const retrySandbox = {};
 vm.runInNewContext(

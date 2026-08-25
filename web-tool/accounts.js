@@ -11,7 +11,12 @@
   let encryptedVault = null;
   let masterPassword = '';
   let vaultData = null;
+  let vaultSessionResumed = false;
   let vaultSaveQueue = Promise.resolve();
+  let vaultClearing = false;
+  let vaultLockEpoch = 0;
+  let vaultAccessGeneration = 0;
+  let legacyRecoveryAvailable = false;
 
   function escapeHtml(value) {
     return String(value == null ? '' : value)
@@ -29,8 +34,9 @@
     return new Date().toISOString();
   }
 
-  function normalizeAccountPlatform(value) {
-    return value === 'xiaohongshu' ? 'xiaohongshu' : 'taobao';
+  function normalizeAccountPlatform(value, allowLegacyDefault) {
+    if (value === 'taobao' || value === 'xiaohongshu') return value;
+    return allowLegacyDefault && (value === undefined || value === null || value === '') ? 'taobao' : '';
   }
 
   function accountPlatformLabel(value) {
@@ -70,7 +76,7 @@
 
   function defaultVault() {
     return {
-      schema: 3,
+      schema: 4,
       accountGroups: [],
       storeGroups: [],
       stores: [],
@@ -89,14 +95,52 @@
 
   function needsVaultMigration(value) {
     const source = value && typeof value === 'object' ? value : {};
-    if (Number(source.schema) !== 3 || !Array.isArray(source.stores)) return true;
+    if (Number(source.schema) !== 4 || !Array.isArray(source.stores)) return true;
+    if (source.stores.some((store) => !store || !store.credentialBindings)) return true;
     return (Array.isArray(source.accounts) ? source.accounts : []).some((account) => (
-      !account || !account.storeId || !['taobao', 'xiaohongshu'].includes(account.platform)
+      !account || !account.storeId || !['taobao', 'xiaohongshu'].includes(account.platform) || !account.label
     ));
+  }
+
+  function credentialBindingKey(platform) {
+    return platform === 'xiaohongshu' ? 'xiaohongshuAccountId' : 'taobaoAccountId';
+  }
+
+  function defaultAccountLabel(platform) {
+    return platform === 'xiaohongshu' ? '小红书账号' : '淘宝账号';
+  }
+
+  function safeAccountLabel(item, platform) {
+    const username = String(item && item.username || '').trim();
+    const label = String(item && (item.label || item.name) || '').trim().slice(0, 80);
+    return label && label !== username && !label.includes(username)
+      ? label
+      : defaultAccountLabel(platform);
+  }
+
+  function reconcileCredentialBindings(stores, accounts, inferUnique) {
+    const values = Array.isArray(accounts) ? accounts : [];
+    (Array.isArray(stores) ? stores : []).forEach((store) => {
+      const bindings = store.credentialBindings && typeof store.credentialBindings === 'object'
+        ? store.credentialBindings
+        : {};
+      const next = { taobaoAccountId: '', xiaohongshuAccountId: '' };
+      ['taobao', 'xiaohongshu'].forEach((platform) => {
+        const key = credentialBindingKey(platform);
+        const candidates = values.filter((account) => (
+          account.storeId === store.id && account.platform === platform && account.enabled !== false
+        ));
+        const requested = String(bindings[key] || '');
+        if (requested && candidates.some((account) => account.id === requested)) next[key] = requested;
+        else if (inferUnique && candidates.length === 1) next[key] = candidates[0].id;
+      });
+      store.credentialBindings = next;
+    });
   }
 
   function normalizeVault(value) {
     const source = value && typeof value === 'object' ? value : {};
+    const sourceSchema = Number(source.schema) || 1;
     const accountGroups = (Array.isArray(source.accountGroups) ? source.accountGroups : [])
       .map(cleanGroup).filter((item) => item.name);
     const storeGroups = (Array.isArray(source.storeGroups) ? source.storeGroups : [])
@@ -117,6 +161,10 @@
         id: storeId,
         name,
         groupId: storeGroupIds.has(item.groupId) ? item.groupId : '',
+        credentialBindings: {
+          taobaoAccountId: String(item.credentialBindings && item.credentialBindings.taobaoAccountId || '').slice(0, 100),
+          xiaohongshuAccountId: String(item.credentialBindings && item.credentialBindings.xiaohongshuAccountId || '').slice(0, 100),
+        },
         createdAt: String(item.createdAt || nowIso()),
         updatedAt: String(item.updatedAt || nowIso()),
       };
@@ -135,7 +183,11 @@
         if (existing && !existing.groupId && groupId) existing.groupId = groupId;
         return storeKeys.get(key);
       }
-      const store = { id: id('store'), name, groupId, createdAt: nowIso(), updatedAt: nowIso() };
+      const store = {
+        id: id('store'), name, groupId,
+        credentialBindings: { taobaoAccountId: '', xiaohongshuAccountId: '' },
+        createdAt: nowIso(), updatedAt: nowIso(),
+      };
       stores.push(store);
       storeIds.add(store.id);
       storeKeys.set(key, store.id);
@@ -150,10 +202,12 @@
       const storeId = storeIds.has(item.storeId)
         ? item.storeId
         : ensureLegacyStore(item.storeName || item.shopName, item.storeGroupId);
-      const platform = normalizeAccountPlatform(item.platform);
+      const platform = normalizeAccountPlatform(item.platform, sourceSchema < 3);
+      if (!platform) return null;
       const account = {
         id: accountId,
-        name: String(item.name || item.username || '').trim().slice(0, 80),
+        label: safeAccountLabel(item, platform),
+        name: safeAccountLabel(item, platform),
         platform,
         storeId,
         username: String(item.username || '').trim().slice(0, 160),
@@ -168,10 +222,12 @@
       };
       accountIds.add(account.id);
       return account;
-    }).filter((item) => item.storeId && item.username && item.password);
+    }).filter((item) => item && item.storeId && item.username && item.password);
+
+    reconcileCredentialBindings(stores, accounts, sourceSchema < 4);
 
     return {
-      schema: 3,
+      schema: 4,
       accountGroups,
       storeGroups,
       stores,
@@ -195,10 +251,11 @@
     }, 45000);
   }
 
-  async function syncAccountSession(snapshot) {
+  async function syncAccountSession(snapshot, sessionKey) {
     const response = await request('setAccountSession', {
       vault: snapshot,
-      masterPassword,
+      vaultLockEpoch,
+      ...(sessionKey ? { vaultSessionKey: sessionKey } : {}),
     }, 45000);
     if (!response || response.ok === false) {
       throw new Error(response && response.message || '账号库会话同步失败。');
@@ -206,16 +263,99 @@
     return response;
   }
 
+  function assertVaultAccessGeneration(generation) {
+    if (generation !== vaultAccessGeneration || !vaultData ||
+        (!masterPassword && !vaultSessionResumed)) {
+      throw new Error('账号库已锁定或会话已失效，请重新解锁。');
+    }
+  }
+
+  function invalidateVaultAccess(message) {
+    vaultAccessGeneration += 1;
+    vaultClearing = true;
+    showLocked();
+    if (message) setNotice(message, 'error');
+  }
+
   function saveVault(message) {
+    if (vaultClearing) {
+      return Promise.reject(new Error('账号库正在锁定或重置，请稍后重试。'));
+    }
     vaultData.updatedAt = nowIso();
     const snapshot = JSON.parse(JSON.stringify(vaultData));
     const password = masterPassword;
+    const generation = vaultAccessGeneration;
     const task = vaultSaveQueue.then(async () => {
-      const record = await window.TaobaoAccountVault.encrypt(snapshot, password);
-      await request('setAccountVault', { vault: record }, 45000);
+      assertVaultAccessGeneration(generation);
+      let record;
+      let sessionKey = '';
+      if (password) {
+        const prepared = await window.TaobaoAccountVault.encryptForSession(snapshot, password);
+        record = prepared.record;
+        sessionKey = prepared.sessionKey;
+      } else {
+        const prepared = await request('encryptAccountVaultFromSession', {
+          vault: snapshot,
+          vaultLockEpoch,
+        }, 45000);
+        record = prepared && prepared.vault;
+        if (!record) throw new Error('账号库会话加密失败，请重新解锁。');
+      }
+      assertVaultAccessGeneration(generation);
+      await request('setAccountVault', { vault: record, vaultLockEpoch }, 45000);
+      assertVaultAccessGeneration(generation);
       await syncProjectDirectory(snapshot);
-      await syncAccountSession(snapshot);
+      assertVaultAccessGeneration(generation);
+      await syncAccountSession(snapshot, sessionKey);
+      assertVaultAccessGeneration(generation);
       encryptedVault = record;
+      vaultSessionResumed = true;
+      if (message) setNotice(message, 'success');
+    });
+    vaultSaveQueue = task.catch(() => {});
+    return task;
+  }
+
+  function currentTeamCloudState() {
+    const cloud = window.TaobaoCloudSync;
+    if (!cloud || typeof cloud.getState !== 'function') return null;
+    const cloudState = cloud.getState();
+    return cloudState && cloudState.connected === true &&
+      String(cloudState.vaultScopeId || '').startsWith('team:')
+      ? cloudState
+      : null;
+  }
+
+  function recreateDeletedTeamVault(message) {
+    const cloud = window.TaobaoCloudSync;
+    const cloudState = currentTeamCloudState();
+    if (!cloudState || cloudState.remoteVaultDeleted !== true ||
+        typeof cloud.recreateAccountVault !== 'function') {
+      return Promise.reject(new Error('团队账号库删除状态尚未同步，请刷新页面后重试。'));
+    }
+    if (vaultClearing) {
+      return Promise.reject(new Error('账号库正在锁定或重置，请稍后重试。'));
+    }
+    vaultData.updatedAt = nowIso();
+    const snapshot = JSON.parse(JSON.stringify(vaultData));
+    const password = masterPassword;
+    const generation = vaultAccessGeneration;
+    const task = vaultSaveQueue.then(async () => {
+      assertVaultAccessGeneration(generation);
+      if (!password) throw new Error('重新创建团队账号库前请验证主密码。');
+      const prepared = await window.TaobaoAccountVault.encryptForSession(snapshot, password);
+      const record = prepared.record;
+      assertVaultAccessGeneration(generation);
+      const result = await cloud.recreateAccountVault(record);
+      assertVaultAccessGeneration(generation);
+      const nextEpoch = Number(result && result.vaultLockEpoch);
+      if (Number.isSafeInteger(nextEpoch) && nextEpoch >= 0) vaultLockEpoch = nextEpoch;
+      await syncProjectDirectory(snapshot);
+      assertVaultAccessGeneration(generation);
+      await syncAccountSession(snapshot, prepared.sessionKey);
+      assertVaultAccessGeneration(generation);
+      encryptedVault = record;
+      vaultSessionResumed = true;
       if (message) setNotice(message, 'success');
     });
     vaultSaveQueue = task.catch(() => {});
@@ -228,6 +368,12 @@
 
   function storeForAccount(account) {
     return account ? storeById(account.storeId) : null;
+  }
+
+  function isDefaultCredential(account, store) {
+    if (!account || !store) return false;
+    const bindings = store.credentialBindings || {};
+    return bindings[credentialBindingKey(account.platform)] === account.id;
   }
 
   function groupName(groupId) {
@@ -285,17 +431,17 @@
     const accounts = vaultData.accounts.filter(accountMatchesFilter);
     const taobaoCount = vaultData.accounts.filter((account) => normalizeAccountPlatform(account.platform) === 'taobao').length;
     const xiaohongshuCount = vaultData.accounts.length - taobaoCount;
-    const enabledCount = vaultData.accounts.filter((account) => (
-      normalizeAccountPlatform(account.platform) === 'taobao' && account.enabled
-    )).length;
+    const enabledCount = vaultData.accounts.filter((account) => account.enabled).length;
     $('#accountCount').textContent = vaultData.accounts.length + ' 个账号 · 淘宝 ' + taobaoCount +
-      ' · 小红书 ' + xiaohongshuCount + ' · 批量启用 ' + enabledCount;
+      ' · 小红书 ' + xiaohongshuCount + ' · 一键登录启用 ' + enabledCount;
     $('#accountFilterSummary').textContent = '显示 ' + accounts.length + ' / ' + vaultData.accounts.length;
     $('#accountRows').innerHTML = accounts.length ? accounts.map((account) => {
       const store = storeForAccount(account);
       const platform = normalizeAccountPlatform(account.platform);
-      const status = platform === 'taobao' ? (account.enabled ? '启用' : '停用') : '已保存';
-      const statusTone = platform === 'taobao' && account.enabled ? 'success' : 'empty';
+      const status = account.enabled
+        ? (isDefaultCredential(account, store) ? '默认登录' : '已启用')
+        : '停用';
+      const statusTone = account.enabled && isDefaultCredential(account, store) ? 'success' : 'empty';
       return '<tr><td><span class="account-platform-badge is-' + escapeHtml(platform) + '">' +
         escapeHtml(accountPlatformLabel(platform)) + '</span></td><td><strong>' + escapeHtml(store && store.name || '-') + '</strong></td>' +
         '<td>' + escapeHtml(maskUsername(account.username)) + '</td>' +
@@ -319,20 +465,41 @@
   }
 
   function setVaultGateMode() {
-    const creating = !encryptedVault;
-    $('#vaultTitle').textContent = creating ? '创建账号库' : '解锁账号库';
-    $('#vaultCopy').textContent = creating
-      ? '设置主密码后，账号信息将以密文保存在本机。'
-      : '输入主密码管理账号与店铺分组。';
+    const recovering = !encryptedVault && legacyRecoveryAvailable;
+    const creating = !encryptedVault && !recovering;
+    $('#vaultTitle').textContent = recovering
+      ? '迁移升级前本机账号库'
+      : (creating ? '创建账号库' : '解锁账号库');
+    $('#vaultCopy').textContent = recovering
+      ? '已发现旧版插件保留的本机密文。输入旧主密码验证后，系统会再次请你确认，再安全迁移到当前团队；不会上传主密码或明文。'
+      : (creating
+        ? '设置团队主密码后，账号信息只以密文同步；在其他电脑登录同一团队后，输入该主密码即可使用。'
+        : '输入主密码管理账号与店铺分组。');
     $('#confirmPasswordRow').hidden = !creating;
     $('#confirmPassword').required = creating;
-    $('#unlockVaultBtn').textContent = creating ? '创建并解锁' : '解锁';
-    $('#resetVaultBtn').hidden = creating;
+    $('#unlockVaultBtn').textContent = recovering ? '验证并迁移' : (creating ? '创建并解锁' : '解锁');
+    $('#resetVaultBtn').hidden = creating || recovering;
+  }
+
+  function canRecoverLegacyVault(binding) {
+    if (!binding || binding.legacyAvailable !== true ||
+        binding.vaultScopeId !== 'team:https://tbdata.aizicheng.com') return false;
+    const cloud = window.TaobaoCloudSync;
+    if (!cloud || typeof cloud.getState !== 'function' ||
+        typeof cloud.migrateLegacyAccountVault !== 'function') return false;
+    const cloudState = cloud.getState();
+    return Boolean(cloudState && cloudState.connected === true &&
+      cloudState.legacyAvailable === true &&
+      cloudState.permissions && cloudState.permissions.canWriteVault === true &&
+      cloudState.remoteVaultExists === false &&
+      Number(cloudState.remoteVaultRevision) === 0 &&
+      cloudState.remoteVaultDeleted !== true);
   }
 
   function showLocked() {
     masterPassword = '';
     vaultData = null;
+    vaultSessionResumed = false;
     $('#vaultForm').reset();
     $('#vaultGate').hidden = false;
     $('#vaultWorkspace').hidden = true;
@@ -352,7 +519,14 @@
   function syncAccountPlatformFields() {
     const isTaobao = normalizeAccountPlatform($('#accountPlatform').value) === 'taobao';
     $('#roleKeywordField').hidden = !isTaobao;
-    $('#accountEnabledField').hidden = !isTaobao;
+    $('#accountEnabledField').hidden = false;
+    $('#accountEnabledLabel').textContent = isTaobao
+      ? '用于一键登录并参与淘宝批量任务'
+      : '用于蒲公英与聚光一键登录';
+    $('#defaultCredentialLabel').textContent = isTaobao
+      ? '设为该店铺淘宝默认登录账号（星河及淘宝平台）'
+      : '设为该店铺小红书默认登录账号（蒲公英 + 聚光共用）';
+    $('#loginUsername').placeholder = isTaobao ? '淘宝账号 / 手机号' : '小红书登录邮箱';
     $('#accountDialogTitle').textContent = ($('#accountId').value ? '编辑' : '新增') +
       accountPlatformLabel($('#accountPlatform').value) + '账号';
   }
@@ -367,10 +541,12 @@
     $('#accountId').value = value ? value.id : '';
     $('#accountPlatform').value = value ? normalizeAccountPlatform(value.platform) : 'taobao';
     $('#accountStoreName').value = store ? store.name : groupStores.length === 1 ? groupStores[0].name : '';
+    $('#loginLabel').value = value ? value.label || value.name || '' : '';
     $('#loginUsername').value = value ? value.username : '';
     $('#loginPassword').value = value ? value.password : '';
     $('#roleKeyword').value = value ? value.roleKeyword : '品牌';
     $('#accountEnabled').checked = value ? value.enabled : true;
+    $('#defaultCredential').checked = value ? isDefaultCredential(value, store) : true;
     $('#showAccountPassword').checked = false;
     $('#loginPassword').type = 'password';
     fillStoreGroupSelect($('#accountStoreGroupSelect'), groupId, false);
@@ -402,7 +578,11 @@
       current.updatedAt = nowIso();
       return current;
     }
-    const store = { id: id('store'), name, groupId, createdAt: nowIso(), updatedAt: nowIso() };
+    const store = {
+      id: id('store'), name, groupId,
+      credentialBindings: { taobaoAccountId: '', xiaohongshuAccountId: '' },
+      createdAt: nowIso(), updatedAt: nowIso(),
+    };
     vaultData.stores.push(store);
     return store;
   }
@@ -413,25 +593,42 @@
     const storeName = $('#accountStoreName').value.trim().slice(0, 80);
     const groupId = $('#accountStoreGroupSelect').value;
     const platform = normalizeAccountPlatform($('#accountPlatform').value);
+    if (!platform) throw new Error('账号平台无效。');
+    const label = $('#loginLabel').value.trim().slice(0, 80) || defaultAccountLabel(platform);
     const username = $('#loginUsername').value.trim().slice(0, 160);
     const password = $('#loginPassword').value.slice(0, 240);
     if (!storeName || !username || !password) throw new Error('请填写完整的店铺、登录账号和密码。');
     const store = resolveStoreForAccount(existing, storeName, groupId);
+    const previousStoreId = existing && existing.storeId;
+    const previousPlatform = existing && existing.platform;
     const value = {
       id: existing ? existing.id : id('account'),
       storeId: store.id,
-      name: username,
+      label,
+      name: label,
       platform,
       username,
       password,
       accountGroupId: existing ? existing.accountGroupId : '',
       roleKeyword: platform === 'taobao' ? ($('#roleKeyword').value.trim().slice(0, 50) || '品牌') : '',
-      enabled: platform === 'taobao' ? $('#accountEnabled').checked : true,
+      enabled: $('#accountEnabled').checked,
       createdAt: existing ? existing.createdAt : nowIso(),
       updatedAt: nowIso(),
     };
+    if (existing && previousStoreId) {
+      const previousStore = storeById(previousStoreId);
+      const previousKey = credentialBindingKey(previousPlatform);
+      if (previousStore && previousStore.credentialBindings && previousStore.credentialBindings[previousKey] === existing.id) {
+        previousStore.credentialBindings[previousKey] = '';
+      }
+    }
     if (existing) Object.assign(existing, value);
     else vaultData.accounts.push(value);
+    reconcileCredentialBindings(vaultData.stores, vaultData.accounts, false);
+    const key = credentialBindingKey(platform);
+    store.credentialBindings = store.credentialBindings || { taobaoAccountId: '', xiaohongshuAccountId: '' };
+    if ($('#defaultCredential').checked && value.enabled) store.credentialBindings[key] = value.id;
+    else if (store.credentialBindings[key] === value.id) store.credentialBindings[key] = '';
     await saveVault(existing ? '账号已更新。' : '账号已新增。');
     closeAccountDialog();
     renderAll();
@@ -480,6 +677,7 @@
     }
     if (!window.confirm('删除' + accountPlatformLabel(account.platform) + '账号“' + account.username + '”？店铺项目与历史记录会保留。')) return;
     vaultData.accounts = vaultData.accounts.filter((item) => item.id !== account.id);
+    reconcileCredentialBindings(vaultData.stores, vaultData.accounts, false);
     await saveVault('账号已删除。');
     renderAll();
   }
@@ -488,18 +686,38 @@
     try {
       const response = await request('ping', {}, 5000);
       setConnection(Boolean(response && response.connected), response && response.version);
-      const stored = await request('getStorage', { keys: [VAULT_KEY, PROJECT_DIRECTORY_KEY] });
-      encryptedVault = stored && stored[VAULT_KEY] || null;
-      const management = await request('getAccountManagementSession', {}, 10000).catch(() => null);
-      const session = management && management.session;
-      if (session && session.vault && String(session.masterPassword || '').length >= 8) {
-        masterPassword = String(session.masterPassword);
-        vaultData = normalizeVault(session.vault);
-        showWorkspace();
-        setNotice('本次 Chrome 会话已自动恢复账号库。', 'success');
-      } else {
-        setVaultGateMode();
+      const binding = await request('bindAccountVaultScope', {}, 30000);
+      const nextEpoch = Number(binding && binding.vaultLockEpoch);
+      if (!binding || !binding.vaultScopeId || !Number.isSafeInteger(nextEpoch) || nextEpoch < 0) {
+        throw new Error('账号库工作区绑定失败，请刷新页面后重试。');
       }
+      vaultLockEpoch = nextEpoch;
+      vaultAccessGeneration += 1;
+      vaultClearing = false;
+      const generation = vaultAccessGeneration;
+      const stored = await request('getStorage', { keys: [VAULT_KEY, PROJECT_DIRECTORY_KEY] });
+      if (generation !== vaultAccessGeneration || vaultClearing) return;
+      encryptedVault = stored && stored[VAULT_KEY] || null;
+      legacyRecoveryAvailable = !encryptedVault && canRecoverLegacyVault(binding);
+      if (encryptedVault) {
+        try {
+          const management = await request('getAccountManagementSession', {}, 30000);
+          const managementEpoch = Number(management && management.vaultLockEpoch);
+          if (Number.isSafeInteger(managementEpoch) && managementEpoch >= 0) {
+            vaultLockEpoch = managementEpoch;
+          }
+          if (generation !== vaultAccessGeneration || vaultClearing) return;
+          if (management && management.unlocked === true && management.vault) {
+            masterPassword = '';
+            vaultData = normalizeVault(management.vault);
+            vaultSessionResumed = true;
+            setNotice('已恢复本次 Chrome 会话的账号库。', 'success');
+            showWorkspace();
+            return;
+          }
+        } catch (error) {}
+      }
+      setVaultGateMode();
     } catch (error) {
       setConnection(false, '');
       setNotice('未连接到扩展数据助手，请在 chrome://extensions 重新加载扩展后刷新网页。', 'error');
@@ -521,25 +739,88 @@
     if (message.type === 'ready') setConnection(true, message.version);
   });
 
+  window.addEventListener('taobao-cloud-sync', (event) => {
+    const detail = event && event.detail || {};
+    if (detail.type !== 'vault-locked' && detail.type !== 'vault-tombstoned') return;
+    const nextEpoch = Number(detail.vaultLockEpoch);
+    if (Number.isSafeInteger(nextEpoch) && nextEpoch >= 0) vaultLockEpoch = nextEpoch;
+    if (detail.type === 'vault-tombstoned') {
+      encryptedVault = null;
+      legacyRecoveryAvailable = false;
+      invalidateVaultAccess('团队账号库已重置，本机密文与明文会话已清除。');
+      vaultClearing = false;
+      setVaultGateMode();
+      return;
+    }
+    invalidateVaultAccess('云端会话已失效，账号库已锁定，请重新登录并解锁。');
+  });
+
   $('#vaultForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const password = $('#masterPassword').value;
+    vaultAccessGeneration += 1;
+    vaultClearing = false;
     try {
-      if (!encryptedVault) {
+      if (legacyRecoveryAvailable && !encryptedVault) {
+        const prepared = await request('getLegacyAccountVault', {}, 30000);
+        if (!prepared || prepared.legacyAvailable !== true || !prepared.legacyVault ||
+            !/^[a-f0-9]{64}$/i.test(String(prepared.fingerprint || '')) ||
+            Number(prepared.vaultLockEpoch) !== vaultLockEpoch) {
+          throw new Error('升级前本机账号库已变化，请刷新页面后重试。');
+        }
+        const opened = await window.TaobaoAccountVault.open(prepared.legacyVault, password);
+        const migratedSchema = needsVaultMigration(opened.value);
+        const normalized = normalizeVault(opened.value);
+        if (!window.confirm('旧主密码已验证。确认将这份升级前本机账号库迁移到当前团队密码库？')) {
+          setNotice('已取消迁移，旧账号库密文仍保留在本机。');
+          return;
+        }
+        const result = await window.TaobaoCloudSync.migrateLegacyAccountVault({
+          fingerprint: prepared.fingerprint,
+          vaultLockEpoch,
+        });
+        if (!result || result.migrated !== true) {
+          const latest = await request('getStorage', { keys: [VAULT_KEY] }, 30000);
+          encryptedVault = latest && latest[VAULT_KEY] || null;
+          legacyRecoveryAvailable = false;
+          setVaultGateMode();
+          if (encryptedVault) {
+            setNotice('云端已有团队账号库，已下载最新密文；升级前本机密文仍保留。请输入团队主密码解锁。', 'error');
+            return;
+          }
+          throw new Error('云端账号库状态已变化，旧密文已保留，请刷新后重试。');
+        }
+        encryptedVault = prepared.legacyVault;
+        legacyRecoveryAvailable = false;
+        masterPassword = password;
+        vaultData = normalized;
+        if (migratedSchema) await saveVault('旧账号库已迁移并升级，账号数据已保留。');
+        else {
+          await syncProjectDirectory(vaultData);
+          await syncAccountSession(vaultData, opened.sessionKey);
+          vaultSessionResumed = true;
+        }
+      } else if (!encryptedVault) {
         if (password.length < 8) throw new Error('主密码至少需要 8 位。');
         if (password !== $('#confirmPassword').value) throw new Error('两次输入的主密码不一致。');
         masterPassword = password;
         vaultData = defaultVault();
-        await saveVault('账号库已创建。');
+        const cloudState = currentTeamCloudState();
+        if (cloudState && cloudState.remoteVaultDeleted === true) {
+          await recreateDeletedTeamVault('团队账号库已重新创建。');
+        } else {
+          await saveVault('账号库已创建。');
+        }
       } else {
-        const decrypted = await window.TaobaoAccountVault.decrypt(encryptedVault, password);
-        const migrated = needsVaultMigration(decrypted);
+        const opened = await window.TaobaoAccountVault.open(encryptedVault, password);
+        const migrated = needsVaultMigration(opened.value);
         masterPassword = password;
-        vaultData = normalizeVault(decrypted);
+        vaultData = normalizeVault(opened.value);
         if (migrated) await saveVault('旧账号库已升级，账号数据已保留。');
         else {
           await syncProjectDirectory(vaultData);
-          await syncAccountSession(vaultData);
+          await syncAccountSession(vaultData, opened.sessionKey);
+          vaultSessionResumed = true;
         }
       }
       setNotice('账号库已解锁。', 'success');
@@ -547,28 +828,52 @@
     } catch (error) {
       masterPassword = '';
       vaultData = null;
+      vaultSessionResumed = false;
       setNotice(error.message, 'error');
     }
   });
 
   $('#resetVaultBtn').addEventListener('click', async () => {
-    if (!window.confirm('重置账号库会删除全部分组、账号和提醒配置，历史归档不会删除。确认继续？')) return;
+    const teamCloudState = currentTeamCloudState();
+    const confirmation = teamCloudState
+      ? '重置团队账号库会删除所有电脑上的分组、账号和提醒配置，历史归档不会删除。确认继续？'
+      : '重置账号库会删除全部分组、账号和提醒配置，历史归档不会删除。确认继续？';
+    if (!window.confirm(confirmation)) return;
+    vaultClearing = true;
     try {
-      await request('clearAccountVault');
+      await vaultSaveQueue;
+      const response = teamCloudState && window.TaobaoCloudSync &&
+          typeof window.TaobaoCloudSync.deleteAccountVault === 'function'
+        ? await window.TaobaoCloudSync.deleteAccountVault()
+        : await request('clearAccountVault', { vaultLockEpoch });
+      if (Number.isSafeInteger(Number(response && response.vaultLockEpoch))) {
+        vaultLockEpoch = Number(response.vaultLockEpoch);
+      }
       encryptedVault = null;
-      showLocked();
+      invalidateVaultAccess();
       setNotice('账号库已重置。', 'success');
-    } catch (error) { setNotice(error.message, 'error'); }
+    } catch (error) {
+      setNotice(error.message, 'error');
+    } finally {
+      vaultClearing = false;
+    }
   });
 
   $('#lockVaultBtn').addEventListener('click', async () => {
+    vaultClearing = true;
     try {
-      const response = await request('clearAccountSession');
+      await vaultSaveQueue;
+      const response = await request('lockAccountVault');
       if (!response || response.ok === false) throw new Error(response && response.message || '锁定账号库失败。');
-      showLocked();
+      if (Number.isSafeInteger(Number(response.vaultLockEpoch))) {
+        vaultLockEpoch = Number(response.vaultLockEpoch);
+      }
+      invalidateVaultAccess();
       setNotice('账号库已锁定，本次 Chrome 会话凭据已清除。');
     } catch (error) {
       setNotice(error.message, 'error');
+    } finally {
+      vaultClearing = false;
     }
   });
 

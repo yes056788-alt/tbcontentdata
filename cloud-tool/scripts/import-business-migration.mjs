@@ -16,20 +16,28 @@ function usage() {
   TB_MIGRATION_PASSPHRASE='...' RUN_DATA_KEY='base64-32-byte-key' \\
     node scripts/import-business-migration.mjs \\
     --package /secure/path/export.tbmig \\
-    [--sqlite .data/team.sqlite] [--objects .data/objects] [--migrations drizzle]
+    [--sqlite .data/team.sqlite] [--objects .data/objects] [--migrations drizzle] \\
+    [--recreate-vault]
 
 The migration passphrase and RUN_DATA_KEY are accepted only through environment
 variables so they do not appear in shell history as command-line arguments.
-The importer refuses to overwrite non-empty business tables or run objects.`;
+The importer accepts v2/v3/v4 packages; current exports use v4 so a shared-vault
+deletion tombstone and its revision survive a same-origin migration.
+The importer refuses to overwrite non-empty business tables or run objects.
+--recreate-vault is required to replace a durable shared-vault tombstone.`;
 }
 
 function parseArguments(argv) {
-  const options = { dryRun: false };
+  const options = { dryRun: false, recreateVault: false };
   const valueOptions = new Set(["--package", "--sqlite", "--objects", "--migrations"]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--dry-run") {
       options.dryRun = true;
+      continue;
+    }
+    if (argument === "--recreate-vault") {
+      options.recreateVault = true;
       continue;
     }
     if (argument === "--help" || argument === "-h") {
@@ -67,6 +75,7 @@ async function main() {
     process.stdout.write(`${JSON.stringify({
       ok: true,
       mode: "dry-run",
+      formatVersion: verified.manifest.version,
       createdAt: verified.manifest.createdAt,
       catalogSha256: verified.manifest.catalogSha256,
       records: verified.imported,
@@ -88,10 +97,12 @@ async function main() {
       database,
       objectStore: createFileMigrationObjectStore(objectsPath),
       runDataKey,
+      recreateVault: options.recreateVault,
     });
     process.stdout.write(`${JSON.stringify({
       ok: true,
       mode: "import",
+      formatVersion: result.manifest.version,
       createdAt: result.manifest.createdAt,
       catalogSha256: result.manifest.catalogSha256,
       records: result.imported,

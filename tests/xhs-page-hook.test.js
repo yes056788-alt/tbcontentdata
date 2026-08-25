@@ -44,9 +44,13 @@ function evaluateHook(hook, options = {}) {
   const origin = options.origin || hook.origin;
   const topFrame = options.topFrame !== false;
   const responseBody = options.responseBody || hook.responseBody;
+  const responseBodies = Array.isArray(options.responseBodies) && options.responseBodies.length
+    ? options.responseBodies
+    : null;
   const messageListeners = [];
   const posted = [];
   const requests = [];
+  const timers = [];
 
   class FakeXMLHttpRequest {
     constructor() {
@@ -75,7 +79,10 @@ function evaluateHook(hook, options = {}) {
     send(body) {
       this.body = body;
       this.status = 200;
-      this.responseText = JSON.stringify(responseBody);
+      const requestIndex = requests.indexOf(this);
+      this.responseText = JSON.stringify(responseBodies
+        ? responseBodies[Math.min(requestIndex, responseBodies.length - 1)]
+        : responseBody);
       queueMicrotask(() => {
         if (typeof this.onload === 'function') this.onload();
         for (const listener of this.listeners.get('load') || []) listener.call(this);
@@ -118,7 +125,10 @@ function evaluateHook(hook, options = {}) {
     },
     queueMicrotask,
     self: windowObject,
-    setTimeout() { return 1; },
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
     top: windowObject.top,
     window: windowObject,
   });
@@ -130,6 +140,7 @@ function evaluateHook(hook, options = {}) {
     origin,
     posted,
     requests,
+    timers,
     windowObject,
     async dispatch(data, eventOverrides = {}) {
       const event = Object.assign({
@@ -139,6 +150,13 @@ function evaluateHook(hook, options = {}) {
       }, eventOverrides);
       for (const listener of messageListeners) listener(event);
       await new Promise((resolve) => setImmediate(resolve));
+    },
+    async runNextTimer() {
+      const timer = timers.shift();
+      if (!timer) return false;
+      timer.callback();
+      await new Promise((resolve) => setImmediate(resolve));
+      return true;
     },
   };
 }
@@ -269,4 +287,136 @@ test('adstar reads the current token into its fixed request URL without returnin
     false,
   );
   assert.equal(Object.prototype.hasOwnProperty.call(evaluated.posted[0].message, 'url'), false);
+});
+
+test('adstar retries the bounded login-info initialization error once and preserves safe diagnostics', async () => {
+  const hook = HOOKS.find((item) => item.platform === 'adstar');
+  const evaluated = evaluateHook(hook, {
+    responseBodies: [
+      {
+        success: false,
+        msgCode: 'GET_USER_LOGIN_INFO_ERROR',
+        msgInfo: '获取用户登录信息失败',
+      },
+      hook.responseBody,
+    ],
+  });
+
+  await evaluated.dispatch(requestFor(hook));
+
+  assert.equal(evaluated.requests.length, 1);
+  assert.equal(evaluated.posted.length, 0, '受控恢复完成前不得提前报错');
+  assert.equal(evaluated.timers.length, 1);
+  assert.equal(evaluated.timers[0].delay, 800);
+
+  await evaluated.runNextTimer();
+
+  assert.equal(evaluated.requests.length, 2, '会话初始化仅重试一次');
+  assert.equal(evaluated.posted.length, 1);
+  assert.equal(evaluated.posted[0].message.ok, true);
+});
+
+test('adstar fails closed after one login-info retry and returns endpoint plus business diagnostics', async () => {
+  const hook = HOOKS.find((item) => item.platform === 'adstar');
+  const loginInfoError = {
+    success: false,
+    msgCode: 'GET_USER_LOGIN_INFO_ERROR',
+    msgInfo: '获取用户登录信息失败',
+  };
+  const evaluated = evaluateHook(hook, {
+    responseBodies: [loginInfoError, loginInfoError],
+  });
+
+  await evaluated.dispatch(requestFor(hook));
+  await evaluated.runNextTimer();
+
+  assert.equal(evaluated.requests.length, 2);
+  assert.equal(evaluated.timers.length, 0, '失败后不得继续重试');
+  assert.equal(evaluated.posted.length, 1);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(evaluated.posted[0].message)),
+    {
+      channel: CHANNEL,
+      type: RESPONSE_TYPE,
+      platform: 'adstar',
+      requestId: 'fixture-request-123456',
+      nonce: 'fixture-nonce-123456',
+      ok: false,
+      code: 'ADSTAR_API_ERROR',
+      businessCode: 'GET_USER_LOGIN_INFO_ERROR',
+      endpoint: 'projects.list',
+      message: '[GET_USER_LOGIN_INFO_ERROR] 获取用户登录信息失败',
+      retryable: false,
+    },
+  );
+});
+
+test('adstar does not retry or accept an unrelated business failure with HTTP 200', async () => {
+  const hook = HOOKS.find((item) => item.platform === 'adstar');
+  const evaluated = evaluateHook(hook, {
+    responseBody: {
+      success: false,
+      msgCode: 'STAR_PERMISSION_DENIED',
+      msgInfo: '当前账号无权访问该数据',
+      model: hook.responseBody.model,
+    },
+  });
+
+  await evaluated.dispatch(requestFor(hook));
+
+  assert.equal(evaluated.requests.length, 1);
+  assert.equal(evaluated.timers.length, 0);
+  assert.equal(evaluated.posted.length, 1);
+  assert.equal(evaluated.posted[0].message.ok, false);
+  assert.equal(evaluated.posted[0].message.businessCode, 'STAR_PERMISSION_DENIED');
+  assert.equal(evaluated.posted[0].message.endpoint, 'projects.list');
+  assert.equal(evaluated.posted[0].message.retryable, false);
+  assert.match(evaluated.posted[0].message.message, /无权访问/);
+});
+
+test('adstar redacts sensitive query values from returned business diagnostics', async () => {
+  const hook = HOOKS.find((item) => item.platform === 'adstar');
+  const evaluated = evaluateHook(hook, {
+    responseBody: {
+      success: false,
+      msgCode: 'STAR_ERROR',
+      msgInfo: 'request failed https://adstar.alimama.com/api/one/order/list?_tb_token_=fixture-secret&bizCode=adstar',
+    },
+  });
+
+  await evaluated.dispatch(requestFor(hook));
+
+  const response = JSON.stringify(evaluated.posted[0].message);
+  assert.equal(response.includes('fixture-secret'), false);
+  assert.equal(response.includes('_tb_token_'), false);
+  assert.match(evaluated.posted[0].message.message, /bizCode=adstar/);
+});
+
+test('adstar conservatively redacts credential aliases and authorization schemes without changing the business code', async () => {
+  const hook = HOOKS.find((item) => item.platform === 'adstar');
+  const evaluated = evaluateHook(hook, {
+    responseBody: {
+      success: false,
+      msgCode: 'STAR_PERMISSION_DENIED',
+      msgInfo: [
+        'request failed',
+        'Authorization: Bearer fixture-bearer-secret',
+        'Proxy-Authorization: Basic Zml4dHVyZS1iYXNpYy1zZWNyZXQ=',
+        'https://adstar.alimama.com/api/one/order/list?sessionId=fixture-session-secret&secret=fixture-secret-value&csrf=fixture-csrf-secret&accessKey=fixture-access-key&apiKey=fixture-api-key&bizCode=adstar',
+      ].join('; '),
+    },
+  });
+
+  await evaluated.dispatch(requestFor(hook));
+
+  const response = JSON.stringify(evaluated.posted[0].message);
+  assert.equal(evaluated.posted[0].message.businessCode, 'STAR_PERMISSION_DENIED');
+  assert.match(evaluated.posted[0].message.message, /\[STAR_PERMISSION_DENIED\]/);
+  assert.match(evaluated.posted[0].message.message, /bizCode=adstar/);
+  assert.doesNotMatch(response, /fixture-bearer-secret|Zml4dHVyZS1iYXNpYy1zZWNyZXQ=/);
+  assert.doesNotMatch(
+    response,
+    /fixture-session-secret|fixture-secret-value|fixture-csrf-secret|fixture-access-key|fixture-api-key/,
+  );
+  assert.doesNotMatch(response, /sessionId=|secret=|csrf=|accessKey=|apiKey=/i);
 });

@@ -10,6 +10,8 @@
   const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
   const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
   const MAX_PAYLOAD_BYTES = 64 * 1024;
+  const LOGIN_INFO_RETRY_DELAY_MS = 800;
+  const LOGIN_INFO_RETRY_CODE = 'GET_USER_LOGIN_INFO_ERROR';
   const ENDPOINTS = Object.freeze({
     'projects.list': {
       path: '/api/one/deliveryProject/list',
@@ -51,7 +53,68 @@
     }, fields), ORIGIN);
   }
 
-  function request(message) {
+  function sensitiveDiagnosticKey(key) {
+    const normalized = String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    return normalized.includes('token') || normalized.includes('cookie') ||
+      normalized.includes('authorization') || normalized.includes('signature') ||
+      normalized === 'sign' || normalized === 'xs' || normalized === 'xsign' ||
+      normalized.startsWith('xsec') || normalized.startsWith('csrf') ||
+      normalized.includes('password') || normalized.includes('credential') ||
+      normalized === 'secret' || normalized.endsWith('secretkey') ||
+      normalized.endsWith('secretvalue') || normalized === 'sessionid' ||
+      normalized === 'setcookie' || normalized.endsWith('accesskey') ||
+      normalized.endsWith('apikey');
+  }
+
+  function diagnosticHashHasSensitiveKey(hash) {
+    const source = String(hash || '');
+    for (const match of source.matchAll(/(?:^|[?&#])([^=&#?]+)=/g)) {
+      let key = match[1];
+      try {
+        key = decodeURIComponent(key);
+      } catch (error) {}
+      if (sensitiveDiagnosticKey(key)) return true;
+    }
+    return false;
+  }
+
+  function safeDiagnosticText(value) {
+    return String(value == null ? '' : value)
+      .replace(/https?:\/\/[^\s"'<>]+/gi, (candidate) => {
+        try {
+          const url = new URL(candidate);
+          for (const key of Array.from(url.searchParams.keys())) {
+            if (sensitiveDiagnosticKey(key)) url.searchParams.delete(key);
+          }
+          if (diagnosticHashHasSensitiveKey(url.hash)) url.hash = '';
+          return url.toString();
+        } catch (error) {
+          return '[redacted-url]';
+        }
+      })
+      .replace(/\b(?:proxy-)?authorization\s*[:=]\s*[^;,\r\n]+/gi, '[redacted]')
+      .replace(
+        /\b[a-z0-9_.-]*(?:token|cookie|signature|password|credential|session[_-]?id|secret|csrf|access[_-]?key|api[_-]?key)[a-z0-9_.-]*\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s;,]+)/gi,
+        '[redacted]'
+      );
+  }
+
+  function businessError(body, status) {
+    const source = body && typeof body === 'object' ? body : {};
+    const businessCode = safeDiagnosticText(
+      source.msgCode || source.errorCode || source.subCode ||
+      (source.code == null ? '' : source.code)
+    ).trim().replace(/[^a-z0-9_.:-]/gi, '_').slice(0, 120);
+    const detail = safeDiagnosticText(
+      source.msgInfo || source.errorMsg || source.msg || source.message || ''
+    ).trim().slice(0, 240);
+    return {
+      businessCode,
+      message: `${businessCode ? `[${businessCode}] ` : ''}${detail || `HTTP ${status}`}`,
+    };
+  }
+
+  function request(message, loginInfoRetryCount) {
     const token = currentToken();
     if (!token) {
       post(message, { ok: false, code: 'ADSTAR_TOKEN_MISSING', message: '星河登录态已失效，请重新登录。', retryable: false });
@@ -79,9 +142,24 @@
         const code = Number(body && body.code);
         const ok = xhr.status >= 200 && xhr.status < 300 && body && body.success !== false &&
           (!Number.isFinite(code) || code === 0 || code === 200);
-        post(message, ok
-          ? { ok: true, data: body }
-          : { ok: false, code: 'ADSTAR_API_ERROR', message: String(body && (body.msg || body.message) || `HTTP ${xhr.status}`), retryable: xhr.status >= 500 });
+        if (ok) {
+          post(message, { ok: true, data: body });
+          return;
+        }
+        const diagnostic = businessError(body, xhr.status);
+        const retries = Math.max(0, Number(loginInfoRetryCount) || 0);
+        if (diagnostic.businessCode === LOGIN_INFO_RETRY_CODE && retries < 1) {
+          setTimeout(() => request(message, retries + 1), LOGIN_INFO_RETRY_DELAY_MS);
+          return;
+        }
+        post(message, {
+          ok: false,
+          code: 'ADSTAR_API_ERROR',
+          businessCode: diagnostic.businessCode || undefined,
+          endpoint: message.endpoint,
+          message: diagnostic.message,
+          retryable: xhr.status >= 500,
+        });
       } catch (error) {
         post(message, { ok: false, code: 'ADSTAR_INVALID_JSON', message: '星河接口返回了无法识别的数据。', retryable: true });
       }

@@ -1,0 +1,1835 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4efe6">
+  <meta name="description" content="本地版经营攻防内容工具的现状诊断框架交互脑图。">
+  <title>本地版工具 · 诊断思路地图</title>
+  <style>
+    :root {
+      --ink: #172126;
+      --muted: #687278;
+      --paper: #f5f0e7;
+      --paper-2: #ede5d7;
+      --card: rgba(255, 253, 248, 0.96);
+      --line: rgba(23, 33, 38, 0.16);
+      --teal: #147d78;
+      --blue: #3a67a8;
+      --violet: #7358a6;
+      --orange: #c36b30;
+      --green: #3f7d55;
+      --red: #b94f45;
+      --gold: #a8791f;
+      --shadow: 0 18px 50px rgba(53, 44, 30, 0.12);
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { height: 100%; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      overflow: hidden;
+    }
+
+    button, input { font: inherit; }
+
+    button { color: inherit; }
+
+    .app {
+      height: 100vh;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      background:
+        radial-gradient(circle at 8% -20%, rgba(195, 107, 48, 0.12), transparent 34%),
+        radial-gradient(circle at 92% -10%, rgba(20, 125, 120, 0.12), transparent 30%),
+        var(--paper);
+    }
+
+    .topbar {
+      position: relative;
+      z-index: 30;
+      min-height: 108px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 32px;
+      padding: 20px 30px 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(245, 240, 231, 0.9);
+      backdrop-filter: blur(18px);
+    }
+
+    .brand { min-width: 0; }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 6px;
+      color: var(--teal);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 24px;
+      height: 2px;
+      border-radius: 999px;
+      background: currentColor;
+    }
+
+    h1 {
+      margin: 0;
+      font-family: Georgia, "Songti SC", "STSong", serif;
+      font-size: clamp(26px, 3vw, 40px);
+      font-weight: 700;
+      letter-spacing: -0.035em;
+      line-height: 1.08;
+    }
+
+    .subtitle {
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .stat-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(88px, 1fr));
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+
+    .stat {
+      min-width: 90px;
+      padding: 11px 13px;
+      border: 1px solid rgba(23, 33, 38, 0.1);
+      border-radius: 13px;
+      background: rgba(255, 253, 248, 0.7);
+      text-align: center;
+    }
+
+    .stat strong {
+      display: block;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 22px;
+      line-height: 1;
+    }
+
+    .stat span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+    }
+
+    .toolbar {
+      position: relative;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 56px;
+      padding: 9px 30px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(250, 247, 241, 0.92);
+      backdrop-filter: blur(16px);
+      overflow-x: auto;
+    }
+
+    .search-wrap {
+      position: relative;
+      flex: 1 1 320px;
+      min-width: 230px;
+      max-width: 430px;
+    }
+
+    .search-wrap::before {
+      content: "⌕";
+      position: absolute;
+      left: 13px;
+      top: 50%;
+      transform: translateY(-54%);
+      color: var(--muted);
+      font-size: 21px;
+      pointer-events: none;
+    }
+
+    .search-wrap input {
+      width: 100%;
+      height: 38px;
+      padding: 0 76px 0 38px;
+      border: 1px solid rgba(23, 33, 38, 0.14);
+      border-radius: 11px;
+      outline: none;
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.82);
+      transition: border-color .18s ease, box-shadow .18s ease;
+    }
+
+    .search-wrap input:focus {
+      border-color: var(--teal);
+      box-shadow: 0 0 0 3px rgba(20, 125, 120, 0.12);
+    }
+
+    .result-count {
+      position: absolute;
+      right: 11px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .tool-button {
+      flex: 0 0 auto;
+      height: 38px;
+      padding: 0 13px;
+      border: 1px solid rgba(23, 33, 38, 0.13);
+      border-radius: 11px;
+      background: rgba(255, 253, 248, 0.78);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }
+
+    .tool-button:hover {
+      transform: translateY(-1px);
+      border-color: rgba(23, 33, 38, 0.3);
+      background: white;
+    }
+
+    .tool-button[aria-pressed="true"],
+    .tool-button.primary {
+      border-color: var(--ink);
+      color: #fffdf8;
+      background: var(--ink);
+    }
+
+    .tool-separator {
+      width: 1px;
+      height: 24px;
+      margin: 0 3px;
+      background: var(--line);
+    }
+
+    .zoom-value {
+      min-width: 45px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .viewport {
+      position: relative;
+      min-height: 0;
+      overflow: hidden;
+      cursor: grab;
+      touch-action: none;
+      background-color: #eee7db;
+      background-image:
+        linear-gradient(rgba(47, 61, 67, 0.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(47, 61, 67, 0.045) 1px, transparent 1px),
+        radial-gradient(circle at 50% 48%, rgba(255, 253, 248, 0.92), rgba(238, 231, 219, 0.5) 62%);
+      background-size: 28px 28px, 28px 28px, auto;
+    }
+
+    .viewport.is-dragging { cursor: grabbing; }
+
+    .surface {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 2380px;
+      min-height: 1640px;
+      padding: 100px 80px;
+      transform-origin: 0 0;
+      will-change: transform;
+    }
+
+    #linkCanvas {
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    .map-grid {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: 870px 360px 870px;
+      align-items: center;
+      gap: 70px;
+    }
+
+    .hemisphere {
+      display: grid;
+      align-content: center;
+      gap: 28px;
+      transition: opacity .25s ease, filter .25s ease;
+    }
+
+    .branch-card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(23, 33, 38, 0.13);
+      border-radius: var(--radius-xl);
+      background: var(--card);
+      box-shadow: var(--shadow);
+      transition: opacity .2s ease, transform .2s ease, box-shadow .2s ease;
+    }
+
+    .branch-card:hover { box-shadow: 0 22px 58px rgba(53, 44, 30, 0.16); }
+
+    .branch-card::after {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 6px;
+      background: var(--branch-color, var(--teal));
+    }
+
+    .branch-card[data-side="left"]::after { inset: 0 0 0 auto; }
+
+    .branch-head {
+      width: 100%;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 14px;
+      padding: 18px 22px;
+      border: 0;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    [data-side="left"] .branch-head {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+    }
+
+    .branch-index {
+      width: 44px;
+      height: 44px;
+      display: grid;
+      place-items: center;
+      border-radius: 14px;
+      color: var(--branch-color, var(--teal));
+      background: color-mix(in srgb, var(--branch-color, var(--teal)) 12%, transparent);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 17px;
+      font-weight: 700;
+    }
+
+    .branch-title strong {
+      display: block;
+      font-family: Georgia, "Songti SC", "STSong", serif;
+      font-size: 22px;
+      line-height: 1.15;
+    }
+
+    .branch-title small {
+      display: block;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .chevron {
+      width: 29px;
+      height: 29px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: var(--muted);
+      background: rgba(23, 33, 38, 0.055);
+      transition: transform .2s ease;
+    }
+
+    .branch-card.is-collapsed .chevron { transform: rotate(-90deg); }
+
+    .branch-body {
+      padding: 0 22px 22px;
+      border-top: 1px solid rgba(23, 33, 38, 0.08);
+    }
+
+    .branch-card.is-collapsed .branch-body { display: none; }
+
+    .node-grid {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 11px;
+      padding-top: 16px;
+    }
+
+    .node-grid::before {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 0;
+      width: 1px;
+      height: 16px;
+      background: color-mix(in srgb, var(--branch-color, var(--teal)) 38%, transparent);
+    }
+
+    .map-node {
+      position: relative;
+      min-height: 84px;
+      padding: 13px 14px 12px;
+      border: 1px solid rgba(23, 33, 38, 0.1);
+      border-radius: var(--radius-md);
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.68);
+      text-align: left;
+      cursor: pointer;
+      transition: transform .16s ease, opacity .18s ease, border-color .18s ease, background .18s ease;
+    }
+
+    .map-node:hover,
+    .map-node:focus-visible {
+      transform: translateY(-2px);
+      border-color: var(--branch-color, var(--teal));
+      outline: none;
+      background: white;
+    }
+
+    .map-node strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+      line-height: 1.3;
+    }
+
+    .map-node span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .map-node .node-kicker {
+      margin-bottom: 7px;
+      color: var(--branch-color, var(--teal));
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+
+    .map-node.wide { grid-column: 1 / -1; }
+
+    .map-node.alert {
+      border-color: rgba(185, 79, 69, 0.28);
+      background: rgba(185, 79, 69, 0.07);
+    }
+
+    .chapter-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      padding-top: 16px;
+    }
+
+    .chapter-node {
+      position: relative;
+      min-height: 116px;
+      padding: 14px;
+      border: 1px solid rgba(23, 33, 38, 0.11);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.72);
+      text-align: left;
+      cursor: pointer;
+      transition: transform .16s ease, opacity .18s ease, border-color .18s ease, box-shadow .18s ease;
+    }
+
+    .chapter-node:hover,
+    .chapter-node:focus-visible {
+      transform: translateY(-2px);
+      border-color: var(--chapter-color, var(--orange));
+      outline: none;
+      box-shadow: 0 10px 24px rgba(38, 33, 24, .09);
+    }
+
+    .chapter-number {
+      display: inline-grid;
+      place-items: center;
+      width: 29px;
+      height: 29px;
+      margin-bottom: 9px;
+      border-radius: 9px;
+      color: white;
+      background: var(--chapter-color, var(--orange));
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .chapter-node strong {
+      display: block;
+      font-size: 13px;
+      line-height: 1.3;
+    }
+
+    .chapter-node p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 10.5px;
+      line-height: 1.48;
+    }
+
+    .maturity {
+      position: absolute;
+      top: 14px;
+      right: 13px;
+      padding: 4px 7px;
+      border-radius: 999px;
+      color: var(--chapter-color, var(--orange));
+      background: color-mix(in srgb, var(--chapter-color, var(--orange)) 11%, white);
+      font-size: 9px;
+      font-weight: 900;
+    }
+
+    .chapter-node.mature {
+      border-color: rgba(63, 125, 85, 0.42);
+      background: linear-gradient(150deg, rgba(63, 125, 85, 0.11), rgba(255, 255, 255, 0.8));
+    }
+
+    .chapter-node.mature::after {
+      content: "当前最完整诊断—动作链";
+      display: block;
+      margin-top: 9px;
+      color: var(--green);
+      font-size: 9px;
+      font-weight: 900;
+    }
+
+    .root-card {
+      position: relative;
+      z-index: 3;
+      padding: 28px 24px 24px;
+      border: 1px solid rgba(23, 33, 38, 0.22);
+      border-radius: 42px;
+      color: #fffdf8;
+      background:
+        radial-gradient(circle at 85% 0%, rgba(39, 167, 158, .34), transparent 34%),
+        linear-gradient(145deg, #172126, #23353b 72%);
+      box-shadow: 0 28px 70px rgba(23, 33, 38, 0.28);
+      text-align: center;
+    }
+
+    .root-card::before,
+    .root-card::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      width: 34px;
+      height: 1px;
+      background: rgba(23, 33, 38, .32);
+    }
+
+    .root-card::before { right: 100%; }
+    .root-card::after { left: 100%; }
+
+    .root-kicker {
+      color: #7dd2cb;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+
+    .root-card h2 {
+      margin: 12px 0 10px;
+      font-family: Georgia, "Songti SC", "STSong", serif;
+      font-size: 27px;
+      line-height: 1.18;
+    }
+
+    .root-card > p {
+      margin: 0;
+      color: rgba(255, 253, 248, .72);
+      font-size: 12px;
+      line-height: 1.65;
+    }
+
+    .diagnosis-chain {
+      display: grid;
+      gap: 6px;
+      margin: 20px 0 18px;
+      padding: 13px;
+      border: 1px solid rgba(255, 255, 255, .12);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, .055);
+    }
+
+    .chain-step {
+      display: grid;
+      grid-template-columns: 25px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 8px;
+      border-radius: 10px;
+      text-align: left;
+    }
+
+    .chain-step.is-current { background: rgba(125, 210, 203, .13); }
+
+    .chain-step b {
+      width: 23px;
+      height: 23px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #172126;
+      background: #7dd2cb;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 10px;
+    }
+
+    .chain-step span {
+      font-size: 11px;
+      font-weight: 750;
+    }
+
+    .chain-step em {
+      color: rgba(255, 253, 248, .54);
+      font-size: 9px;
+      font-style: normal;
+    }
+
+    .root-action {
+      width: 100%;
+      min-height: 40px;
+      padding: 9px 14px;
+      border: 1px solid rgba(125, 210, 203, .42);
+      border-radius: 12px;
+      color: white;
+      background: rgba(125, 210, 203, .13);
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 850;
+      transition: background .16s ease, transform .16s ease;
+    }
+
+    .root-action:hover { transform: translateY(-1px); background: rgba(125, 210, 203, .2); }
+
+    .legend {
+      position: absolute;
+      left: 18px;
+      bottom: 18px;
+      z-index: 12;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      max-width: calc(100% - 36px);
+      padding: 10px 13px;
+      border: 1px solid rgba(23, 33, 38, 0.1);
+      border-radius: 13px;
+      background: rgba(255, 253, 248, .87);
+      box-shadow: 0 9px 30px rgba(53, 44, 30, .1);
+      backdrop-filter: blur(14px);
+      color: var(--muted);
+      font-size: 10px;
+      pointer-events: none;
+    }
+
+    .legend span { display: flex; align-items: center; gap: 6px; }
+
+    .legend i {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--dot);
+    }
+
+    .usage-hint {
+      position: absolute;
+      right: 18px;
+      bottom: 18px;
+      z-index: 12;
+      padding: 10px 13px;
+      border: 1px solid rgba(23, 33, 38, 0.1);
+      border-radius: 13px;
+      color: var(--muted);
+      background: rgba(255, 253, 248, .87);
+      box-shadow: 0 9px 30px rgba(53, 44, 30, .1);
+      backdrop-filter: blur(14px);
+      font-size: 10px;
+      pointer-events: none;
+    }
+
+    .detail-drawer {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      bottom: 16px;
+      z-index: 25;
+      width: min(460px, calc(100% - 32px));
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      overflow: hidden;
+      border: 1px solid rgba(23, 33, 38, .14);
+      border-radius: 24px;
+      background: rgba(255, 253, 248, .98);
+      box-shadow: 0 28px 80px rgba(23, 33, 38, .24);
+      transform: translateX(calc(100% + 34px));
+      transition: transform .24s cubic-bezier(.2,.8,.2,1);
+    }
+
+    .detail-drawer.is-open { transform: translateX(0); }
+
+    .drawer-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 22px 22px 18px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(150deg, rgba(20, 125, 120, .08), transparent 60%);
+    }
+
+    .drawer-kicker {
+      color: var(--teal);
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    .drawer-head h3 {
+      margin: 7px 0 0;
+      font-family: Georgia, "Songti SC", "STSong", serif;
+      font-size: 25px;
+      line-height: 1.2;
+    }
+
+    .drawer-close {
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: white;
+      cursor: pointer;
+      font-size: 17px;
+    }
+
+    .drawer-body {
+      overflow-y: auto;
+      padding: 21px 22px 34px;
+    }
+
+    .drawer-summary {
+      margin: 0 0 18px;
+      color: #3d484d;
+      font-size: 13px;
+      line-height: 1.75;
+    }
+
+    .status-banner {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 20px;
+      padding: 12px 13px;
+      border-left: 4px solid var(--status-color, var(--teal));
+      border-radius: 10px;
+      color: #384347;
+      background: color-mix(in srgb, var(--status-color, var(--teal)) 8%, white);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .detail-section {
+      margin-top: 22px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(23, 33, 38, .1);
+    }
+
+    .detail-section h4 {
+      margin: 0 0 11px;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: .04em;
+    }
+
+    .detail-section p,
+    .detail-section li {
+      color: #566167;
+      font-size: 11.5px;
+      line-height: 1.68;
+    }
+
+    .detail-section ul,
+    .detail-section ol {
+      margin: 0;
+      padding-left: 19px;
+    }
+
+    .detail-section li + li { margin-top: 6px; }
+
+    .detail-section code {
+      display: block;
+      margin: 8px 0;
+      padding: 10px 12px;
+      overflow-wrap: anywhere;
+      border: 1px solid rgba(23, 33, 38, .09);
+      border-radius: 9px;
+      color: #27353a;
+      background: #f3efe8;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 10.5px;
+      line-height: 1.55;
+    }
+
+    .mini-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 10.5px;
+    }
+
+    .mini-table th,
+    .mini-table td {
+      padding: 8px 7px;
+      border-bottom: 1px solid rgba(23, 33, 38, .09);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .mini-table th { color: var(--muted); font-weight: 800; }
+
+    .is-dimmed { opacity: .14 !important; }
+
+    .is-match {
+      opacity: 1 !important;
+      border-color: var(--gold) !important;
+      box-shadow: 0 0 0 3px rgba(168, 121, 31, .16) !important;
+    }
+
+    .surface.focus-report .branch-card:not([data-branch="reports"]) {
+      opacity: .1;
+      filter: grayscale(.7);
+      pointer-events: none;
+    }
+
+    .surface.focus-report .root-card { opacity: .28; }
+
+    .noscript {
+      position: fixed;
+      inset: 12px;
+      z-index: 100;
+      padding: 20px;
+      border-radius: 14px;
+      background: #fff;
+    }
+
+    @media (max-width: 1180px) {
+      .stat-strip { display: none; }
+      .topbar { min-height: 94px; }
+    }
+
+    @media (max-width: 780px) {
+      body { overflow: auto; }
+      .app { height: auto; min-height: 100vh; grid-template-rows: auto auto auto; }
+      .topbar { padding: 17px 18px 15px; }
+      h1 { font-size: 29px; }
+      .subtitle { max-width: 94%; }
+      .toolbar { padding: 8px 14px; }
+      .toolbar .desktop-only, .tool-separator { display: none; }
+      .search-wrap { min-width: 210px; }
+      .viewport { min-height: auto; overflow: visible; cursor: default; touch-action: auto; }
+      .surface {
+        position: relative;
+        width: auto;
+        min-height: 0;
+        padding: 34px 15px 90px;
+        transform: none !important;
+      }
+      #linkCanvas { display: none; }
+      .map-grid { display: flex; flex-direction: column; gap: 18px; }
+      .root-card { order: -2; width: 100%; border-radius: 28px; }
+      .hemisphere { width: 100%; gap: 18px; }
+      .left-side { order: -1; }
+      .branch-card[data-side="left"]::after { inset: 0 auto 0 0; }
+      .branch-card { border-radius: 21px; }
+      .branch-title strong { font-size: 19px; }
+      .node-grid, .chapter-grid { grid-template-columns: 1fr; }
+      .map-node.wide { grid-column: auto; }
+      .legend { left: 12px; right: 12px; bottom: 14px; max-width: none; }
+      .usage-hint { display: none; }
+      .detail-drawer {
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        bottom: 10px;
+        width: calc(100% - 20px);
+      }
+    }
+
+    @media print {
+      @page { size: A3 landscape; margin: 8mm; }
+      body { overflow: visible; background: white; }
+      .app { display: block; height: auto; }
+      .topbar { min-height: auto; padding: 0 0 10mm; background: white; }
+      .toolbar, .legend, .usage-hint, .detail-drawer { display: none !important; }
+      .viewport { overflow: visible; background: white; }
+      .surface { position: relative; transform: scale(.45) !important; transform-origin: top left; }
+      .branch-card { break-inside: avoid; box-shadow: none; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="eyebrow">Local diagnosis map · current state · v2.37.24 · 2026-08-21</div>
+        <h1>本地版工具 · 诊断思路地图</h1>
+        <p class="subtitle">把“数据从哪里来、什么情况下可信、如何形成判断、最后怎么行动”放回同一张图里。</p>
+      </div>
+      <div class="stat-strip" aria-label="框架统计">
+        <div class="stat"><strong>7</strong><span>数据来源</span></div>
+        <div class="stat"><strong>9 / 45</strong><span>指标组 / 指标</span></div>
+        <div class="stat"><strong>8</strong><span>报告章节</span></div>
+        <div class="stat"><strong>1</strong><span>完整诊断—动作链</span></div>
+      </div>
+    </header>
+
+    <nav class="toolbar" aria-label="脑图工具栏">
+      <label class="search-wrap">
+        <input id="searchInput" type="search" placeholder="搜索指标、章节、门禁或缺口…" autocomplete="off">
+        <span class="result-count" id="resultCount">全部节点</span>
+      </label>
+      <button class="tool-button desktop-only" id="expandAll" type="button">全部展开</button>
+      <button class="tool-button desktop-only" id="collapseAll" type="button">收起细节</button>
+      <button class="tool-button primary" id="focusReports" type="button" aria-pressed="false">聚焦八章</button>
+      <span class="tool-separator" aria-hidden="true"></span>
+      <button class="tool-button desktop-only" id="zoomOut" type="button" aria-label="缩小">−</button>
+      <span class="zoom-value desktop-only" id="zoomValue">100%</span>
+      <button class="tool-button desktop-only" id="zoomIn" type="button" aria-label="放大">＋</button>
+      <button class="tool-button" id="resetView" type="button">复位</button>
+      <button class="tool-button desktop-only" id="printMap" type="button">打印 / PDF</button>
+    </nav>
+
+    <main class="viewport" id="viewport" aria-label="交互式诊断脑图">
+      <div class="surface" id="surface">
+        <canvas id="linkCanvas" aria-hidden="true"></canvas>
+
+        <div class="map-grid">
+          <section class="hemisphere left-side" aria-label="输入与证据侧">
+            <article class="branch-card" data-side="left" data-branch="execution" style="--branch-color: var(--blue)">
+              <button class="branch-head" type="button" aria-expanded="true">
+                <span class="branch-index">01</span>
+                <span class="branch-title">
+                  <strong>诊断对象与执行</strong>
+                  <small>先明确诊断谁、跑什么、数据怎样汇合</small>
+                </span>
+                <span class="chevron">⌄</span>
+              </button>
+              <div class="branch-body">
+                <div class="node-grid">
+                  <button class="map-node" type="button" data-detail-id="object" data-search="经营对象 项目 店铺 平台来源 runId 单次运行">
+                    <span class="node-kicker">Scope</span><strong>经营对象</strong><span>项目 → 店铺 → 平台来源 → 单次 runId</span>
+                  </button>
+                  <button class="map-node" type="button" data-detail-id="sources" data-search="七源 生意参谋 光合 万相台 DMP 星河 蒲公英 聚光">
+                    <span class="node-kicker">Sources</span><strong>七类数据源</strong><span>淘宝四源 + 小红书三源</span>
+                  </button>
+                  <button class="map-node wide" type="button" data-detail-id="orchestration" data-search="执行编排 登录准备 并行 串行 all-settled 淘宝 万相台 小红书">
+                    <span class="node-kicker">Orchestration</span><strong>登录准备后全平台并行</strong><span>淘宝四路与小红书三源同时启动；普通失败按平台隔离</span>
+                  </button>
+                  <button class="map-node" type="button" data-detail-id="batch" data-search="单店 账号库 默认账号 星河 淘宝 蒲公英 聚光 小红书 当前 Chrome 会话 回退 批量账号 100">
+                    <span class="node-kicker">Mode</span><strong>账号库默认登录</strong><span>单店默认账号库；可显式回退当前 Chrome 会话；批量仅淘宝四源</span>
+                  </button>
+                  <button class="map-node" type="button" data-detail-id="boundary" data-search="本地边界 网页 扩展 通信桥 Chrome storage cloud sync localhost">
+                    <span class="node-kicker">Boundary</span><strong>本地数据边界</strong><span>网页工作台 ↔ 扩展桥 ↔ Chrome 本地存储</span>
+                  </button>
+                </div>
+              </div>
+            </article>
+
+            <article class="branch-card" data-side="left" data-branch="gates" style="--branch-color: var(--teal)">
+              <button class="branch-head" type="button" aria-expanded="true">
+                <span class="branch-index">02</span>
+                <span class="branch-title">
+                  <strong>诊断前置门</strong>
+                  <small>先判断证据能不能用，再判断经营好不好</small>
+                </span>
+                <span class="chevron">⌄</span>
+              </button>
+              <div class="branch-body">
+                <div class="node-grid">
+                  <button class="map-node" type="button" data-detail-id="startGate" data-search="通用启动门 店铺 平台 日期 任务互斥 账号库 登录准备 验证码 人工">
+                    <span class="node-kicker">Start gate</span><strong>启动与登录准备</strong><span>输入和互斥校验后先准备登录；验证码交由人工处理</span>
+                  </button>
+                  <button class="map-node" type="button" data-detail-id="xhsGate" data-search="小红书强门 三源 日期 runId schema 分页 对账 截断 decisionReady 默认凭据路由">
+                    <span class="node-kicker">Strong gate</span><strong>小红书统一强门</strong><span>三源、日期、runId、Schema、分页与对账全部通过</span>
+                  </button>
+                  <button class="map-node alert" type="button" data-detail-id="taobaoGate" data-search="淘宝最低门 各源 必需字段 页面结构 跨源日期 运行上下文">
+                    <span class="node-kicker">Weak point</span><strong>淘宝各源最低门</strong><span>有单源校验，尚无跨源日期与统一运行上下文总门</span>
+                  </button>
+                  <button class="map-node" type="button" data-detail-id="sampleGate" data-search="万相台样本门 花费 200 低样本 不评分 不排名">
+                    <span class="node-kicker">Sample gate</span><strong>万相台样本门</strong><span>累计花费 ≥ ¥200；低样本仅保留，不评分不建议</span>
+                  </button>
+                  <button class="map-node wide" type="button" data-detail-id="valuePriority" data-search="取值分支策略 手填覆盖 自动取数 公式 DMP 保留 兜底 缺失">
+                    <span class="node-kicker">Value policy</span><strong>取值分支策略</strong><span>显式覆盖优先；自动项、公式项和 DMP 保留项分别取值，普通手填仅兜底</span>
+                  </button>
+                </div>
+              </div>
+            </article>
+
+            <article class="branch-card" data-side="left" data-branch="metrics" style="--branch-color: var(--violet)">
+              <button class="branch-head" type="button" aria-expanded="true">
+                <span class="branch-index">03</span>
+                <span class="branch-title">
+                  <strong>指标证据层</strong>
+                  <small>9 组、45 项；负责“有什么证据”，不等于“已得出结论”</small>
+                </span>
+                <span class="chevron">⌄</span>
+              </button>
+              <div class="branch-body">
+                <div class="node-grid">
+                  <button class="map-node" type="button" data-detail-id="taotianMetrics" data-search="淘天 五组 22 人群资产数量 质量 推荐流量 内容发布 内容投放">
+                    <span class="node-kicker">Taotian · 5 / 22</span><strong>淘天指标</strong><span>人群数量、质量、推荐流量、内容发布、内容投放</span>
+                  </button>
+                  <button class="map-node" type="button" data-detail-id="xhsMetrics" data-search="小红书 四组 23 投入 效果 人群资产数量 质量">
+                    <span class="node-kicker">XHS · 4 / 23</span><strong>小红书指标</strong><span>投入、效果、人群数量、人群质量</span>
+                  </button>
+                  <button class="map-node" type="button" data-detail-id="metricStatus" data-search="指标状态 自动 公式 手填 缺失 证据完整 可诊断">
+                    <span class="node-kicker">Evidence state</span><strong>指标状态</strong><span>自动、公式、手填、缺失；目前未完全区分“已采集”与“可诊断”</span>
+                  </button>
+                  <button class="map-node alert" type="button" data-detail-id="twoDirectories" data-search="目录冲突 九组 八章 指标组 报告章节 映射">
+                    <span class="node-kicker">Structure gap</span><strong>两套目录并行</strong><span>9 组指标与 8 章报告缺一张稳定映射表</span>
+                  </button>
+                </div>
+              </div>
+            </article>
+          </section>
+
+          <section class="root-card" id="rootNode" data-search="诊断主链 采集 质量门 证据 诊断 动作 回看">
+            <div class="root-kicker">The diagnosis spine</div>
+            <h2>把“拿到数”与<br>“做出决策”分开</h2>
+            <p>当前工具更准确的定位：<br><strong>多平台取数与证据归档系统<br>+ 局部成熟的自动诊断引擎</strong></p>
+            <div class="diagnosis-chain" aria-label="理想诊断主链">
+              <div class="chain-step"><b>1</b><span>采集 Collect</span><em>拿到数</em></div>
+              <div class="chain-step"><b>2</b><span>质量门 Qualify</span><em>数可信</em></div>
+              <div class="chain-step"><b>3</b><span>证据 Evidence</span><em>看事实</em></div>
+              <div class="chain-step is-current"><b>4</b><span>诊断 Diagnose</span><em>判原因</em></div>
+              <div class="chain-step is-current"><b>5</b><span>动作 Act</span><em>定优先级</em></div>
+              <div class="chain-step"><b>6</b><span>回看 Learn</span><em>验效果</em></div>
+            </div>
+            <button class="root-action" type="button" data-detail-id="reframe">打开「重新梳理」建议主线 →</button>
+          </section>
+
+          <section class="hemisphere right-side" aria-label="判断与行动侧">
+            <article class="branch-card" data-side="right" data-branch="reports" style="--branch-color: var(--orange)">
+              <button class="branch-head" type="button" aria-expanded="true">
+                <span class="branch-index">04</span>
+                <span class="branch-title">
+                  <strong>八章报告诊断</strong>
+                  <small>从展示数据到给出动作，成熟度并不一致</small>
+                </span>
+                <span class="chevron">⌄</span>
+              </button>
+              <div class="branch-body">
+                <div class="chapter-grid">
+                  <button class="chapter-node" type="button" data-detail-id="flow" data-search="第一章 流量诊断 短视频访客 种草成交 效率倍差 推荐流量 阈值" style="--chapter-color: var(--orange)">
+                    <span class="chapter-number">01</span><span class="maturity">阈值型</span><strong>流量诊断</strong><p>四条固定参考线；当前按阈值绿 / 橙着色。</p>
+                  </button>
+                  <button class="chapter-node" type="button" data-detail-id="guanghe" data-search="第二章 光合 渠道 资产 漏斗 自制 达人 UGC 相对最高" style="--chapter-color: var(--blue)">
+                    <span class="chapter-number">02</span><span class="maturity">对比型</span><strong>光合渠道诊断</strong><p>渠道 × 资产交叉漏斗，突出同层最高值。</p>
+                  </button>
+                  <button class="chapter-node" type="button" data-detail-id="wxtMarketing" data-search="第三章 万相台营销 账户 KPI 花费结构 描述" style="--chapter-color: var(--violet)">
+                    <span class="chapter-number">03</span><span class="maturity">描述型</span><strong>万相台营销</strong><p>账户 KPI 与花费组成，暂无根因和动作规则。</p>
+                  </button>
+                  <button class="chapter-node mature" type="button" data-detail-id="shortVideo" data-search="第四章 短视频 综合诊断 自然 付费 五率 七维 置信度 动作 S A B C D" style="--chapter-color: var(--green)">
+                    <span class="chapter-number">04</span><span class="maturity">决策型</span><strong>短视频综合诊断</strong><p>自然 + 付费；结论、证据、原因、置信度、动作齐全。</p>
+                  </button>
+                  <button class="chapter-node" type="button" data-detail-id="dmp" data-search="第五章 DMP 内容人群画像 年龄 购买力 TGI 四人群" style="--chapter-color: var(--gold)">
+                    <span class="chapter-number">05</span><span class="maturity">描述型</span><strong>内容人群画像</strong><p>四人群的年龄、购买力、覆盖和 TGI 比较。</p>
+                  </button>
+                  <button class="chapter-node" type="button" data-detail-id="xhsAdstar" data-search="第六章 淘宝星河 小红书三源对齐 快照 noteId decisionReady 项目 任务 ROI" style="--chapter-color: var(--red)">
+                    <span class="chapter-number">06</span><span class="maturity">门控型</span><strong>星河报告</strong><p>星河层级与三源投入对齐；共享同一小红书三源快照。</p>
+                  </button>
+                  <button class="chapter-node" type="button" data-detail-id="xhsPgy" data-search="第七章 小红书 蒲公英 三源对齐 快照 noteId decisionReady 达人 投入" style="--chapter-color: var(--red)">
+                    <span class="chapter-number">07</span><span class="maturity">门控型</span><strong>蒲公英报告</strong><p>达人合作与发布表现；共享同一小红书三源快照。</p>
+                  </button>
+                  <button class="chapter-node" type="button" data-detail-id="xhsJuguang" data-search="第八章 小红书 聚光 三源对齐 快照 noteId decisionReady 投放 任务期" style="--chapter-color: var(--red)">
+                    <span class="chapter-number">08</span><span class="maturity">门控型</span><strong>聚光报告</strong><p>投放结果与星河任务期对齐；共享同一小红书三源快照。</p>
+                  </button>
+                </div>
+              </div>
+            </article>
+
+            <article class="branch-card" data-side="right" data-branch="outputs" style="--branch-color: var(--green)">
+              <button class="branch-head" type="button" aria-expanded="true">
+                <span class="branch-index">05</span>
+                <span class="branch-title">
+                  <strong>输出与归档</strong>
+                  <small>一次运行形成一份可追溯证据包</small>
+                </span>
+                <span class="chevron">⌄</span>
+              </button>
+              <div class="branch-body">
+                <div class="node-grid">
+                  <button class="map-node" type="button" data-detail-id="threeOutputs" data-search="三类输出 八章报告 数据表 运行记录">
+                    <span class="node-kicker">Artifacts</span><strong>三类核心产物</strong><span>八章报告、指标数据表、运行记录</span>
+                  </button>
+                  <button class="map-node" type="button" data-detail-id="exports" data-search="导出 HTML Excel ZIP 单份 批量">
+                    <span class="node-kicker">Export</span><strong>多格式导出</strong><span>单份 HTML、Excel；项目页可把已归档报告批量导出为 ZIP</span>
+                  </button>
+                  <button class="map-node" type="button" data-detail-id="history" data-search="历史归档 runId 隔离 成功 部分成功 失败 留痕">
+                    <span class="node-kicker">History</span><strong>按 runId 隔离</strong><span>成功、部分成功、失败均自动留痕</span>
+                  </button>
+                  <button class="map-node" type="button" data-detail-id="faultTolerance" data-search="容错 单章节失败 保留成功结果 部分成功">
+                    <span class="node-kicker">Fault tolerance</span><strong>章节级容错</strong><span>单章节失败不抹掉其他成功结果</span>
+                  </button>
+                </div>
+              </div>
+            </article>
+
+            <article class="branch-card" data-side="right" data-branch="gaps" style="--branch-color: var(--red)">
+              <button class="branch-head" type="button" aria-expanded="true">
+                <span class="branch-index">06</span>
+                <span class="branch-title">
+                  <strong>当前断点与重构抓手</strong>
+                  <small>真正值得重新梳理的不是页面顺序，而是决策链</small>
+                </span>
+                <span class="chevron">⌄</span>
+              </button>
+              <div class="branch-body">
+                <div class="node-grid">
+                  <button class="map-node alert" type="button" data-detail-id="maturityGap" data-search="成熟度 短视频 诊断动作链 八章 总诊断 统一优先级">
+                    <span class="node-kicker">Decision gap</span><strong>成熟度不均</strong><span>只有短视频形成完整诊断—动作链；全工具仍缺效果回看闭环</span>
+                  </button>
+                  <button class="map-node alert" type="button" data-detail-id="targetRoiGap" data-search="小红书 targetRoi 目标 ROI 本地 UI 未接">
+                    <span class="node-kicker">Input gap</span><strong>目标 ROI 未接 UI</strong><span>后端规则存在，但本地页面无法输入关键经营目标</span>
+                  </button>
+                  <button class="map-node alert" type="button" data-detail-id="formulaConflict" data-search="推荐流量 公式冲突 微详情 商品访客 storeVisitors microDetailVisitors productVisitors">
+                    <span class="node-kicker">Definition conflict</span><strong>推荐流量口径冲突</strong><span>指标层与报告层使用两种公式，可能得出不同结论</span>
+                  </button>
+                  <button class="map-node alert" type="button" data-detail-id="economicsGap" data-search="毛利 盈亏 ROI 目标获客成本 CPA 经济性">
+                    <span class="node-kicker">Business context</span><strong>经济性参数不足</strong><span>未接毛利、盈亏 ROI、目标获客成本</span>
+                  </button>
+                  <button class="map-node wide alert" type="button" data-detail-id="feedbackGap" data-search="反馈闭环 建议 执行 效果回看 learning loop">
+                    <span class="node-kicker">Learning gap</span><strong>建议执行后没有效果回看</strong><span>当前归档了“发生过什么”，但没有把动作与后续结果绑定成学习闭环</span>
+                  </button>
+                  <button class="map-node wide" type="button" data-detail-id="reframe" data-search="重构 主线 经营问题 质量门 证据 根因 优先级 动作 回看">
+                    <span class="node-kicker">Reframe</span><strong>推荐重构主线</strong><span>经营问题 → 质量门 → 证据 → 根因 → 优先级 → 动作 → 回看</span>
+                  </button>
+                </div>
+              </div>
+            </article>
+          </section>
+        </div>
+      </div>
+
+      <div class="legend" aria-label="成熟度图例">
+        <span><i style="--dot: var(--green)"></i>决策型：可给动作</span>
+        <span><i style="--dot: var(--orange)"></i>阈值型：可判达标</span>
+        <span><i style="--dot: var(--blue)"></i>对比型：可看相对差异</span>
+        <span><i style="--dot: var(--violet)"></i>描述型：主要展示事实</span>
+      </div>
+      <div class="usage-hint">拖拽空白处平移 · 滚轮平移 · ⌘/Ctrl + 滚轮缩放 · 点击节点看详情</div>
+
+      <aside class="detail-drawer" id="detailDrawer" aria-hidden="true" aria-label="节点详情">
+        <div class="drawer-head">
+          <div>
+            <div class="drawer-kicker" id="drawerKicker">Detail</div>
+            <h3 id="drawerTitle">节点详情</h3>
+          </div>
+          <button class="drawer-close" id="drawerClose" type="button" aria-label="关闭详情">×</button>
+        </div>
+        <div class="drawer-body" id="drawerBody"></div>
+      </aside>
+    </main>
+  </div>
+
+  <noscript><div class="noscript">这份脑图需要开启 JavaScript 才能使用搜索、缩放和节点详情。</div></noscript>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const details = {
+        object: {
+          kicker: "Scope · 诊断对象",
+          title: "先把诊断单位钉牢",
+          summary: "本地版以“项目—店铺—账号—单次运行”为经营对象。每次运行生成独立 runId，后续报告、数据和导出都应回到同一运行上下文。",
+          status: "诊断的最小可追溯单位不是一个页面，而是“某店铺、某账号、某时间窗口的一次运行”。",
+          color: "var(--blue)",
+          sections: [
+            { title: "对象层级", bullets: ["项目：组织多个店铺及其历史任务。", "店铺：业务归属和报告查看入口。", "平台来源：记录本轮实际采集来源，仅用于追溯，不持久化为店铺身份绑定。", "runId：隔离每次执行的输入、状态、证据和产物。"] },
+            { title: "梳理时要问", bullets: ["报告标题中的店铺，是否使用了本次选定的默认凭据路由？", "星河、蒲公英和聚光是否分别直登正确的官方后台？", "失败后重跑是覆盖旧结论，还是形成一个新 runId？"] }
+          ]
+        },
+        sources: {
+          kicker: "Sources · 数据来源",
+          title: "七源并不等于七份独立报告",
+          summary: "淘宝侧四类来源与小红书侧三类来源，最终被重新组合进八章报告。来源是证据入口，章节是判断视角，两者需要显式映射。",
+          status: "单店任务可跑七源，默认使用账号库登录；批量账号模式只覆盖淘宝四源。",
+          color: "var(--blue)",
+          sections: [
+            { title: "淘宝侧", bullets: ["生意参谋：经营与流量基线。", "淘宝光合：内容渠道、资产与自然表现。", "万相台：营销账户、计划、作品和商品的付费表现。", "达摩盘 DMP：内容人群与全店人群画像。"] },
+            { title: "小红书侧", bullets: ["星河：进店和后链路结果。", "蒲公英：达人合作与笔记投入。", "聚光：投放消耗与广告结果。"] }
+          ]
+        },
+        orchestration: {
+          kicker: "Orchestration · 执行编排",
+          title: "采集链路有并行，也有依赖",
+          summary: "执行顺序会直接影响总耗时、局部失败与报告是否可诊断。账号库模式先完成平台登录准备，随后淘宝任务与小红书三源同时推进。",
+          status: "登录准备位于全部采集之前；淘宝四路与小红书三源同时启动，万相台两步骤保持串行，普通失败按平台隔离。",
+          color: "var(--blue)",
+          sections: [
+            { title: "登录准备", bullets: ["单店默认从已解锁账号库读取店铺默认凭据路由。", "星河使用淘宝默认凭据直登淘宝星河；蒲公英与聚光共用小红书默认凭据并分别直登各自官方平台。", "不先登录普通小红书网页，不建立额外平台身份绑定。", "用户显式选择当前 Chrome 会话时，跳过账号库自动登录并先在任务自有标签页确认平台状态。", "登录或采集期间遇到验证码或安全验证时激活对应标签页并保持单店任务等待，由人工完成后自动继续受影响步骤。"] },
+            { title: "当前主流程", bullets: ["登录准备完成后，淘宝四路与小红书三源同时发起。", "万相台营销步骤 → 短视频步骤串行；共同登录门失败时跳过短视频，其他营销失败不必然阻断短视频。", "任一平台的普通登录、会话预检或取数失败只记录该平台，兄弟平台继续；有成功结果时以 partial 归档。", "星河、蒲公英、聚光并行取数，使用 all-settled 等三源全部落定后统一校验日期、完整性与联表。", "全部所选任务结束后再保存本轮归档。"] },
+            { title: "诊断影响", bullets: ["章节级失败可以保留其他成功结果。", "小红书任一关键源不完整，会导致 decisionReady 降级。", "流程成功不自动代表证据完整，更不自动代表可做经营决策。"] }
+          ]
+        },
+        batch: {
+          kicker: "Mode · 执行模式",
+          title: "单店默认账号库登录，并保留显式会话回退",
+          summary: "单店任务默认使用所选店铺的账号库凭据，也可以显式沿用当前 Chrome 会话；单次批量任务最多选择 100 个账号，采集范围仍仅覆盖淘宝四源。",
+          status: "比较多个店铺时，要先确认它们是否处于同一采集能力和同一数据口径下。",
+          color: "var(--blue)",
+          sections: [
+            { title: "运行入口", table: [["模式", "单次任务账号规模", "来源"], ["单店 · 账号库（默认）", "1", "淘宝四源 + 小红书三源"], ["单店 · 当前 Chrome 会话（显式回退）", "1", "淘宝四源 + 小红书三源"], ["批量账号", "最多 100", "仅淘宝四源"]] },
+            { title: "默认凭据路由", bullets: ["`credentialBindings` 保留为店铺的默认凭据路由。", "星河使用所选店铺的淘宝默认凭据直接登录淘宝星河。", "蒲公英和聚光共用所选店铺的同一个小红书默认凭据，分别直接登录各自平台；不经普通小红书网页。", "凭据只用于登录准备，不建立平台身份绑定，不改变三源共享 runId 与对齐快照的报告契约。"] },
+            { title: "团队密码库", bullets: ["在其他电脑登录同一团队后下载同一份 AES-GCM 密文，再输入团队主密码解锁。", "退出登录或会话失效只清除扩展内明文与在途凭据任务。", "owner/admin 重置会写入持久删除标记，阻止旧电脑复活密文；只有显式新建可重建。"] }
+          ]
+        },
+        boundary: {
+          kicker: "Boundary · 本地边界",
+          title: "本地版数据闭环停留在浏览器侧",
+          summary: "本地网页通过扩展通信桥调起采集，并把运行数据留在 Chrome 本地存储。127.0.0.1 版本不加载 cloud-sync。",
+          status: "当前主线：网页工作台 ↔ 扩展通信桥 ↔ Chrome storage；云部署生成页才注入云同步能力。",
+          color: "var(--blue)",
+          sections: [{ title: "这意味着", bullets: ["历史数据与当前浏览器环境绑定。", "更换设备或浏览器配置前，需要明确迁移与备份策略。", "本地版诊断正确性不应依赖云同步是否可用。"] }]
+        },
+        startGate: {
+          kicker: "Start gate · 启动门",
+          title: "合法输入通过后，先准备登录，再开始采集",
+          summary: "通用启动门先阻止错误输入和并发冲突；默认账号库模式随后校验店铺默认凭据路由并准备平台会话。登录准备不替代各采集器的证据质量门。",
+          status: "登录准备位于全部采集之前；当前 Chrome 会话是用户显式选择的回退路径。",
+          color: "var(--teal)",
+          sections: [
+            { title: "基础校验", bullets: ["店铺归属被选定。", "平台能力和日期输入有效。", "单店任务与批量任务不互相占用。", "账号库模式要求本次 Chrome 会话已解锁账号库，且店铺默认凭据路由完整。"] },
+            { title: "登录准备", bullets: ["星河走淘宝默认凭据并直登淘宝星河。", "蒲公英与聚光共用小红书默认凭据，分别直登各自平台；不先登普通小红书网页。", "不建立额外平台身份绑定；旧 `xhsStoreAccountBindingsV1` 及解绑 UI 已退役。", "登录或采集期间的验证码和安全验证不自动绕过：激活页面并保持单店任务等待，人工处理完成后自动继续受影响步骤。", "显式当前 Chrome 会话回退不执行账号库自动登录，但仍先在任务自有标签页确认平台状态。"] },
+            { title: "仍需后续质量门", bullets: ["平台页面可访问不等于证据完整；日期、Schema、分页、对账与 runId 仍由各源或统一质量门判断。"] }
+          ]
+        },
+        xhsGate: {
+          kicker: "Strong gate · 小红书",
+          title: "小红书已有统一的 decisionReady 强门",
+          summary: "小红书把“采集完成”和“可以下结论”分开：三源必须完整，或明确验证无消耗；日期、runId、Schema、分页和对账必须一致。",
+          status: "这是当前最接近统一证据质量协议的一段实现。",
+          color: "var(--teal)",
+          sections: [
+            { title: "四类门禁", bullets: ["登录准备门：账号库默认凭据路由完整，并分别直登正确的官方平台；不建立平台身份绑定。", "时间门：三源日期一致，请求范围与采集范围一致。", "完整性门：Schema 有效、分页完成、汇总对账通过、无截断。", "运行门：同一 runId，三源完整或已验证该源无消耗。"] },
+            { title: "输出状态", bullets: ["decisionReady = true：允许进入动作建议。", "partial / not ready：保留证据和告警，但不应伪装成完整经营结论。"] }
+          ]
+        },
+        taobaoGate: {
+          kicker: "Weak point · 淘宝",
+          title: "淘宝侧目前主要是单源最低门",
+          summary: "各采集器会检查必需字段和页面结构，但跨生意参谋、光合、万相台、DMP 的统一日期指纹和运行上下文门还不完整。",
+          status: "风险不是“完全没校验”，而是“单源都成功，却可能并非同一经营上下文”。",
+          color: "var(--red)",
+          sections: [
+            { title: "已有", bullets: ["账号库默认模式会校验所选店铺的默认凭据路由完整。", "各平台分别检查必要字段。", "页面结构变化或关键区域缺失会报错。", "章节失败可独立记录。"] },
+            { title: "缺口", bullets: ["缺少跨源统一日期硬校验。", "显式当前 Chrome 会话回退尚未纳入统一运行上下文总门；当前也不持久化平台身份与店铺的映射。", "缺少同一 runId 下的全源证据完整度总览。"] }
+          ]
+        },
+        sampleGate: {
+          kicker: "Sample gate · 万相台",
+          title: "低样本应该被保留，但不能被过度解释",
+          summary: "万相台诊断对象累计花费达到 ¥200 才进入评分、排名和动作建议。低于门槛的数据仍归档，用于说明“证据不足”。",
+          status: "当前样本门：累计花费 ≥ ¥200。",
+          color: "var(--teal)",
+          sections: [{ title: "原则", bullets: ["低样本不评分。", "低样本不参与相对排名。", "低样本不给扩量、缩量或暂停建议。", "报告应显示样本不足的原因，而不是显示为普通差表现。"] }]
+        },
+        valuePriority: {
+          kicker: "Value policy · 取值策略",
+          title: "同一个指标可能来自五种路径",
+          summary: "为了让自动取数和人工补录共存，系统按指标类型分流取值，并不是所有指标都经过同一条优先级链。重新梳理时，需要同时展示“值”和“值从哪里来”。",
+          status: "显式手填覆盖优先；自动项、公式派生项、DMP 已有值保留项分别走自身路径，普通手填只在无可用值时兜底。",
+          color: "var(--teal)",
+          sections: [
+            { title: "当前分支策略", bullets: ["显式 manualOverride：覆盖其他来源。", "自动项：优先使用采集值，缺失时才接受普通手填兜底。", "公式项：输入完整时走派生计算，无法计算时再显示待计算或走允许的兜底。", "DMP 保留项：优先保留已有可用值，不套用一条全局顺序。"] },
+            { title: "建议的状态标签", bullets: ["COLLECTED：已自动采集。", "DERIVED：由公式计算。", "MANUAL_OVERRIDE：用户明确覆盖。", "MANUAL_FALLBACK：自动缺失后的补录。", "MISSING：无可用值。"] },
+            { title: "进一步区分", bullets: ["EVIDENCE_COMPLETE：证据已完整。", "DIAGNOSABLE：满足该诊断规则所需样本。", "DECISION_READY：可安全给出经营动作。"] }
+          ]
+        },
+        taotianMetrics: {
+          kicker: "Metrics · 淘天 5 组 22 项",
+          title: "淘天指标层回答五类事实问题",
+          summary: "这 22 项是数据表口径，不与八章报告一一对应。它们横跨流量、内容、人群与投放。",
+          status: "指标组负责定义证据，不负责保证报告已形成因果判断。",
+          color: "var(--violet)",
+          sections: [{ title: "五组", bullets: ["人群资产数量：内容人群、全店人群、内容占比。", "人群资产质量：L1/2、L4/5 渗透与层级关系。", "推荐流量效果：短视频访客、种草成交、效率倍差、推荐流量占比。", "内容发布：自制发布、审核通过、通过率。", "内容投放：超级短视频花费、点击/展现 ROI、展现潜客比等。"] }]
+        },
+        xhsMetrics: {
+          kicker: "Metrics · 小红书 4 组 23 项",
+          title: "小红书指标围绕投入—效果—人群展开",
+          summary: "三源数据被联表后，形成投入、效果、人群资产数量和人群资产质量四组指标。",
+          status: "是否能给动作，还取决于三源完整度、日期与运行上下文一致性、成熟度和目标 ROI。",
+          color: "var(--violet)",
+          sections: [{ title: "四组", bullets: ["投入：达人花费、聚光花费、KFS 比例、笔记结构、营销诉求。", "效果：星河/DMP 进店、频次与成本、全店/任务 GMV 与 ROI。", "人群资产数量：内容人群、全店人群、内容占比。", "人群资产质量：各层级渗透与结构。"] }]
+        },
+        metricStatus: {
+          kicker: "Evidence state · 指标状态",
+          title: "“有值”至少要拆成三层状态",
+          summary: "当前自动、公式、手填和缺失状态能解释数值来源，但经营判断还需要证据完整度和决策就绪度。",
+          status: "建议把 collected、evidenceComplete、diagnosable、decisionReady 分层，不再用一个“成功”包办。",
+          color: "var(--violet)",
+          sections: [{ title: "推荐状态机", table: [["层", "回答的问题"], ["采集状态", "有没有拿到数据？"], ["证据状态", "证据是否完整且同源？"], ["诊断状态", "样本是否支持判断？"], ["决策状态", "是否可给业务动作？"]] }]
+        },
+        twoDirectories: {
+          kicker: "Structure gap · 目录",
+          title: "9 组指标与 8 章报告是两套组织方式",
+          summary: "指标层按数据口径分类，报告层按阅读场景分类。两套目录本身没有错，问题是缺少明确映射，导致新增指标时不清楚它服务哪个诊断问题。",
+          status: "重构时不要强行二选一；应补一层“诊断问题”，把指标组映射到报告结论。",
+          color: "var(--red)",
+          sections: [{ title: "推荐关系", bullets: ["数据源回答：证据从哪里来。", "指标组回答：证据如何定义。", "诊断问题回答：要判断什么。", "报告章节回答：怎样呈现给业务。", "动作规则回答：下一步做什么。"] }]
+        },
+        flow: {
+          kicker: "Chapter 01 · 阈值型",
+          title: "流量诊断：四条固定参考线",
+          summary: "第一章把四个核心比例与固定阈值比较，用 good / watch CSS class 对数值做绿 / 橙着色。它能做快速体检，但尚未解释落后原因和动作优先级。",
+          status: "成熟度：阈值型。页面没有显式“达标 / 关注”状态文案，且缺失值也会落入 watch 着色。",
+          color: "var(--orange)",
+          sections: [
+            { title: "当前参考线", table: [["指标", "参考线"], ["短视频访客占比", "≥ 60%"], ["种草成交占比", "≥ 10%"], ["效率倍差", "≥ 6"], ["推荐流量占比", "≥ 70%"]] },
+            { title: "需要补齐", bullets: ["阈值的业务适用范围和版本。", "未达标时的可解释根因树。", "与其他章节之间的优先级冲突处理。"] }
+          ]
+        },
+        guanghe: {
+          kicker: "Chapter 02 · 对比型",
+          title: "光合：渠道 × 资产的交叉漏斗",
+          summary: "按全量、首猜、逛逛、搜索、其他渠道，与全量、自制、达人合作、UGC 资产交叉，查看供给、播放、点击、加购、种草买家、金额、客单与 UV 价值。",
+          status: "成熟度：对比型。当前主要突出同级最高值，没有稳定的异常归因和动作规则。",
+          color: "var(--blue)",
+          sections: [
+            { title: "比较维度", bullets: ["渠道：全量 / 首猜 / 逛逛 / 搜索 / 其他。", "资产：全量 / 自制 / 达人合作 / UGC。", "漏斗：供给 → 播放 → 点击 → 加购 → 种草买家与金额。", "价值：客单价、UV 价值等。"] },
+            { title: "下一步", bullets: ["把“最高”改成“显著高/低于基线”。", "区分供给不足、分发不足、内容承接不足和商品承接不足。", "把相对差异映射到可执行动作。"] }
+          ]
+        },
+        wxtMarketing: {
+          kicker: "Chapter 03 · 描述型",
+          title: "万相台营销：账户概览与花费结构",
+          summary: "第三章汇总账户 KPI 与花费构成，帮助确认钱花在哪里、整体结果怎样，但当前没有完整的根因链和动作规则。",
+          status: "成熟度：描述型。适合做事实概览，不应被包装成自动诊断。",
+          color: "var(--violet)",
+          sections: [{ title: "建议定位", bullets: ["作为账户上下文，为短视频诊断提供付费背景。", "补充目标、预算约束和盈亏线后，再发展为经营动作模块。", "低样本和异常数据需与普通差表现分开展示。"] }]
+        },
+        shortVideo: {
+          kicker: "Chapter 04 · 决策型",
+          title: "短视频：当前最完整的诊断—动作链",
+          summary: "把光合自然数据与万相台付费数据合并，既看固定五率，也看同账户、同时间、同层级的相对表现，最终输出结论、证据、原因、置信度和动作。",
+          status: "成熟度：决策型。当前唯一完整覆盖“判断 → 解释 → 行动”的章节。",
+          color: "var(--green)",
+          sections: [
+            { title: "自然侧五率参考", table: [["指标", "参考"], ["曝光点击率", "3%"], ["有效查看率", "40%"], ["平均停留", "6 秒"], ["大点击率", "5%"], ["小点击率", "1%"]] },
+            { title: "付费侧", bullets: ["与同账号、同时间、同层级中位数比较。", "输出 S / A / B / C / D 相对等级。", "诊断对象覆盖账户、计划、作品、商品和投放组合。"] },
+            { title: "七个诊断维度", bullets: ["获客、留存、商品兴趣、付费效率。", "免费/付费协同、商品结构、计划与归因角色。"] },
+            { title: "置信度与动作", bullets: ["付费高置信：点击 ≥ 100 或订单 ≥ 10；中置信：点击 ≥ 20 或订单 ≥ 3。", "自然曝光：高 ≥ 5000，中 ≥ 500；播放：高 ≥ 1000，中 ≥ 200。", "动作包括扩量、维持、优化、缩量、暂停。"] }
+          ]
+        },
+        dmp: {
+          kicker: "Chapter 05 · 描述型",
+          title: "DMP：四类人群的画像对照",
+          summary: "比较淘宝内容人群、全店人群、小红书内容人群与小红书进店人群的年龄、购买力、覆盖和 TGI。",
+          status: "成熟度：描述型。当前能看人群差异和告警，尚未把差异翻译成内容、投放或货品动作。",
+          color: "var(--gold)",
+          sections: [{ title: "重构方向", bullets: ["先定义“期望人群”与“实际人群”的偏差。", "把偏差归因到内容供给、媒介定向或商品承接。", "让画像结论能回流到人群包、选题和投放策略。"] }]
+        },
+        xhsAdstar: {
+          kicker: "Chapter 06 · 星河 · 门控型",
+          title: "星河：在统一投入下查看后链路结果",
+          summary: "第 06 章不是独立采集产物：它从同一次星河、蒲公英、聚光 all-settled 后生成的三源对齐快照中，呈现星河店铺、项目、任务汇总，以及独立笔记表与 ROI。",
+          status: "三章共享同一 runId、日期范围、统一质量门和分析快照；页面拆章不拆采集、不拆归档。",
+          color: "var(--red)",
+          sections: [
+            { title: "星河视角", bullets: ["店铺 → 项目 → 任务仅展示汇总，笔记进入独立筛选表。", "任务达人费来自蒲公英，任务广告费来自聚光任务期消耗。", "笔记全链路继续按 noteId 对齐三源证据。"] },
+            { title: "决策边界", bullets: ["三源质量门未通过时，不把局部星河结果包装成完整 ROI 结论。", "本地页面尚未传入 targetRoi，动作规则仍需降级。"] }
+          ]
+        },
+        xhsPgy: {
+          kicker: "Chapter 07 · 蒲公英 · 门控型",
+          title: "蒲公英：达人合作与发布表现",
+          summary: "第 07 章从同一三源对齐快照读取蒲公英发布期、合作金额、平台服务费、达人花费和内容表现，并用星河证据标识任务笔记。",
+          status: "蒲公英报告与第 06、08 章共享同一快照；缺少星河或聚光证据时，跨源字段保持缺失或降级，不伪造为 0。",
+          color: "var(--red)",
+          sections: [
+            { title: "蒲公英视角", bullets: ["按所选日期内的笔记发布日期统计。", "合作金额与平台服务费分开展示。", "星河任务笔记数来自同一快照中的 noteId 对齐结果。"] },
+            { title: "共同门禁", bullets: ["日期、runId、Schema、分页和对账仍由统一 decisionReady 强门约束；默认凭据路由只负责登录准备。", "页面独立展示不改变原有历史记录语义。"] }
+          ]
+        },
+        xhsJuguang: {
+          kicker: "Chapter 08 · 聚光 · 门控型",
+          title: "聚光：投放结果与星河任务期对齐",
+          summary: "第 08 章从同一三源对齐快照呈现聚光账户、营销诉求、投放位置与效果；任务期内外由笔记关联的星河任务周期判定。",
+          status: "聚光报告与第 06、07 章共享同一 runId 和分析快照；三章只是三个阅读视角，不是三条独立运行记录。",
+          color: "var(--red)",
+          sections: [
+            { title: "聚光视角", bullets: ["支持账户 → 营销诉求 → 投放位置的分组与筛选。", "任务期内、任务期外和周期未知的消耗分开呈现。", "任务周期证据来自同一快照中的星河任务关系。"] },
+            { title: "共同门禁", bullets: ["三源未全部 settled 前不生成对齐结论。", "证据或成熟度不足时保持观察，不强行给出扩量、优化或停止动作。"] }
+          ]
+        },
+        threeOutputs: {
+          kicker: "Artifacts · 产物",
+          title: "每次运行留下三类互补产物",
+          summary: "报告用于阅读结论，数据表用于核对口径，运行记录用于追溯过程。三者应共享同一个 runId；星河、蒲公英、聚光三章也共享同一小红书三源对齐快照。",
+          status: "一份可审计诊断，不应只保留最终 HTML。",
+          color: "var(--green)",
+          sections: [{ title: "三类产物", bullets: ["八章交互报告：面向经营判断。", "淘宝与小红书数据表：面向指标核对。", "运行记录：面向状态、错误、来源和历史追踪；三个小红书章节不拆成三条历史记录。"] }]
+        },
+        exports: {
+          kicker: "Export · 导出",
+          title: "单份和批量均可带走",
+          summary: "单次结果可导出 HTML 或 Excel；项目页可把已经归档的多份报告批量打包为 ZIP。ZIP 属于历史报告消费，不是批量采集任务的直接产物。",
+          status: "应确保导出产物显示 runId、店铺、平台来源摘要、日期和质量状态；来源摘要不构成身份绑定。",
+          color: "var(--green)",
+          sections: [{ title: "当前格式", table: [["场景", "格式"], ["单份报告", "HTML"], ["指标数据", "Excel"], ["项目页批量导出已归档报告", "ZIP"]] }]
+        },
+        history: {
+          kicker: "History · 历史",
+          title: "所有结果按 runId 隔离查看",
+          summary: "每次执行都会形成独立历史归档；项目页指定 runId 后，报告和数据应只读取该次运行，避免新旧结果串线。",
+          status: "成功、部分成功与失败都留痕，这对解释诊断边界很重要。",
+          color: "var(--green)",
+          sections: [{ title: "建议强化", bullets: ["显式展示运行版本和规则版本。", "保留每个章节的数据质量和失败原因。", "星河、蒲公英、聚光三章共享同一小红书快照与同一条历史运行记录。", "支持两次 runId 的可比性检查后再做趋势分析。"] }]
+        },
+        faultTolerance: {
+          kicker: "Fault tolerance · 容错",
+          title: "章节失败不应抹掉全部证据",
+          summary: "当前允许单章节失败后保留其他成功结果，并把整体标记为部分成功。这种设计适合多源采集，但报告必须避免把局部数据包装成全局结论。",
+          status: "“部分成功”应该进一步说明：缺了哪一源、影响了哪一结论、还能做哪些判断。",
+          color: "var(--green)",
+          sections: [{ title: "推荐呈现", bullets: ["已完成：可查看且证据完整。", "受影响：可查看，但禁止某些结论。", "未完成：显示失败原因和重试入口。", "无数据：区别于采集失败。"] }]
+        },
+        maturityGap: {
+          kicker: "Decision gap · 决策成熟度",
+          title: "八章并不是八个同成熟度的诊断引擎",
+          summary: "第一章能判阈值，第二章能看相对差异，第三和第五章偏事实展示，第六至第八章共享三源质量门与对齐快照，第四章才完整走到动作。",
+          status: "最大的结构问题：没有跨八章的总诊断、冲突处理和统一优先级。",
+          color: "var(--red)",
+          sections: [
+            { title: "成熟度地图", table: [["章节", "当前类型"], ["流量", "阈值型"], ["光合", "对比型"], ["万相台营销", "描述型"], ["短视频", "决策型"], ["DMP", "描述型"], ["星河", "门控型（共享快照）"], ["蒲公英", "门控型（共享快照）"], ["聚光", "门控型（共享快照）"]] },
+            { title: "优先补什么", bullets: ["先定义跨章节的经营目标。", "让每章输出统一结构：结论、证据、原因、置信度、动作。", "再建立冲突规则和全局优先级，不要只堆更多指标。"] }
+          ]
+        },
+        targetRoiGap: {
+          kicker: "Input gap · 目标",
+          title: "规则需要 targetRoi，页面却没有入口",
+          summary: "小红书动作规则会根据目标 ROI 判断扩量、优化或停止，但本地 UI 没有传入 targetRoi，因此最关键的经营目标缺席。",
+          status: "没有目标时，ROI 只能描述高低，无法可靠判断“是否值得继续投”。",
+          color: "var(--red)",
+          sections: [{ title: "重构建议", bullets: ["在任务启动前采集目标 ROI。", "记录目标的适用平台、时间和版本。", "允许目标缺失，但此时动作必须降级为观察型。", "未来可接入毛利和盈亏线自动推导目标。"] }]
+        },
+        formulaConflict: {
+          kicker: "Definition conflict · 口径",
+          title: "推荐流量占比存在两套公式",
+          summary: "指标规范/数据表/快照与八章报告使用不同公式，因此同一批原始数据可能生成两个“推荐流量占比”。这是应优先解决的口径冲突。",
+          status: "先统一业务定义，再统一代码；在统一前，报告应显示公式版本。",
+          color: "var(--red)",
+          sections: [
+            { title: "指标层口径", code: "1 - microDetailVisitors / storeVisitors" },
+            { title: "报告层口径", code: "1 - (productVisitors - microDetailVisitors) / storeVisitors" },
+            { title: "影响", bullets: ["阈值判断可能翻转。", "历史趋势可能因为公式版本而不可比。", "数据表与报告会出现难以解释的数字差异。"] }
+          ]
+        },
+        economicsGap: {
+          kicker: "Business context · 经济性",
+          title: "没有盈亏线，效率诊断就缺少边界",
+          summary: "当前能看到 ROI、成本和流量效率，但未系统接入毛利、盈亏 ROI、目标获客成本等经营约束。",
+          status: "相对表现好，不一定赚钱；ROI 看起来低，也不一定该停。动作必须结合经济性。",
+          color: "var(--red)",
+          sections: [{ title: "建议输入", bullets: ["类目或商品毛利率。", "履约、平台与达人等可变成本。", "盈亏平衡 ROI。", "目标 CPA / 新客价值 / 回收周期。", "预算和库存约束。"] }]
+        },
+        feedbackGap: {
+          kicker: "Learning gap · 反馈闭环",
+          title: "有历史归档，但还没有策略学习",
+          summary: "当前能保存每次发生了什么，却没有把“建议—执行—后续结果”绑定起来，因此系统无法验证建议是否有效，也无法逐步校准阈值。",
+          status: "真正的诊断闭环应在动作之后增加复盘：谁执行了什么、何时执行、指标如何变化。",
+          color: "var(--red)",
+          sections: [{ title: "最小反馈结构", bullets: ["建议 ID 与生成 runId。", "执行状态、负责人、时间和实际动作。", "观察窗口与对照基线。", "结果指标、增量判断和异常因素。", "规则是否继续沿用、调整或废弃。"] }]
+        },
+        reframe: {
+          kicker: "Reframe · 重新梳理",
+          title: "建议用七个问题重建诊断主线",
+          summary: "不要从“再加一章报告”开始，而要从业务决策倒推证据和数据。每个诊断模块都用同一套问题描述，八章才能组合成一套引擎。",
+          status: "推荐主线：经营问题 → 质量门 → 证据 → 根因 → 优先级 → 动作 → 回看。",
+          color: "var(--teal)",
+          sections: [
+            { title: "七个必答问题", list: ["这次要解决哪个经营问题？", "什么条件下数据才足以回答它？", "哪些指标是结论证据，哪些只是背景信息？", "异常可能来自哪些可干预根因？", "多个问题同时出现时，先处理哪个？", "动作是什么，触发条件和禁用条件是什么？", "多久后回看，用什么指标验证动作有效？"] },
+            { title: "统一诊断卡片", bullets: ["结论：发生了什么。", "证据：哪些数支持。", "原因：最可能的可干预根因。", "置信度：证据量和一致性如何。", "动作：做什么、不做什么。", "优先级：影响 × 紧迫度 × 可执行性。", "回看：观察窗口与成功标准。"] },
+            { title: "建议的第一批重构任务", bullets: ["统一推荐流量公式并增加口径版本。", "把 collected / diagnosable / decisionReady 分层。", "给本地 UI 补 targetRoi 与经济性目标。", "为八章定义统一输出协议。", "建立跨章节优先级与建议回看记录。"] }
+          ]
+        }
+      };
+
+      const viewport = document.getElementById("viewport");
+      const surface = document.getElementById("surface");
+      const canvas = document.getElementById("linkCanvas");
+      const ctx = canvas.getContext("2d");
+      const drawer = document.getElementById("detailDrawer");
+      const drawerKicker = document.getElementById("drawerKicker");
+      const drawerTitle = document.getElementById("drawerTitle");
+      const drawerBody = document.getElementById("drawerBody");
+      const zoomValue = document.getElementById("zoomValue");
+      const searchInput = document.getElementById("searchInput");
+      const resultCount = document.getElementById("resultCount");
+      const branchCards = [...document.querySelectorAll(".branch-card")];
+      const mobileQuery = window.matchMedia("(max-width: 780px)");
+
+      const view = { x: 0, y: 0, scale: 1, initialized: false };
+      const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+      function updateTransform() {
+        if (mobileQuery.matches) {
+          surface.style.transform = "none";
+          zoomValue.textContent = "100%";
+          return;
+        }
+        surface.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+        zoomValue.textContent = `${Math.round(view.scale * 100)}%`;
+      }
+
+      function fitMap() {
+        if (mobileQuery.matches) return;
+        const pad = 42;
+        const width = surface.scrollWidth;
+        const height = surface.scrollHeight;
+        view.scale = clamp(Math.min((viewport.clientWidth - pad * 2) / width, (viewport.clientHeight - pad * 2) / height), .42, .9);
+        view.x = (viewport.clientWidth - width * view.scale) / 2;
+        view.y = (viewport.clientHeight - height * view.scale) / 2;
+        view.initialized = true;
+        updateTransform();
+        requestAnimationFrame(drawLinks);
+      }
+
+      function zoomAt(nextScale, clientX = viewport.clientWidth / 2, clientY = viewport.clientHeight / 2) {
+        if (mobileQuery.matches) return;
+        const rect = viewport.getBoundingClientRect();
+        const px = clientX - rect.left;
+        const py = clientY - rect.top;
+        const worldX = (px - view.x) / view.scale;
+        const worldY = (py - view.y) / view.scale;
+        view.scale = clamp(nextScale, .35, 1.35);
+        view.x = px - worldX * view.scale;
+        view.y = py - worldY * view.scale;
+        updateTransform();
+      }
+
+      function elementBox(element) {
+        const surfaceRect = surface.getBoundingClientRect();
+        const rect = element.getBoundingClientRect();
+        const scale = mobileQuery.matches ? 1 : view.scale;
+        return {
+          left: (rect.left - surfaceRect.left) / scale,
+          right: (rect.right - surfaceRect.left) / scale,
+          top: (rect.top - surfaceRect.top) / scale,
+          bottom: (rect.bottom - surfaceRect.top) / scale,
+          cx: (rect.left + rect.width / 2 - surfaceRect.left) / scale,
+          cy: (rect.top + rect.height / 2 - surfaceRect.top) / scale
+        };
+      }
+
+      function cssColor(element) {
+        return getComputedStyle(element).getPropertyValue("--branch-color").trim() || "#147d78";
+      }
+
+      function drawLinks() {
+        if (mobileQuery.matches || !ctx) return;
+        const width = surface.scrollWidth;
+        const height = surface.scrollHeight;
+        const ratio = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(width * ratio);
+        canvas.height = Math.round(height * ratio);
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+
+        const root = elementBox(document.getElementById("rootNode"));
+        branchCards.forEach((card) => {
+          const box = elementBox(card.querySelector(".branch-head"));
+          const leftSide = card.dataset.side === "left";
+          const startX = leftSide ? root.left : root.right;
+          const endX = leftSide ? box.right : box.left;
+          const startY = root.cy;
+          const endY = box.cy;
+          const distance = Math.abs(endX - startX);
+          const bend = Math.max(80, distance * .52);
+
+          ctx.beginPath();
+          ctx.moveTo(startX, startY);
+          ctx.bezierCurveTo(
+            leftSide ? startX - bend : startX + bend,
+            startY,
+            leftSide ? endX + bend : endX - bend,
+            endY,
+            endX,
+            endY
+          );
+          ctx.strokeStyle = cssColor(card);
+          ctx.globalAlpha = .55;
+          ctx.lineWidth = 4;
+          ctx.lineCap = "round";
+          ctx.stroke();
+
+          ctx.globalAlpha = .95;
+          ctx.fillStyle = cssColor(card);
+          ctx.beginPath();
+          ctx.arc(endX, endY, 6, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+      }
+
+      function setExpanded(card, expanded) {
+        card.classList.toggle("is-collapsed", !expanded);
+        card.querySelector(".branch-head").setAttribute("aria-expanded", String(expanded));
+      }
+
+      branchCards.forEach((card) => {
+        card.querySelector(".branch-head").addEventListener("click", () => {
+          setExpanded(card, card.classList.contains("is-collapsed"));
+          requestAnimationFrame(() => requestAnimationFrame(drawLinks));
+        });
+      });
+
+      function renderSection(section) {
+        const wrapper = document.createElement("section");
+        wrapper.className = "detail-section";
+        const heading = document.createElement("h4");
+        heading.textContent = section.title;
+        wrapper.appendChild(heading);
+
+        if (section.code) {
+          const code = document.createElement("code");
+          code.textContent = section.code;
+          wrapper.appendChild(code);
+        }
+        if (section.bullets || section.list) {
+          const list = document.createElement(section.list ? "ol" : "ul");
+          (section.bullets || section.list).forEach((item) => {
+            const li = document.createElement("li");
+            li.textContent = item;
+            list.appendChild(li);
+          });
+          wrapper.appendChild(list);
+        }
+        if (section.table) {
+          const table = document.createElement("table");
+          table.className = "mini-table";
+          section.table.forEach((row, rowIndex) => {
+            const tr = document.createElement("tr");
+            row.forEach((cell) => {
+              const item = document.createElement(rowIndex === 0 ? "th" : "td");
+              item.textContent = cell;
+              tr.appendChild(item);
+            });
+            table.appendChild(tr);
+          });
+          wrapper.appendChild(table);
+        }
+        return wrapper;
+      }
+
+      function openDetail(id) {
+        const detail = details[id];
+        if (!detail) return;
+        drawerKicker.textContent = detail.kicker;
+        drawerTitle.textContent = detail.title;
+        drawerBody.replaceChildren();
+
+        const summary = document.createElement("p");
+        summary.className = "drawer-summary";
+        summary.textContent = detail.summary;
+        drawerBody.appendChild(summary);
+
+        const status = document.createElement("div");
+        status.className = "status-banner";
+        status.style.setProperty("--status-color", detail.color || "var(--teal)");
+        status.textContent = detail.status;
+        drawerBody.appendChild(status);
+
+        (detail.sections || []).forEach((section) => drawerBody.appendChild(renderSection(section)));
+        drawer.classList.add("is-open");
+        drawer.setAttribute("aria-hidden", "false");
+        document.getElementById("drawerClose").focus({ preventScroll: true });
+      }
+
+      document.querySelectorAll("[data-detail-id]").forEach((node) => {
+        node.addEventListener("click", (event) => {
+          event.stopPropagation();
+          openDetail(node.dataset.detailId);
+        });
+      });
+
+      function closeDrawer() {
+        drawer.classList.remove("is-open");
+        drawer.setAttribute("aria-hidden", "true");
+      }
+
+      document.getElementById("drawerClose").addEventListener("click", closeDrawer);
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") closeDrawer();
+      });
+
+      const searchableNodes = [...document.querySelectorAll("[data-search]")];
+      searchInput.addEventListener("input", () => {
+        const query = searchInput.value.trim().toLocaleLowerCase("zh-CN");
+        let matches = 0;
+        searchableNodes.forEach((node) => {
+          const haystack = `${node.dataset.search || ""} ${node.textContent}`.toLocaleLowerCase("zh-CN");
+          const matched = !query || haystack.includes(query);
+          node.classList.toggle("is-dimmed", Boolean(query) && !matched);
+          node.classList.toggle("is-match", Boolean(query) && matched);
+          if (query && matched) {
+            matches += 1;
+            const card = node.closest(".branch-card");
+            if (card) setExpanded(card, true);
+          }
+        });
+        resultCount.textContent = query ? `${matches} 个匹配` : "全部节点";
+        requestAnimationFrame(() => requestAnimationFrame(drawLinks));
+      });
+
+      document.getElementById("expandAll").addEventListener("click", () => {
+        branchCards.forEach((card) => setExpanded(card, true));
+        requestAnimationFrame(() => requestAnimationFrame(fitMap));
+      });
+
+      document.getElementById("collapseAll").addEventListener("click", () => {
+        branchCards.forEach((card) => setExpanded(card, false));
+        requestAnimationFrame(() => requestAnimationFrame(fitMap));
+      });
+
+      const focusButton = document.getElementById("focusReports");
+      focusButton.addEventListener("click", () => {
+        const active = focusButton.getAttribute("aria-pressed") !== "true";
+        focusButton.setAttribute("aria-pressed", String(active));
+        focusButton.textContent = active ? "退出聚焦" : "聚焦八章";
+        surface.classList.toggle("focus-report", active);
+        const reportCard = document.querySelector('[data-branch="reports"]');
+        setExpanded(reportCard, true);
+        if (!mobileQuery.matches) {
+          requestAnimationFrame(() => {
+            if (!active) {
+              fitMap();
+              return;
+            }
+            const box = elementBox(reportCard);
+            const scale = clamp(Math.min((viewport.clientWidth - 100) / (box.right - box.left), (viewport.clientHeight - 100) / (box.bottom - box.top)), .62, 1.02);
+            view.scale = scale;
+            view.x = viewport.clientWidth / 2 - box.cx * scale;
+            view.y = viewport.clientHeight / 2 - box.cy * scale;
+            updateTransform();
+          });
+        }
+      });
+
+      document.getElementById("zoomIn").addEventListener("click", () => zoomAt(view.scale + .1));
+      document.getElementById("zoomOut").addEventListener("click", () => zoomAt(view.scale - .1));
+      document.getElementById("resetView").addEventListener("click", () => {
+        searchInput.value = "";
+        searchInput.dispatchEvent(new Event("input"));
+        focusButton.setAttribute("aria-pressed", "false");
+        focusButton.textContent = "聚焦八章";
+        surface.classList.remove("focus-report");
+        closeDrawer();
+        fitMap();
+      });
+      document.getElementById("printMap").addEventListener("click", () => window.print());
+
+      let drag = null;
+      viewport.addEventListener("pointerdown", (event) => {
+        if (mobileQuery.matches || event.button !== 0 || event.target.closest("button, input, .detail-drawer")) return;
+        drag = { startX: event.clientX, startY: event.clientY, x: view.x, y: view.y };
+        viewport.classList.add("is-dragging");
+        viewport.setPointerCapture(event.pointerId);
+      });
+
+      viewport.addEventListener("pointermove", (event) => {
+        if (!drag) return;
+        view.x = drag.x + event.clientX - drag.startX;
+        view.y = drag.y + event.clientY - drag.startY;
+        updateTransform();
+      });
+
+      function stopDrag() {
+        drag = null;
+        viewport.classList.remove("is-dragging");
+      }
+      viewport.addEventListener("pointerup", stopDrag);
+      viewport.addEventListener("pointercancel", stopDrag);
+
+      viewport.addEventListener("wheel", (event) => {
+        if (mobileQuery.matches || event.target.closest(".detail-drawer")) return;
+        event.preventDefault();
+        if (event.ctrlKey || event.metaKey) {
+          zoomAt(view.scale * Math.exp(-event.deltaY * .002), event.clientX, event.clientY);
+        } else {
+          view.x -= event.shiftKey ? event.deltaY : event.deltaX;
+          view.y -= event.shiftKey ? 0 : event.deltaY;
+          updateTransform();
+        }
+      }, { passive: false });
+
+      const resizeObserver = new ResizeObserver(() => {
+        requestAnimationFrame(drawLinks);
+      });
+      resizeObserver.observe(surface);
+
+      window.addEventListener("resize", () => {
+        if (mobileQuery.matches) {
+          updateTransform();
+          drawLinks();
+          return;
+        }
+        fitMap();
+      });
+
+      mobileQuery.addEventListener("change", (event) => {
+        if (event.matches) {
+          updateTransform();
+          return;
+        }
+        requestAnimationFrame(fitMap);
+      });
+
+      requestAnimationFrame(() => requestAnimationFrame(fitMap));
+    })();
+  </script>
+</body>
+</html>

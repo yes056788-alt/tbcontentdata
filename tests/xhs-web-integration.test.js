@@ -139,7 +139,8 @@ function createBridgeHarness(initialStorage = {}) {
   return { request, storage, reads, removals };
 }
 
-function createReportHarness() {
+function createReportHarness(options) {
+  const config = options && typeof options === 'object' ? options : {};
   const source = read('web-tool/report.js');
   const sideEffectsStart = source.indexOf('  window.TaobaoReportExport = Object.freeze({');
   assert.ok(sideEffectsStart > 0, 'report side-effect marker');
@@ -150,18 +151,31 @@ function createReportHarness() {
       xhsStatus = state.status && typeof state.status === 'object' ? state.status : {};
       xhsAnalysis = state.analysis && typeof state.analysis === 'object' ? state.analysis : null;
       reportStatus = state.reportStatus && typeof state.reportStatus === 'object' ? state.reportStatus : {};
+      reportData = state.reportData && typeof state.reportData === 'object' ? state.reportData : null;
     },
     buildXhsMarkup,
     sectionHasData,
     sectionError,
     applyArchiveRun,
+    renderXhsPlatform,
     renderXhs,
+    buildExportReportDocument,
   });
 })();`;
   const elements = new Map([
     ['xhsReport', { innerHTML: '' }],
     ['xhsContext', { textContent: '' }],
+    ['adstarReport', { innerHTML: '' }],
+    ['pgyReport', { innerHTML: '' }],
+    ['juguangReport', { innerHTML: '' }],
+    ['adstarContext', { textContent: '' }],
+    ['pgyContext', { textContent: '' }],
+    ['juguangContext', { textContent: '' }],
   ]);
+  if (config.platformMountsOnly) {
+    elements.delete('xhsReport');
+    elements.delete('xhsContext');
+  }
   const windowObject = {
     addEventListener() {},
     clearTimeout,
@@ -204,6 +218,7 @@ function fictionalAnalysisSnapshot() {
     schema: XHS_ANALYSIS_KEY,
     schemaVersion: 1,
     runId: 'fictional-xhs-analysis-run-001',
+    selectedPlatforms: ['adstar', 'pgy', 'juguang'],
     generatedAt: '2030-02-01T00:00:00.000Z',
     dateRange: { from: '2030-01-01', to: '2030-01-31', timezone: 'Asia/Shanghai' },
     quality: { decisionReady: true, issues: [] },
@@ -216,7 +231,9 @@ function fictionalCollectionStatus() {
   return {
     schemaVersion: 1,
     runId: 'fictional-xhs-analysis-run-001',
+    running: false,
     status: 'complete',
+    requestedPlatforms: ['adstar', 'pgy', 'juguang'],
     updatedAt: '2030-02-01T00:00:00.000Z',
     platforms: {
       adstar: { status: 'complete', collectedAt: '2030-02-01T00:00:00.000Z' },
@@ -311,21 +328,252 @@ test('store-run import and account-run archiving retain both XHS snapshots', asy
   }
 });
 
-test('report viewer adds one top-level XHS chapter backed by analysis and collection snapshots', () => {
+test('report viewer exposes one top-level report per XHS platform from the shared snapshots', () => {
   const html = read('web-tool/report-view.html');
   const page = read('web-tool/report.js');
 
-  assertContains(html, /data-section="xiaohongshu"/, 'missing top-level XHS report tab');
-  assertContains(html, /data-report-section="xiaohongshu"/, 'missing top-level XHS report section');
-  assertContains(html, /<h2>[^<]*小红书[^<]*<\/h2>/, 'missing XHS report heading');
+  for (const [platform, name] of [
+    ['adstar', '淘宝星河'],
+    ['pgy', '蒲公英'],
+    ['juguang', '聚光'],
+  ]) {
+    assertContains(html, new RegExp(`data-section=["']${platform}["']`), `missing ${name} report tab`);
+    assertContains(
+      html,
+      new RegExp(`data-report-section=["']${platform}["']`),
+      `missing ${name} report section`,
+    );
+    assertContains(page, new RegExp(`key:\\s*["']${platform}["']`), `${name} export section`);
+  }
+  assert.doesNotMatch(html, /data-section="xiaohongshu"/);
   for (const key of XHS_SNAPSHOT_KEYS) assertContains(page, new RegExp(key), `report storage key ${key}`);
-  assertContains(page, /section\s*===\s*['"]xiaohongshu['"]/, 'sectionHasData must support XHS');
-  assertContains(page, /key:\s*['"]xiaohongshu['"]/, 'report/export section list must include XHS');
   assertContains(
     page,
     /clear\.disabled\s*=\s*!bridgeConnected\s*\|\|\s*\([^;]*!xhsAnalysis[^;]*Object\.keys\(xhsStatus/s,
     'an XHS-only report must keep the clear button enabled',
   );
+});
+
+test('each XHS platform report renders only its platform body from the joined analysis', () => {
+  const harness = createReportHarness();
+  harness.api.setState({
+    status: fictionalCollectionStatus(),
+    analysis: fictionalAnalysisSnapshot(),
+  });
+
+  const expectedPanels = {
+    adstar: ['account-overview', 'star-analysis', 'note-join'],
+    pgy: ['pgy-analysis'],
+    juguang: ['juguang-analysis'],
+  };
+  for (const [platform, included] of Object.entries(expectedPanels)) {
+    const markup = harness.api.buildXhsMarkup({ platform });
+    for (const panel of included) assert.match(markup, new RegExp(`data-xhs-panel=["']${panel}["']`));
+    for (const panel of Object.values(expectedPanels).flat().filter((value) => !included.includes(value))) {
+      assert.doesNotMatch(markup, new RegExp(`data-xhs-panel=["']${panel}["']`));
+    }
+  }
+});
+
+test('XHS platform reports stay hidden until the shared status and analysis belong to the same settled run', () => {
+  const harness = createReportHarness();
+  const analysis = fictionalAnalysisSnapshot();
+  harness.api.setState({
+    status: {
+      runId: 'fictional-new-run',
+      running: true,
+      status: 'running',
+      platforms: {
+        adstar: { status: 'complete' },
+        pgy: { status: 'complete' },
+        juguang: { status: 'running' },
+      },
+    },
+    analysis,
+  });
+
+  for (const platform of ['adstar', 'pgy', 'juguang']) {
+    assert.equal(harness.api.sectionHasData(platform), false, `${platform} must wait for the shared join`);
+  }
+
+  harness.api.setState({
+    status: fictionalCollectionStatus(),
+    analysis,
+  });
+  for (const platform of ['adstar', 'pgy', 'juguang']) {
+    assert.equal(harness.api.sectionHasData(platform), true, `${platform} must publish with the settled run`);
+  }
+});
+
+test('a new parent report never publishes the previous XHS run while its own XHS phase is pending', () => {
+  const harness = createReportHarness();
+  harness.api.setState({
+    status: fictionalCollectionStatus(),
+    analysis: fictionalAnalysisSnapshot(),
+    reportStatus: {
+      running: true,
+      runId: 'fictional-parent-report-new',
+      platforms: ['adstar', 'pgy', 'juguang'],
+      results: [],
+    },
+    reportData: {
+      runId: 'fictional-parent-report-new',
+      platforms: ['adstar', 'pgy', 'juguang'],
+      xiaohongshu: null,
+      results: [],
+    },
+  });
+
+  for (const platform of ['adstar', 'pgy', 'juguang']) {
+    assert.equal(harness.api.sectionHasData(platform), false, `${platform} leaked the previous run`);
+    assert.equal(harness.api.sectionError(platform), '', `${platform} leaked a previous-run failure`);
+  }
+});
+
+test('the shared publish gate requires every requested XHS platform to have a terminal state', () => {
+  const harness = createReportHarness();
+  const status = fictionalCollectionStatus();
+  delete status.platforms.juguang;
+  harness.api.setState({ status, analysis: fictionalAnalysisSnapshot() });
+
+  for (const platform of ['adstar', 'pgy', 'juguang']) {
+    assert.equal(harness.api.sectionHasData(platform), false, `${platform} published before Juguang settled`);
+  }
+});
+
+test('runId-less legacy XHS snapshots are accepted only inside an immutable archive', () => {
+  const liveHarness = createReportHarness();
+  const status = fictionalCollectionStatus();
+  const analysis = fictionalAnalysisSnapshot();
+  delete status.runId;
+  delete analysis.runId;
+  const parentStatus = {
+    running: false,
+    runId: 'fictional-legacy-parent',
+    platforms: ['adstar', 'pgy', 'juguang'],
+  };
+  const parentReport = {
+    runId: 'fictional-legacy-parent',
+    platforms: ['adstar', 'pgy', 'juguang'],
+    xiaohongshu: null,
+  };
+  liveHarness.api.setState({
+    status,
+    analysis,
+    reportStatus: parentStatus,
+    reportData: parentReport,
+  });
+  assert.equal(liveHarness.api.sectionHasData('adstar'), false);
+
+  const archiveHarness = createReportHarness();
+  archiveHarness.api.applyArchiveRun({
+    runId: 'fictional-legacy-store-run',
+    snapshots: {
+      taobaoContentDiagnosisReportStatusV1: parentStatus,
+      taobaoContentDiagnosisReportV1: parentReport,
+      [XHS_STATUS_KEY]: status,
+      [XHS_ANALYSIS_KEY]: analysis,
+    },
+  });
+  for (const platform of ['adstar', 'pgy', 'juguang']) {
+    assert.equal(archiveHarness.api.sectionHasData(platform), true, `${platform} legacy archive was rejected`);
+  }
+});
+
+test('a current collection failure is not hidden by a stale analysis snapshot', () => {
+  const harness = createReportHarness();
+  const parentRunId = 'fictional-parent-collection-failure';
+  const status = fictionalCollectionStatus();
+  status.runId = `${parentRunId}-xhs-attempt-1`;
+  harness.api.setState({
+    status,
+    analysis: fictionalAnalysisSnapshot(),
+    reportData: {
+      runId: parentRunId,
+      platforms: ['adstar', 'pgy', 'juguang'],
+      xiaohongshu: null,
+    },
+    reportStatus: {
+      running: false,
+      runId: parentRunId,
+      platforms: ['adstar', 'pgy', 'juguang'],
+      results: [{
+        key: 'xiaohongshu',
+        ok: false,
+        code: 'XHS_COLLECTION_FAILED',
+        message: '所选小红书平台均未成功返回。',
+      }],
+    },
+  });
+
+  assert.equal(harness.api.sectionHasData('pgy'), false);
+  assert.match(harness.api.sectionError('pgy'), /所选小红书平台均未成功返回/);
+});
+
+test('one failed XHS source only blocks its own platform report after the shared join', () => {
+  const harness = createReportHarness();
+  const analysis = fictionalAnalysisSnapshot();
+  const status = fictionalCollectionStatus();
+  status.status = 'partial';
+  status.running = false;
+  status.platforms.pgy = {
+    status: 'failed',
+    errors: [{ code: 'PGY_REPORT_FAILED', message: '蒲公英分页证据不完整' }],
+  };
+  harness.api.setState({ status, analysis });
+
+  assert.equal(harness.api.sectionHasData('adstar'), true);
+  assert.equal(harness.api.sectionHasData('pgy'), false);
+  assert.equal(harness.api.sectionHasData('juguang'), true);
+
+  harness.api.renderXhsPlatform('adstar');
+  harness.api.renderXhsPlatform('pgy');
+  harness.api.renderXhsPlatform('juguang');
+  const starMarkup = harness.elements.get('adstarReport').innerHTML;
+  const pgyMarkup = harness.elements.get('pgyReport').innerHTML;
+  const juguangMarkup = harness.elements.get('juguangReport').innerHTML;
+  assert.match(starMarkup, /data-xhs-panel="star-analysis"/);
+  assert.doesNotMatch(starMarkup, /data-xhs-panel="pgy-analysis"|data-xhs-panel="juguang-analysis"/);
+  assert.match(pgyMarkup, /data-xhs-platform="pgy"[\s\S]*PGY_REPORT_FAILED[\s\S]*蒲公英分页证据不完整/);
+  assert.doesNotMatch(pgyMarkup, /data-xhs-platform="adstar"|data-xhs-platform="juguang"/);
+  assert.match(juguangMarkup, /data-xhs-panel="juguang-analysis"/);
+  assert.doesNotMatch(juguangMarkup, /data-xhs-panel="pgy-analysis"|data-xhs-panel="star-analysis"/);
+});
+
+test('the production three-mount renderer populates each XHS platform report independently', () => {
+  const harness = createReportHarness({ platformMountsOnly: true });
+  harness.api.setState({
+    status: fictionalCollectionStatus(),
+    analysis: fictionalAnalysisSnapshot(),
+  });
+
+  harness.api.renderXhs();
+  assert.match(harness.elements.get('adstarReport').innerHTML, /data-xhs-panel="star-analysis"/);
+  assert.match(harness.elements.get('pgyReport').innerHTML, /data-xhs-panel="pgy-analysis"/);
+  assert.match(harness.elements.get('juguangReport').innerHTML, /data-xhs-panel="juguang-analysis"/);
+});
+
+test('a failed XHS platform keeps redacted diagnostics in the standalone eight-section export', () => {
+  const harness = createReportHarness();
+  const analysis = fictionalAnalysisSnapshot();
+  const status = fictionalCollectionStatus();
+  status.status = 'partial';
+  status.platforms.pgy = {
+    status: 'failed',
+    errors: [{ code: 'PGY_ARCHIVE_FAILED', message: '蒲公英分页证据不完整' }],
+  };
+  harness.api.setState({ status, analysis });
+
+  const exported = harness.api.buildExportReportDocument({
+    finishedAt: Date.parse('2030-02-01T00:00:00.000Z'),
+  }).html;
+  const pgyPanel = exported.slice(
+    exported.indexOf('data-export-panel="pgy"'),
+    exported.indexOf('data-export-panel="juguang"'),
+  );
+  assert.match(pgyPanel, /data-xhs-platform="pgy"/);
+  assert.match(pgyPanel, /PGY_ARCHIVE_FAILED[\s\S]*蒲公英分页证据不完整/);
+  assert.match(pgyPanel, /<details class="xhs-source-diagnostics">/);
 });
 
 test('XHS report chapter shows three source states, quality gate and source timestamps', () => {
@@ -343,8 +591,16 @@ test('XHS report chapter shows three source states, quality gate and source time
   assertContains(combined, /数据质量/, 'XHS report must label data quality');
   assertContains(combined, /来源时间|采集时间|数据时间/, 'XHS report must label source time');
   assertContains(combined, /generatedAt|collectedAt|updatedAt/, 'XHS report must render a source timestamp');
-  assertContains(combined, /星河项目[^\n]*订单|项目 \/ 订单/, 'XHS report must show Star project/order layers');
-  assertContains(combined, /聚光营销诉求/, 'XHS report must show Juguang objective breakdown');
+  assertContains(combined, /星河项目[^\n]*项目任务|店铺\s*→\s*项目\s*→\s*任务/,
+    'XHS report must show Star project/task summary layers');
+  assertContains(combined, /按营销诉求筛选|账户\s*→\s*营销诉求\s*→\s*投放位置/,
+    'XHS report must show the Juguang objective dimension inside its configurable hierarchy');
+});
+
+test('static Juguang report header names the real placement dimension', () => {
+  const page = read('web-tool/report-view.html');
+  assert.match(page, /账户\s*→\s*营销诉求\s*→\s*投放位置/);
+  assert.doesNotMatch(page, /投放模式/);
 });
 
 test('XHS source cards prefer safe status account labels when analysis is unavailable', () => {
@@ -400,7 +656,7 @@ test('XHS report renders an explicit failure instead of a report body for termin
   }
 });
 
-test('failed XHS binding gate is not marked generated and shows only redacted issue fields', () => {
+test('failed XHS collection is not marked generated and shows its generic failure', () => {
   const harness = createReportHarness();
   harness.api.setState({
     status: {
@@ -417,20 +673,8 @@ test('failed XHS binding gate is not marked generated and shows only redacted is
         key: 'xiaohongshu',
         name: '小红书三平台全链路',
         ok: false,
-        code: 'XHS_ACCOUNT_BINDING_FAILED',
-        message: '当前平台真实账号与所选店铺绑定校验未通过。',
-        bindingIssues: [{
-          code: 'account_binding_mismatch',
-          platform: 'pgy',
-          message: 'advertiserId=fictional-message-advertiser; memberId=fictional-message-member; ' +
-            'brandUserId=fictional-message-brand; otherStoreId=fictional-message-store',
-          expected: ['pgy:fictional-expected-token'],
-          actual: ['pgy:fictional-actual-token'],
-        }, {
-          code: 'advertiserId=fictional-code-advertiser',
-          platform: 'pgy',
-          message: 'memberId=fictional-unknown-member',
-        }],
+        code: 'XHS_COLLECTION_FAILED',
+        message: '所选小红书平台均未成功返回。',
       }],
     },
   });
@@ -441,23 +685,11 @@ test('failed XHS binding gate is not marked generated and shows only redacted is
     'collection status without an analysis snapshot must not produce an “已生成” section badge',
   );
   const error = harness.api.sectionError('xiaohongshu');
-  assert.match(error, /蒲公英\s*\/\s*account_binding_mismatch/);
-  assert.match(error, /当前蒲公英登录账号与所选店铺绑定不一致/);
-  assert.match(error, /蒲公英\s*\/\s*account_binding_issue/);
-  assert.match(error, /账号绑定校验未通过/);
+  assert.match(error, /所选小红书平台均未成功返回/);
 
   harness.api.renderXhs();
   const markup = harness.elements.get('xhsReport').innerHTML;
-  assert.match(markup, /蒲公英\s*\/\s*account_binding_mismatch/);
-  assert.match(markup, /蒲公英\s*\/\s*account_binding_issue/);
-  for (const forbidden of [
-    'fictional-message-advertiser', 'fictional-message-member', 'fictional-message-brand',
-    'fictional-message-store', 'fictional-expected-token', 'fictional-actual-token',
-    'fictional-code-advertiser', 'fictional-unknown-member',
-    'expected', 'actual', 'token=',
-  ]) {
-    assert.equal(markup.includes(forbidden), false, `binding failure view leaked ${forbidden}`);
-  }
+  assert.match(markup, /所选小红书平台均未成功返回/);
 });
 
 test('XHS failed and partial source cards expose only folded redacted code and message diagnostics', () => {
@@ -663,12 +895,14 @@ test('both interactive report export and workbook export include XHS analysis da
   assert.ok(exportStart >= 0 && exportEnd > exportStart, 'report export builder');
   const reportExport = report.slice(exportStart, exportEnd);
 
-  assertContains(reportExport, /key:\s*['"]xiaohongshu['"]/, 'interactive export must include XHS section');
-  assertContains(reportExport, /小红书/, 'interactive export must label the XHS section');
+  for (const [platform, name] of [['adstar', '淘宝星河'], ['pgy', '蒲公英'], ['juguang', '聚光']]) {
+    assertContains(reportExport, new RegExp(`key:\\s*['"]${platform}['"]`), `interactive export ${name}`);
+    assertContains(reportExport, new RegExp(name), `interactive export must label ${name}`);
+  }
   assertContains(dashboard, /小红书经营数据/, 'workbook must include an XHS operating-data sheet');
   for (const sheetName of [
-    '小红书管理汇总', '小红书笔记联表', '小红书项目订单',
-    '小红书聚光日报', '小红书星河明细', '小红书质量说明',
+    '小红书账户总览', '蒲公英月度', '蒲公英粉丝量级', '聚光分析',
+    '星河汇总', '星河项目任务', '笔记全链路', '小红书质量说明',
   ]) {
     assertContains(dashboard, new RegExp(sheetName), `workbook must include ${sheetName}`);
   }

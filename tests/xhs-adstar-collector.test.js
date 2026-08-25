@@ -92,6 +92,20 @@ function modelEnvelope(items, page, totalCount) {
   };
 }
 
+function singlePageEnvelope(items) {
+  return {
+    model: {
+      result: items,
+      pageNo: 1,
+      pageSize: 20,
+      totalCount: items.length,
+      totalPages: 1,
+      hasNext: false,
+      nextPage: null,
+    },
+  };
+}
+
 function requestPage(payload) {
   return Number(payload.pageNo || payload.page || 1);
 }
@@ -103,10 +117,12 @@ function unitId(payload) {
 function createFakePageClient(options = {}) {
   const calls = [];
   const failures = new Set(options.failures || []);
-  const contentIds = {
+  let activeOrderSummaries = 0;
+  let maxActiveOrderSummaries = 0;
+  const contentIds = Object.assign({
     'fictional-order-001': 'fictional-note-001',
     'fictional-order-no-date': 'fictional-note-002',
-  };
+  }, options.contentIds || {});
 
   async function request(input) {
     const safeInput = structuredClone(input);
@@ -144,8 +160,54 @@ function createFakePageClient(options = {}) {
     }
 
     if (input.endpoint === 'orders.list') {
+      const memberType = Number(payload.memberType);
+      if (memberType === 5 && Number(options.manyOrderCount) > 0) {
+        const count = Math.floor(Number(options.manyOrderCount));
+        return singlePageEnvelope(Array.from({ length: count }, (_unused, index) => ({
+          orderId: `fictional-concurrent-order-${String(index + 1).padStart(3, '0')}`,
+          orderName: `虚构并发任务${index + 1}`,
+          projectId: 'fictional-project-001',
+          settleSeqId: `fictional-concurrent-settle-${String(index + 1).padStart(3, '0')}`,
+          memberId: 'fictional-member-001',
+          memberName: '虚构星河账号一',
+          deliveryModeCode: 88,
+          media: 'RED_BOOK',
+          startTime: '2030-01-03 00:00:00',
+          endTime: '2030-01-05 23:59:59',
+        })));
+      }
+      if (options.noOrders || (memberType === 5 && options.agencyOnlyOrders)) {
+        return singlePageEnvelope([]);
+      }
+      if (memberType === 6 && options.agencyOnlyOrders) {
+        return singlePageEnvelope([{
+          orderId: 'fictional-agency-order-001',
+          orderName: '虚构代理商订单',
+          projectId: 'fictional-project-no-date',
+          settleSeqId: 'fictional-agency-settle-001',
+          memberId: 'fictional-agency-member-999',
+          memberName: '虚构代理商账号',
+          deliveryModeCode: 88,
+          media: 'RED_BOOK',
+          startTime: '2030-01-03 00:00:00',
+          endTime: '2030-01-05 23:59:59',
+        }]);
+      }
+      if (memberType === 6 && options.conflictingMemberTypeOrder) {
+        return singlePageEnvelope([{
+          ...ORDER_PAGES[1][0],
+          projectId: 'fictional-project-no-date',
+          settleSeqId: 'fictional-conflicting-settle-001',
+        }]);
+      }
+      if (memberType === 6) return singlePageEnvelope([]);
       const page = requestPage(payload);
-      const orders = (ORDER_PAGES[page] || []).map((order) => ({ ...order }));
+      const orders = (ORDER_PAGES[page] || []).map((order) => ({
+        ...order,
+        ...(options.sameProjectOrders && order.orderId === 'fictional-order-no-date'
+          ? { projectId: 'fictional-project-001' }
+          : {}),
+      }));
       if (options.missingOrderIdentity) {
         orders.forEach((order) => {
           delete order.memberId;
@@ -167,6 +229,15 @@ function createFakePageClient(options = {}) {
         const error = new Error(`fictional nested failure: ${failureKey}`);
         error.retryable = false;
         throw error;
+      }
+      if (level === 'order' && Number(options.orderSummaryDelayMs) > 0) {
+        activeOrderSummaries += 1;
+        maxActiveOrderSummaries = Math.max(maxActiveOrderSummaries, activeOrderSummaries);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, Number(options.orderSummaryDelayMs)));
+        } finally {
+          activeOrderSummaries -= 1;
+        }
       }
       return {
         model: {
@@ -193,11 +264,26 @@ function createFakePageClient(options = {}) {
       if (level === 'project') {
         row = dataBatch === 'project'
           ? { projectId: id, fee: 120 }
-          : { projectId: id, orderId: `fictional-order-for-${id}`, fee: 120 };
+          : {
+            projectId: id,
+            orderId: options.projectReportOrderIds && options.projectReportOrderIds[id] ||
+              `fictional-order-for-${id}`,
+            fee: 120,
+            ...(options.projectOrderContentIds && options.projectOrderContentIds[id]
+              ? {
+                contentId: options.projectOrderContentIds[id],
+                ds: '20300104',
+                readUv1d: 31,
+                engagementUv1d: 7,
+                slrAttrItmOrdGmv1d: 88,
+              }
+              : {}),
+          };
       } else if (dataBatch === 'content') {
         row = {
           orderId: id,
           contentId: contentIds[id] || `fictional-note-for-${id}`,
+          ds: '20300104',
           visitorCount: 30,
           gmv: 300,
           slrAttrItmCltUv1d: 12,
@@ -224,7 +310,11 @@ function createFakePageClient(options = {}) {
     throw new Error(`unexpected fictional endpoint: ${input.endpoint}`);
   }
 
-  return { calls, request };
+  return {
+    calls,
+    request,
+    getMaxActiveOrderSummaries: () => maxActiveOrderSummaries,
+  };
 }
 
 function createCollector(pageClient) {
@@ -389,13 +479,174 @@ test('collects complete lists and all required nested data only for date-related
     .filter((call) => call.endpoint === 'orders.list')
     .map((call) => requestPage(call.payload));
   assert.deepEqual(projectListPages, [1, 2]);
-  assert.deepEqual(orderListPages, [1, 2]);
+  assert.deepEqual(orderListPages, [1, 2, 1]);
 
   const excludedNestedCalls = pageClient.calls.filter((call) => (
     call.endpoint.startsWith('reports.') &&
     ['fictional-project-outside', 'fictional-order-outside'].includes(unitId(call.payload))
   ));
   assert.deepEqual(excludedNestedCalls, []);
+});
+
+test('collects Star tasks with the default four-way limit while preserving task order', async () => {
+  const pageClient = createFakePageClient({
+    manyOrderCount: 8,
+    orderSummaryDelayMs: 15,
+  });
+  const result = await createCollector(pageClient).collect(collectionOptions({
+    runId: 'fictional-adstar-run-four-way-tasks',
+  }));
+
+  assert.equal(pageClient.getMaxActiveOrderSummaries(), 4,
+    'task collection must default to four concurrent task units');
+  assert.deepEqual(
+    result.nested.filter((unit) => unit.type === 'order').map((unit) => unit.id),
+    Array.from({ length: 8 }, (_unused, index) => (
+      `fictional-concurrent-order-${String(index + 1).padStart(3, '0')}`
+    )),
+    'bounded concurrency must not reorder task output',
+  );
+});
+
+test('collects brand-self and agency orders in isolated paginated sources and merges their totals', async () => {
+  const pageClient = createFakePageClient({
+    agencyOnlyOrders: true,
+    projectIdentity: {
+      memberId: 'fictional-promoted-shop-001',
+      memberName: '虚构推广店铺',
+    },
+    projectOrderContentIds: {
+      'fictional-project-no-date': 'fictional-note-for-fictional-agency-order-001',
+    },
+    projectReportOrderIds: {
+      'fictional-project-no-date': 'fictional-agency-settle-001',
+    },
+  });
+  const result = await createCollector(pageClient).collect(collectionOptions({
+    runId: 'fictional-adstar-run-agency-member-type',
+  }));
+
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(
+    pageClient.calls
+      .filter((call) => call.endpoint === 'orders.list')
+      .map((call) => Number(call.payload.memberType)),
+    [5, 6],
+  );
+  assert.deepEqual(result.lists.orders.items.map((order) => order.orderId), [
+    'fictional-agency-order-001',
+  ]);
+  assert.equal(result.lists.orders.expectedCount, 1);
+  assert.equal(result.lists.orders.receivedCount, 1);
+  assert.equal(result.lists.orders.pageCount, 2);
+  assert.equal(result.lists.orders.status, 'complete');
+  assert.equal(result.lists.orders.truncated, false);
+  assert.deepEqual(result.lists.orders.sources.map((source) => source.memberType), [5, 6]);
+  assert.equal(new Set(result.lists.orders.sources.map((source) => source.cacheKey)).size, 2);
+  assert.equal(new Set(result.lists.orders.sources.map((source) => source.fingerprint)).size, 2);
+  assert.deepEqual(result.identity, {
+    memberId: 'fictional-promoted-shop-001',
+    memberName: '虚构推广店铺',
+  }, 'agency memberId/memberName are the agent identity and must not conflict with promoted-shop identity');
+  assert.ok(result.nested.some((unit) => (
+    unit.type === 'order' && unit.id === 'fictional-agency-order-001'
+  )));
+  const agencyContentRows = result.contentRows.filter((row) => (
+    row.noteId === 'fictional-note-for-fictional-agency-order-001'
+  ));
+  assert.equal(agencyContentRows.length, 1);
+  assert.equal(agencyContentRows[0].listOrderId, 'fictional-agency-order-001');
+});
+
+test('fails closed when member-type order lists repeat an orderId with conflicting data', async () => {
+  const pageClient = createFakePageClient({ conflictingMemberTypeOrder: true });
+  const result = await createCollector(pageClient).collect(collectionOptions({
+    runId: 'fictional-adstar-run-member-type-conflict',
+  }));
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.schemaValid, false);
+  const conflict = result.errors.find((error) => error.code === 'ADSTAR_ORDER_ID_CONFLICT');
+  assert.ok(conflict);
+  assert.equal(conflict.stage, 'orders.merge');
+  assert.equal(conflict.memberType, 6);
+  assert.equal(Object.hasOwn(conflict, 'orderId'), false, 'merge diagnostics must not expose order IDs');
+  assert.deepEqual(
+    pageClient.calls
+      .filter((call) => call.endpoint === 'orders.list')
+      .map((call) => Number(call.payload.memberType)),
+    [5, 5, 6],
+    'type 5 must finish pagination before the independently cached type 6 list is reconciled',
+  );
+  assert.equal(
+    pageClient.calls.some((call) => call.endpoint.startsWith('reports.')),
+    false,
+    'conflicting list identity must stop before nested report collection',
+  );
+});
+
+test('collects date-scoped project reports when order lists are empty and safely projects project-order content', async () => {
+  const pageClient = createFakePageClient({
+    noOrders: true,
+    projectOrderContentIds: {
+      'fictional-project-no-date': 'fictional-project-note-001',
+    },
+  });
+  const result = await createCollector(pageClient).collect(collectionOptions({
+    runId: 'fictional-adstar-run-project-fallback',
+  }));
+
+  assert.equal(result.lists.orders.items.length, 0);
+  assert.deepEqual(
+    result.nested.filter((unit) => unit.type === 'project').map((unit) => unit.id),
+    ['fictional-project-001', 'fictional-project-no-date'],
+  );
+  assert.equal(result.nested.some((unit) => unit.type === 'order'), false);
+  assert.deepEqual(result.contentRows, [{
+    ds: '20300104',
+    projectId: 'fictional-project-no-date',
+    reportOrderId: 'fictional-order-for-fictional-project-no-date',
+    noteId: 'fictional-project-note-001',
+    contentId: 'fictional-project-note-001',
+    readUv1d: 31,
+    engagementUv1d: 7,
+    slrAttrItmOrdGmv1d: 88,
+  }]);
+  assert.ok(pageClient.calls.some((call) => (
+    call.endpoint === 'reports.summary' &&
+    call.payload.level === 'project' &&
+    call.payload.projectId === 'fictional-project-no-date' &&
+    call.payload.startTime === '2030-01-01 00:00:00' &&
+    call.payload.endTime === '2030-01-07 23:59:59'
+  )));
+  assert.ok(pageClient.calls.some((call) => (
+    call.endpoint === 'reports.detail' &&
+    call.payload.level === 'project' &&
+    call.payload.projectId === 'fictional-project-no-date' &&
+    call.payload.dataBatch === 'order' &&
+    call.payload.startTime === '2030-01-01 00:00:00' &&
+    call.payload.endTime === '2030-01-07 23:59:59'
+  )));
+});
+
+test('preserves separate order relations when the same note appears in multiple Star orders', async () => {
+  const sharedNoteId = 'fictional-shared-note-001';
+  const pageClient = createFakePageClient({
+    sameProjectOrders: true,
+    contentIds: {
+      'fictional-order-001': sharedNoteId,
+      'fictional-order-no-date': sharedNoteId,
+    },
+  });
+  const result = await createCollector(pageClient).collect(collectionOptions({
+    runId: 'fictional-adstar-run-shared-note-relations',
+  }));
+
+  const relations = result.contentRows
+    .filter((row) => row.noteId === sharedNoteId)
+    .map((row) => row.listOrderId)
+    .sort();
+  assert.deepEqual(relations, ['fictional-order-001', 'fictional-order-no-date']);
 });
 
 test('warns and leaves identity empty when Star order rows have no member identity', async () => {
@@ -520,7 +771,7 @@ test('marks maxProjects and maxOrders limits as partial truncation after full li
   assert.deepEqual(
     pageClient.calls.filter((call) => call.endpoint === 'orders.list')
       .map((call) => requestPage(call.payload)),
-    [1, 2]
+    [1, 2, 1]
   );
 });
 

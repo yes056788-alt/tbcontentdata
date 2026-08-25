@@ -13,6 +13,13 @@
   const SYCM_CONTENT_ANALYSIS_PATH = '/xsite/contentanalysis/overview_new_v2';
   const BUTTON_ID = 'sycm-diagnosis-trigger';
   const PANEL_ID = 'sycm-diagnosis-panel';
+  const GRASS_PRODUCT_BUTTON_ID = 'sycm-grass-product-trigger';
+  const GRASS_PRODUCT_MAX_AUTO_PAGES = 30;
+  const GRASS_PRODUCT_MAX_ROWS = 10000;
+  const GRASS_PRODUCT_MAX_TEXT_CHARS = 20000000;
+  const GRASS_PRODUCT_MIN_DELAY_MS = 3200;
+  const GRASS_PRODUCT_MAX_DELAY_MS = 4800;
+  const GRASS_PRODUCT_PAGE_TIMEOUT_MS = 20000;
   const CONTENT_CACHE_KEY = 'sycmContentDiagnosisSnapshotV1';
   const BUSINESS_DEFENSE_TRAFFIC_KEY = 'businessDefenseSycmTrafficSnapshotV1';
   const RETRY_AFTER_RELOAD_KEY = 'sycmDiagnosisRetryAfterExtensionReload';
@@ -26,6 +33,20 @@
   let currentPath = location.pathname;
   let running = false;
   let lastMouseClickSummary = '';
+  const grassProductCollection = {
+    fingerprint: '',
+    headers: [],
+    pages: new Map(),
+    totalExpected: 0,
+    pageSize: 0,
+    pageCountExpected: 0,
+    selectedFieldCount: 0,
+    fieldCoverageComplete: false,
+    paginationAuthoritative: false,
+    running: false,
+    stopRequested: false,
+    warning: '',
+  };
 
   function isTrafficPage() {
     return location.pathname.includes('/flow/monitor/overview');
@@ -1127,9 +1148,23 @@
       '#' + PANEL_ID + ' .sycm-key{font-weight:600;text-align:left}',
       '#' + PANEL_ID + ' .sycm-subtitle{margin:18px 0 8px;font-size:16px;font-weight:650;color:#1f2329}',
       '#' + PANEL_ID + ' .sycm-muted{color:#667085;font-size:13px}',
-      '#' + PANEL_ID + ' .sycm-actions{display:flex;justify-content:flex-end;margin-top:14px}',
+      '#' + PANEL_ID + ' .sycm-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:14px}',
+      '#' + PANEL_ID + ' .sycm-actions-start{justify-content:flex-start}',
       '#' + PANEL_ID + ' .sycm-copy{border:0;border-radius:4px;padding:8px 13px;background:#1677ff;color:#fff;cursor:pointer;font-size:14px}',
       '#' + PANEL_ID + ' .sycm-copy:disabled{background:#91caff;cursor:default}',
+      '#' + PANEL_ID + ' .sycm-action{min-height:38px;border:1px solid #d0d5dd;border-radius:4px;padding:8px 13px;background:#fff;color:#344054;cursor:pointer;font-size:14px}',
+      '#' + PANEL_ID + ' .sycm-action:hover:not(:disabled){border-color:#1677ff;color:#0958d9}',
+      '#' + PANEL_ID + ' .sycm-action:focus-visible{outline:3px solid rgba(22,119,255,.28);outline-offset:2px}',
+      '#' + PANEL_ID + ' .sycm-action-primary{border-color:#1677ff;background:#1677ff;color:#fff}',
+      '#' + PANEL_ID + ' .sycm-action-primary:hover:not(:disabled){border-color:#0958d9;background:#0958d9;color:#fff}',
+      '#' + PANEL_ID + ' .sycm-action-danger{border-color:#ffccc7;color:#cf1322}',
+      '#' + PANEL_ID + ' .sycm-action:disabled{background:#f2f4f7;color:#98a2b3;cursor:not-allowed}',
+      '#' + PANEL_ID + ' .sycm-product-status{padding:11px 12px;border:1px solid #d0d5dd;border-radius:4px;background:#f8fafc;color:#344054;font-size:14px;line-height:1.6}',
+      '#' + PANEL_ID + ' .sycm-product-preview{max-height:320px;margin-top:14px;overflow:auto;border:1px solid #eaecf0;border-radius:4px}',
+      '#' + PANEL_ID + ' .sycm-product-preview table{min-width:980px;border:0;font-size:13px}',
+      '#' + PANEL_ID + ' .sycm-product-preview th,#' + PANEL_ID + ' .sycm-product-preview td{padding:8px 9px;border-color:#eaecf0;text-align:left}',
+      '#' + PANEL_ID + ' .sycm-product-preview th{position:sticky;top:0;z-index:1;background:#f2f4f7;color:#344054;font-size:13px}',
+      '#' + PANEL_ID + ' .sycm-product-preview td{max-width:320px;overflow:hidden;text-overflow:ellipsis}',
       '</style>',
       '<div class="sycm-head"><span>' + escapeHtml(title) + '</span><button class="sycm-close" type="button" aria-label="关闭">×</button></div>',
       '<div class="sycm-content">' + bodyHtml + '</div>',
@@ -1356,6 +1391,669 @@
     renderGrassReport(metrics, dateContext);
   }
 
+  function normalizeGrassProductText(value, maxLength) {
+    return String(value == null ? '' : value)
+      .replace(/\u00a0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, Number(maxLength) || 1000);
+  }
+
+  function grassProductCells(row) {
+    if (!row) return [];
+    return Array.from(row.children).filter((cell) => (
+      cell.classList.contains('table-cell') &&
+      !cell.classList.contains('hide-column')
+    ));
+  }
+
+  function findGrassProductHeaderRow() {
+    return Array.from(document.querySelectorAll('.row.header-font')).find((row) => {
+      const labels = grassProductCells(row).map((cell) => normalizeGrassProductText(cell.innerText || cell.textContent, 120));
+      return labels.includes('商品id') && labels.includes('商品标题');
+    }) || null;
+  }
+
+  function findGrassProductTableRoot(headerRow) {
+    let root = headerRow && headerRow.parentElement;
+    for (let level = 0; root && root !== document.body && level < 8; level += 1, root = root.parentElement) {
+      if (root.querySelectorAll('.row.body-font').length) return root;
+    }
+    return document;
+  }
+
+  function isGrassProductTableContext() {
+    if (!document.body || !findGrassProductHeaderRow()) return false;
+    const text = normalizeText(document.body.innerText || document.body.textContent);
+    return text.includes('商品颗粒数据') && text.includes('商品标题');
+  }
+
+  function readGrassProductCell(cell) {
+    const rawElement = cell && cell.querySelector('.cell-rawData');
+    const candidates = [
+      rawElement && rawElement.getAttribute('title'),
+      cell && cell.getAttribute('title'),
+      rawElement && (rawElement.innerText || rawElement.textContent),
+      cell && (cell.innerText || cell.textContent),
+    ];
+    for (const candidate of candidates) {
+      const text = normalizeGrassProductText(candidate, 2000);
+      if (text) return text;
+    }
+    return '';
+  }
+
+  function findGrassProductPagination(tableRoot) {
+    let root = tableRoot;
+    for (let level = 0; root && level < 8; level += 1, root = root.parentElement) {
+      const pagination = root.querySelector && root.querySelector('.ant-pagination');
+      if (pagination) return pagination;
+    }
+    return null;
+  }
+
+  function readGrassProductSelectedFieldCount() {
+    const bodyText = document.body ? document.body.innerText || document.body.textContent || '' : '';
+    const match = bodyText.match(/已选字段\s*[（(]\s*(\d+)\s*[）)]/);
+    const count = match ? Number(match[1]) : 0;
+    return Number.isInteger(count) && count > 0 ? count : 0;
+  }
+
+  function readGrassProductLabeledFilters() {
+    const labels = ['媒体', '业务模式'];
+    const candidates = findTextElements(labels);
+    return labels.map((label) => {
+      const normalizedLabel = normalizeText(label);
+      let seed = candidates.find((element) => getElementText(element) === normalizedLabel);
+      if (!seed) seed = candidates.find((element) => getElementText(element).startsWith(normalizedLabel));
+      if (!seed) return normalizedLabel + '?';
+      let best = getElementText(seed);
+      for (let level = 0, current = seed; current && level < 4; level += 1, current = current.parentElement) {
+        const text = getElementText(current);
+        if (text.startsWith(normalizedLabel) && text.length > normalizedLabel.length && text.length <= 120) {
+          best = text;
+          break;
+        }
+      }
+      return best || normalizedLabel + '?';
+    });
+  }
+
+  function readGrassProductFilterContext(tableRoot, headerRow) {
+    const selector = [
+      'input:not([type="hidden"])',
+      'select',
+      '[role="combobox"]',
+      '.ant-select-selection-item',
+      '.next-select-inner',
+    ].join(',');
+    const controls = Array.from(document.querySelectorAll(selector)).filter((element) => {
+      if (tableRoot && tableRoot.contains(element)) return false;
+      if (element.closest('#' + PANEL_ID + ', #' + BUTTON_ID + ', #' + GRASS_PRODUCT_BUTTON_ID + ', .ant-pagination')) return false;
+      return true;
+    });
+    const controlTokens = controls.map((element) => [
+      element.tagName,
+      element.getAttribute('name') || '',
+      element.getAttribute('aria-label') || '',
+      element.getAttribute('placeholder') || '',
+      'value' in element ? element.value : '',
+      normalizeGrassProductText(element.innerText || element.textContent, 160),
+      element.getAttribute('aria-selected') || '',
+      element.getAttribute('aria-checked') || '',
+    ].map((value) => normalizeGrassProductText(value, 180)).join(':')).filter(Boolean);
+    const sortTokens = grassProductCells(headerRow).map((cell) => {
+      const label = normalizeGrassProductText(cell.innerText || cell.textContent, 120);
+      const sortElements = [cell].concat(Array.from(cell.querySelectorAll(
+        '[aria-sort], [class*="sort"], [class*="ascend"], [class*="descend"], [class*="move-up"], [class*="move-down"]'
+      )).slice(0, 20));
+      const states = sortElements.map((element) => [
+        element.getAttribute('aria-sort') || '',
+        element.className || '',
+      ].map((value) => normalizeGrassProductText(value, 240)).join(':')).filter((value) => (
+        /sort|ascend|descend|ascending|descending|move-up|move-down/i.test(value)
+      ));
+      return states.length ? label + ':' + states.join('|') : '';
+    }).filter(Boolean);
+    return readGrassProductLabeledFilters().concat(controlTokens, sortTokens).join('\u001d');
+  }
+
+  function readGrassProductPagination(tableRoot) {
+    const pagination = findGrassProductPagination(tableRoot);
+    const paginationContainer = pagination && pagination.parentElement;
+    const paginationText = paginationContainer
+      ? paginationContainer.innerText || paginationContainer.textContent || ''
+      : '';
+    const totalMatch = paginationText.match(/共\s*([\d,，]+)\s*条/);
+    const pageSizeMatch = paginationText.match(/(\d+)\s*条\s*\/\s*页/);
+    const activePageElement = pagination && pagination.querySelector('.ant-pagination-item-active');
+    const pageNo = Number(normalizeGrassProductText(
+      activePageElement && (activePageElement.innerText || activePageElement.textContent),
+      12
+    ));
+    const totalExpected = totalMatch ? Number(totalMatch[1].replace(/[,，]/g, '')) : 0;
+    const pageSize = pageSizeMatch ? Number(pageSizeMatch[1]) : 0;
+    const pageCountExpected = totalExpected > 0 && pageSize > 0
+      ? Math.ceil(totalExpected / pageSize)
+      : 0;
+    return {
+      pageNo: Number.isInteger(pageNo) && pageNo > 0 ? pageNo : 0,
+      totalExpected: Number.isInteger(totalExpected) && totalExpected > 0 ? totalExpected : 0,
+      pageSize: Number.isInteger(pageSize) && pageSize > 0 ? pageSize : 0,
+      pageCountExpected: Number.isInteger(pageCountExpected) && pageCountExpected > 0 ? pageCountExpected : 0,
+    };
+  }
+
+  function readCurrentGrassProductPage() {
+    const headerRow = findGrassProductHeaderRow();
+    if (!headerRow) throw new Error('未找到商品颗粒数据表头。');
+    const tableRoot = findGrassProductTableRoot(headerRow);
+    const headers = grassProductCells(headerRow)
+      .map((cell) => normalizeGrassProductText(cell.innerText || cell.textContent, 120))
+      .filter(Boolean);
+    if (headers.length < 3 || headers[0] !== '商品id' || headers[1] !== '商品标题') {
+      throw new Error('商品颗粒数据表头结构不完整。');
+    }
+
+    const headerLabels = new Set(headers.slice(2));
+    const seenRows = new Set();
+    const rows = Array.from(tableRoot.querySelectorAll('.row.body-font')).map((row) => {
+      const values = grassProductCells(row).slice(0, headers.length).map(readGrassProductCell);
+      if (values.length !== headers.length) return null;
+      const itemId = String(values[0] || '').replace(/\.0+$/, '');
+      if (!/^\d{6,24}$/.test(itemId) || !values[1]) return null;
+      values[0] = itemId;
+      const echoedHeaderCount = values.slice(2).filter((value) => headerLabels.has(value)).length;
+      if (echoedHeaderCount >= 2) return null;
+      const signature = values.join('\u001f');
+      if (seenRows.has(signature)) return null;
+      seenRows.add(signature);
+      return { values };
+    }).filter(Boolean);
+    if (!rows.length) throw new Error('当前页商品数据尚未加载完成。');
+
+    const pagination = readGrassProductPagination(tableRoot);
+    if (!pagination.pageNo) throw new Error('未识别当前页码。');
+    const dateRange = canonicalDateRange(getDateContext());
+    const selectedFieldCount = readGrassProductSelectedFieldCount();
+    const fieldCoverageComplete = selectedFieldCount > 0 && headers.length >= selectedFieldCount;
+    const paginationAuthoritative = Boolean(
+      pagination.totalExpected && pagination.pageSize && pagination.pageCountExpected
+    );
+    const filterContext = readGrassProductFilterContext(tableRoot, headerRow);
+    const fingerprint = [
+      headers.join('\u001f'),
+      String(pagination.totalExpected),
+      String(pagination.pageSize),
+      dateRange || '',
+      String(selectedFieldCount),
+      filterContext,
+    ].join('\u001e');
+    return {
+      headers,
+      rows,
+      pageNo: pagination.pageNo,
+      pageSize: pagination.pageSize,
+      totalExpected: pagination.totalExpected,
+      pageCountExpected: pagination.pageCountExpected,
+      selectedFieldCount,
+      fieldCoverageComplete,
+      paginationAuthoritative,
+      filterContext,
+      dateRange,
+      fingerprint,
+      capturedAt: Date.now(),
+    };
+  }
+
+  function grassProductPageSignature(page) {
+    if (!page || !Array.isArray(page.rows)) return '';
+    return page.rows.map((row) => row.values.join('\u001f')).join('\u001e');
+  }
+
+  function grassProductPageHasExpectedRows(page) {
+    if (!page || !Array.isArray(page.rows) || !page.rows.length) return false;
+    if (!page.paginationAuthoritative || !page.pageSize || !page.totalExpected || !page.pageNo) return false;
+    const remaining = page.totalExpected - ((page.pageNo - 1) * page.pageSize);
+    const expected = Math.max(0, Math.min(page.pageSize, remaining));
+    return expected > 0 && page.rows.length === expected;
+  }
+
+  function assertGrassProductPageReady(page) {
+    if (!page || !page.paginationAuthoritative) {
+      throw new Error('未读取到权威的总条数和每页条数，请等待分页区加载完成后重试。');
+    }
+    if (!grassProductPageHasExpectedRows(page)) {
+      throw new Error('当前页商品行仍在加载，或页面存在重复行；为避免缺行，请等待表格稳定后重试。');
+    }
+  }
+
+  function resetGrassProductCollection() {
+    grassProductCollection.fingerprint = '';
+    grassProductCollection.headers = [];
+    grassProductCollection.pages.clear();
+    grassProductCollection.totalExpected = 0;
+    grassProductCollection.pageSize = 0;
+    grassProductCollection.pageCountExpected = 0;
+    grassProductCollection.selectedFieldCount = 0;
+    grassProductCollection.fieldCoverageComplete = false;
+    grassProductCollection.paginationAuthoritative = false;
+    grassProductCollection.stopRequested = false;
+    grassProductCollection.warning = '';
+  }
+
+  function storeGrassProductPage(page) {
+    if (!page || !Array.isArray(page.rows) || !page.rows.length) {
+      throw new Error('当前页没有可采集的商品行。');
+    }
+    if (grassProductCollection.fingerprint && grassProductCollection.fingerprint !== page.fingerprint) {
+      throw new Error('日期、筛选项、每页条数或字段已变化。请清空已采集数据后重新开始。');
+    }
+    const previous = grassProductCollection.pages.get(page.pageNo);
+    const existingCount = Array.from(grassProductCollection.pages.values())
+      .reduce((total, item) => total + item.rows.length, 0) - (previous ? previous.rows.length : 0);
+    if (existingCount + page.rows.length > GRASS_PRODUCT_MAX_ROWS) {
+      throw new Error('商品行数超过单次安全上限 ' + GRASS_PRODUCT_MAX_ROWS + ' 条，已停止采集。');
+    }
+    const existingCharacters = Array.from(grassProductCollection.pages.values())
+      .reduce((total, item) => total + item.rows.reduce((pageTotal, row) => (
+        pageTotal + row.values.reduce((rowTotal, value) => rowTotal + String(value || '').length, 0)
+      ), 0), 0) - (previous ? previous.rows.reduce((pageTotal, row) => (
+        pageTotal + row.values.reduce((rowTotal, value) => rowTotal + String(value || '').length, 0)
+      ), 0) : 0);
+    const incomingCharacters = page.rows.reduce((pageTotal, row) => (
+      pageTotal + row.values.reduce((rowTotal, value) => rowTotal + String(value || '').length, 0)
+    ), 0);
+    if (existingCharacters + incomingCharacters > GRASS_PRODUCT_MAX_TEXT_CHARS) {
+      throw new Error('商品文本量超过单次内存安全上限，已停止采集；当前数据仍可导出。');
+    }
+    grassProductCollection.fingerprint = page.fingerprint;
+    grassProductCollection.headers = page.headers.slice();
+    grassProductCollection.totalExpected = page.totalExpected;
+    grassProductCollection.pageSize = page.pageSize;
+    grassProductCollection.pageCountExpected = page.pageCountExpected;
+    grassProductCollection.selectedFieldCount = page.selectedFieldCount;
+    grassProductCollection.fieldCoverageComplete = page.fieldCoverageComplete;
+    grassProductCollection.paginationAuthoritative = page.paginationAuthoritative;
+    grassProductCollection.pages.set(page.pageNo, page);
+  }
+
+  function grassProductCollectionRows() {
+    return Array.from(grassProductCollection.pages.values())
+      .sort((left, right) => left.pageNo - right.pageNo)
+      .flatMap((page) => page.rows.map((row, index) => ({
+        pageNo: page.pageNo,
+        rowNo: index + 1,
+        values: row.values,
+      })));
+  }
+
+  function grassProductCollectionComplete() {
+    const rows = grassProductCollectionRows();
+    return grassProductCollection.pageCountExpected > 0 &&
+      grassProductCollection.paginationAuthoritative &&
+      grassProductCollection.fieldCoverageComplete &&
+      grassProductCollection.pages.size === grassProductCollection.pageCountExpected &&
+      grassProductCollection.totalExpected > 0 &&
+      rows.length === grassProductCollection.totalExpected;
+  }
+
+  function grassProductRiskMessage() {
+    const text = normalizeText(document.body && (document.body.innerText || document.body.textContent));
+    const messages = [
+      ['操作频繁', '页面提示操作频繁'],
+      ['访问受限', '页面提示访问受限'],
+      ['请完成验证', '页面要求完成安全验证'],
+      ['安全验证', '页面出现安全验证'],
+      ['滑块验证', '页面出现滑块验证'],
+      ['验证码', '页面出现验证码'],
+    ];
+    const found = messages.find((item) => text.includes(item[0]));
+    return found ? found[1] + '，采集已立即停止。' : '';
+  }
+
+  function findGrassProductNextButton() {
+    const headerRow = findGrassProductHeaderRow();
+    const tableRoot = headerRow && findGrassProductTableRoot(headerRow);
+    const pagination = tableRoot && findGrassProductPagination(tableRoot);
+    const item = pagination && pagination.querySelector('.ant-pagination-next');
+    if (
+      !item ||
+      !isVisible(item) ||
+      item.classList.contains('ant-pagination-disabled') ||
+      item.getAttribute('aria-disabled') === 'true'
+    ) return null;
+    const target = item.querySelector('button, a') || item;
+    if (target.disabled || target.getAttribute('aria-disabled') === 'true') return null;
+    return target;
+  }
+
+  function grassProductDelay() {
+    const range = GRASS_PRODUCT_MAX_DELAY_MS - GRASS_PRODUCT_MIN_DELAY_MS;
+    return GRASS_PRODUCT_MIN_DELAY_MS + Math.round(Math.random() * Math.max(0, range));
+  }
+
+  async function waitForGrassProductPage(expectedPageNo, previousSignature) {
+    const startedAt = Date.now();
+    let stableSignature = '';
+    let stableReads = 0;
+    while (Date.now() - startedAt < GRASS_PRODUCT_PAGE_TIMEOUT_MS) {
+      if (grassProductCollection.stopRequested) return null;
+      const riskMessage = grassProductRiskMessage();
+      if (riskMessage) throw new Error(riskMessage);
+      try {
+        const page = readCurrentGrassProductPage();
+        const signature = grassProductPageSignature(page);
+        if (
+          page.pageNo === expectedPageNo &&
+          grassProductPageHasExpectedRows(page) &&
+          signature &&
+          signature !== previousSignature
+        ) {
+          if (signature === stableSignature) stableReads += 1;
+          else {
+            stableSignature = signature;
+            stableReads = 1;
+          }
+          if (stableReads >= 3) return page;
+        }
+      } catch (error) {}
+      await sleep(300);
+    }
+    throw new Error('等待第 ' + expectedPageNo + ' 页数据稳定超时，已停止且不会重试请求。');
+  }
+
+  function setGrassProductWarning(message) {
+    grassProductCollection.warning = String(message || '');
+    renderGrassProductCollectorState();
+  }
+
+  function renderGrassProductPreview(root) {
+    const preview = root && root.querySelector('[data-sycm-product-preview]');
+    if (!preview) return;
+    preview.replaceChildren();
+    const pages = Array.from(grassProductCollection.pages.values()).sort((left, right) => left.pageNo - right.pageNo);
+    const page = pages[pages.length - 1];
+    if (!page) {
+      const empty = document.createElement('p');
+      empty.className = 'sycm-muted';
+      empty.textContent = '尚未采集。当前页采集不会触发新请求。';
+      preview.appendChild(empty);
+      return;
+    }
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    ['页码', '序号'].concat(page.headers).forEach((label) => {
+      const th = document.createElement('th');
+      th.scope = 'col';
+      th.textContent = label;
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    page.rows.slice(0, 5).forEach((row, index) => {
+      const tr = document.createElement('tr');
+      [String(page.pageNo), String(index + 1)].concat(row.values).forEach((value) => {
+        const td = document.createElement('td');
+        td.textContent = value;
+        td.title = value;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    preview.appendChild(table);
+  }
+
+  function renderGrassProductCollectorState() {
+    const root = document.getElementById(PANEL_ID);
+    if (!root || root.getAttribute('data-sycm-panel-kind') !== 'grass-products') return;
+    const rows = grassProductCollectionRows();
+    const pageCount = grassProductCollection.pageCountExpected || '?';
+    const total = grassProductCollection.totalExpected || '?';
+    const selectedFieldCount = grassProductCollection.selectedFieldCount || '?';
+    const capturedFieldCount = grassProductCollection.headers.length || 0;
+    const complete = grassProductCollectionComplete();
+    const status = root.querySelector('[data-sycm-product-status]');
+    const warning = root.querySelector('[data-sycm-product-warning]');
+    const currentButton = root.querySelector('[data-sycm-product-current]');
+    const allButton = root.querySelector('[data-sycm-product-all]');
+    const stopButton = root.querySelector('[data-sycm-product-stop]');
+    const exportButton = root.querySelector('[data-sycm-product-export]');
+    const clearButton = root.querySelector('[data-sycm-product-clear]');
+    if (status) {
+      status.textContent = (grassProductCollection.running ? '正在低频顺序采集。' : '') +
+        '已采集 ' + grassProductCollection.pages.size + '/' + pageCount + ' 页，' + rows.length + '/' + total + ' 条；' +
+        '字段 ' + capturedFieldCount + '/' + selectedFieldCount + '；' +
+        (grassProductCollection.pageSize ? '当前每页 ' + grassProductCollection.pageSize + ' 条。' : '尚未识别权威分页信息。') +
+        (complete ? ' 数据完整。' : ' 可导出部分数据。');
+    }
+    if (warning) {
+      warning.textContent = grassProductCollection.warning;
+      warning.hidden = !grassProductCollection.warning;
+    }
+    if (currentButton) currentButton.disabled = grassProductCollection.running;
+    if (allButton) allButton.disabled = grassProductCollection.running;
+    if (stopButton) {
+      stopButton.disabled = !grassProductCollection.running;
+      stopButton.hidden = !grassProductCollection.running;
+    }
+    if (exportButton) exportButton.disabled = !rows.length || grassProductCollection.running;
+    if (clearButton) clearButton.disabled = !rows.length || grassProductCollection.running;
+    renderGrassProductPreview(root);
+  }
+
+  function captureCurrentGrassProductPage() {
+    const riskMessage = grassProductRiskMessage();
+    if (riskMessage) throw new Error(riskMessage);
+    const page = readCurrentGrassProductPage();
+    assertGrassProductPageReady(page);
+    storeGrassProductPage(page);
+    grassProductCollection.warning = page.fieldCoverageComplete
+      ? ''
+      : '页面只渲染了 ' + page.headers.length + '/' + (page.selectedFieldCount || '?') +
+        ' 个已选字段；本页按部分数据保存。未出现在商品表 DOM 的列不会猜测或补零。';
+    renderGrassProductCollectorState();
+    return page;
+  }
+
+  async function captureAllGrassProductPages() {
+    if (grassProductCollection.running) return;
+    const firstPage = readCurrentGrassProductPage();
+    assertGrassProductPageReady(firstPage);
+    if (firstPage.pageNo !== 1) {
+      throw new Error('为避免漏页，请先手动回到第 1 页再开始全量采集。');
+    }
+    if (firstPage.totalExpected > GRASS_PRODUCT_MAX_ROWS) {
+      throw new Error('当前共有 ' + firstPage.totalExpected + ' 条，超过单次安全上限 ' + GRASS_PRODUCT_MAX_ROWS + ' 条。');
+    }
+    if (firstPage.pageCountExpected > GRASS_PRODUCT_MAX_AUTO_PAGES) {
+      throw new Error(
+        '当前需翻 ' + firstPage.pageCountExpected + ' 页。为降低风控风险，请先手动把每页条数调到 100 或 200，再回到第 1 页。'
+      );
+    }
+    let allowPartialFields = false;
+    if (!firstPage.fieldCoverageComplete) {
+      allowPartialFields = window.confirm(
+        '生意参谋显示已选 ' + (firstPage.selectedFieldCount || '?') + ' 个字段，但商品表实际只提供 ' +
+        firstPage.headers.length + ' 列。缺失列在页面 DOM 中没有数据，插件不会猜测或补零。\n\n' +
+        '是否继续低频采集页面实际提供的列？导出文件会标记为“部分”。'
+      );
+      if (!allowPartialFields) {
+        setGrassProductWarning('已取消全量采集；没有点击下一页。');
+        return;
+      }
+    }
+    resetGrassProductCollection();
+    grassProductCollection.running = true;
+    try {
+      let page = firstPage;
+      storeGrassProductPage(page);
+      renderGrassProductCollectorState();
+      for (let expectedPage = 2; expectedPage <= firstPage.pageCountExpected; expectedPage += 1) {
+        if (grassProductCollection.stopRequested) {
+          grassProductCollection.warning = '已按要求停止；当前已采集内容仍可导出。';
+          break;
+        }
+        const riskMessage = grassProductRiskMessage();
+        if (riskMessage) throw new Error(riskMessage);
+        await sleep(grassProductDelay());
+        if (grassProductCollection.stopRequested) {
+          grassProductCollection.warning = '已按要求停止；当前已采集内容仍可导出。';
+          break;
+        }
+        const delayedRiskMessage = grassProductRiskMessage();
+        if (delayedRiskMessage) throw new Error(delayedRiskMessage);
+        const beforeClick = readCurrentGrassProductPage();
+        assertGrassProductPageReady(beforeClick);
+        const previousSignature = grassProductPageSignature(page);
+        if (
+          beforeClick.pageNo !== page.pageNo ||
+          beforeClick.fingerprint !== page.fingerprint ||
+          grassProductPageSignature(beforeClick) !== previousSignature
+        ) {
+          throw new Error('等待期间页码、筛选项、排序或表格内容发生变化；为避免混页，已停止且不会继续点击。');
+        }
+        const nextButton = findGrassProductNextButton();
+        if (!nextButton) throw new Error('未找到可用的下一页按钮，已停止。');
+        nextButton.click();
+        page = await waitForGrassProductPage(expectedPage, previousSignature);
+        if (!page) {
+          grassProductCollection.warning = '已按要求停止；当前已采集内容仍可导出。';
+          break;
+        }
+        assertGrassProductPageReady(page);
+        if (!page.fieldCoverageComplete && !allowPartialFields) {
+          throw new Error('第 ' + expectedPage + ' 页渲染字段不完整，已停止；已采集内容仍可导出。');
+        }
+        storeGrassProductPage(page);
+        renderGrassProductCollectorState();
+      }
+      if (grassProductCollectionComplete()) grassProductCollection.warning = '';
+      else if (
+        allowPartialFields &&
+        grassProductCollection.pages.size === grassProductCollection.pageCountExpected &&
+        grassProductCollectionRows().length === grassProductCollection.totalExpected
+      ) {
+        grassProductCollection.warning = '所有商品行已采集，但页面仅提供 ' +
+          grassProductCollection.headers.length + '/' + (grassProductCollection.selectedFieldCount || '?') +
+          ' 个已选字段；CSV 将以“部分”标记。';
+      }
+    } finally {
+      grassProductCollection.running = false;
+      grassProductCollection.stopRequested = false;
+      renderGrassProductCollectorState();
+    }
+  }
+
+  function protectGrassProductCsvValue(value) {
+    const text = String(value == null ? '' : value).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+    const trimmed = text.trimStart();
+    if (/^[=+@]/.test(trimmed) || (/^-/.test(trimmed) && !/^-\d+(?:\.\d+)?$/.test(trimmed))) {
+      return "'" + text;
+    }
+    return text;
+  }
+
+  function grassProductCsvCell(value, forceText) {
+    let text = protectGrassProductCsvValue(value);
+    if (forceText && /^\d{6,24}$/.test(text)) text = "'" + text;
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+
+  function downloadGrassProductCsv() {
+    const rows = grassProductCollectionRows();
+    if (!rows.length) throw new Error('请先采集至少一页数据。');
+    const headers = ['采集页码', '页内序号'].concat(grassProductCollection.headers);
+    const lines = [headers.map((value) => grassProductCsvCell(value, false)).join(',')];
+    rows.forEach((row) => {
+      const values = [row.pageNo, row.rowNo].concat(row.values);
+      lines.push(values.map((value, index) => grassProductCsvCell(value, index === 2)).join(','));
+    });
+    const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    const now = new Date();
+    const date = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('-');
+    anchor.href = href;
+    anchor.download = '生意参谋_商品颗粒数据_' + date + (grassProductCollectionComplete() ? '' : '_部分') + '.csv';
+    anchor.hidden = true;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(href), 1200);
+  }
+
+  function showGrassProductCollector() {
+    let currentPage = null;
+    try {
+      currentPage = readCurrentGrassProductPage();
+    } catch (error) {}
+    const helperText = currentPage
+      ? '当前为第 ' + currentPage.pageNo + '/' + (currentPage.pageCountExpected || '?') +
+        ' 页，每页 ' + (currentPage.pageSize || '?') + ' 条，已渲染字段 ' + currentPage.headers.length +
+        '/' + (currentPage.selectedFieldCount || '?') + '。'
+      : '请等待商品颗粒表加载完成。';
+    showPanel(
+      '商品颗粒取数',
+      '<p class="sycm-context">仅读取页面已渲染的商品表。当前页采集不发请求；全量模式只按页面“下一页”低频顺序点击，不并发、不改接口、不重放请求。</p>' +
+        '<p class="sycm-context">' + escapeHtml(helperText) + ' 若总页数超过 ' + GRASS_PRODUCT_MAX_AUTO_PAGES + '，请先手动切换为 100/200 条每页并回到第 1 页。</p>' +
+        '<div class="sycm-product-status" role="status" aria-live="polite" data-sycm-product-status></div>' +
+        '<p class="sycm-warning" role="alert" data-sycm-product-warning hidden></p>' +
+        '<div class="sycm-actions sycm-actions-start">' +
+          '<button class="sycm-action" type="button" data-sycm-product-current>采集当前页</button>' +
+          '<button class="sycm-action sycm-action-primary" type="button" data-sycm-product-all>低频采集全部</button>' +
+          '<button class="sycm-action sycm-action-danger" type="button" data-sycm-product-stop hidden>停止</button>' +
+          '<button class="sycm-action" type="button" data-sycm-product-export disabled>导出 CSV</button>' +
+          '<button class="sycm-action" type="button" data-sycm-product-clear disabled>清空</button>' +
+        '</div>' +
+        '<div class="sycm-product-preview" data-sycm-product-preview></div>',
+      true
+    );
+    const root = document.getElementById(PANEL_ID);
+    if (!root) return;
+    root.setAttribute('data-sycm-panel-kind', 'grass-products');
+    root.setAttribute('role', 'dialog');
+    const heading = root.querySelector('.sycm-head span');
+    if (heading) {
+      heading.id = 'sycm-grass-product-heading';
+      root.setAttribute('aria-labelledby', heading.id);
+    }
+    root.querySelector('.sycm-close').addEventListener('click', () => {
+      grassProductCollection.stopRequested = true;
+    });
+    root.querySelector('[data-sycm-product-current]').addEventListener('click', () => {
+      try {
+        captureCurrentGrassProductPage();
+      } catch (error) {
+        setGrassProductWarning(error && error.message ? error.message : '当前页采集失败。');
+      }
+    });
+    root.querySelector('[data-sycm-product-all]').addEventListener('click', () => {
+      captureAllGrassProductPages().catch((error) => {
+        setGrassProductWarning(error && error.message ? error.message : '全量采集失败。');
+      });
+    });
+    root.querySelector('[data-sycm-product-stop]').addEventListener('click', () => {
+      grassProductCollection.stopRequested = true;
+      setGrassProductWarning('正在停止；不会再点击下一页。');
+    });
+    root.querySelector('[data-sycm-product-export]').addEventListener('click', () => {
+      try {
+        downloadGrassProductCsv();
+      } catch (error) {
+        setGrassProductWarning(error && error.message ? error.message : 'CSV 导出失败。');
+      }
+    });
+    root.querySelector('[data-sycm-product-clear]').addEventListener('click', () => {
+      resetGrassProductCollection();
+      renderGrassProductCollectorState();
+    });
+    renderGrassProductCollectorState();
+  }
+
   async function runTrafficDiagnosis(options) {
     const dateContext = await ensureTrafficThirtyDayMode();
     if (!canonicalDateRange(dateContext)) {
@@ -1546,12 +2244,39 @@
     document.body.appendChild(button);
   }
 
+  function createGrassProductButton() {
+    const previous = document.getElementById(GRASS_PRODUCT_BUTTON_ID);
+    if (previous || !isGrassProductTableContext()) return;
+    const button = document.createElement('button');
+    button.id = GRASS_PRODUCT_BUTTON_ID;
+    button.type = 'button';
+    button.textContent = '商品取数';
+    button.setAttribute('aria-label', '打开商品颗粒取数');
+    button.setAttribute('aria-haspopup', 'dialog');
+    button.style.cssText = [
+      'position:fixed', 'right:88px', 'bottom:24px', 'z-index:2147483645',
+      'height:38px', 'padding:0 15px', 'border:0', 'border-radius:4px',
+      'background:#1677ff', 'color:#fff', 'font:600 14px/38px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif',
+      'box-shadow:0 4px 14px rgba(22,119,255,.28)', 'cursor:pointer',
+    ].join(';');
+    button.addEventListener('mouseenter', () => { button.style.background = '#0958d9'; });
+    button.addEventListener('mouseleave', () => { button.style.background = '#1677ff'; });
+    button.addEventListener('click', showGrassProductCollector);
+    document.body.appendChild(button);
+  }
+
   function syncPage() {
     const shouldShow = window.top === window && (isTrafficPage() || isContentPage() || isGrassPage());
     const button = document.getElementById(BUTTON_ID);
+    const grassProductButton = document.getElementById(GRASS_PRODUCT_BUTTON_ID);
+    const shouldShowGrassProducts = grassProductButton
+      ? Boolean(findGrassProductHeaderRow())
+      : isGrassProductTableContext();
     if (currentPath !== location.pathname) currentPath = location.pathname;
     if (shouldShow && !button) createButton();
     if (!shouldShow && button) button.remove();
+    if (shouldShowGrassProducts && !grassProductButton) createGrassProductButton();
+    if (!shouldShowGrassProducts && grassProductButton) grassProductButton.remove();
   }
 
   function resumeDiagnosisAfterExtensionReload() {
@@ -1614,6 +2339,7 @@
   });
 
   createButton();
+  createGrassProductButton();
   resumeDiagnosisAfterExtensionReload();
   window.setInterval(syncPage, 800);
 })();

@@ -702,8 +702,20 @@
       collectSycm(values, data.businessDefenseSycmTrafficSnapshotV1);
       collectGuanghe(values, data.gh_channel_snapshot);
       collectWxt(values, data.wxtBusinessDefenseReportV1);
+      const detailKeys = window.XhsMetrics &&
+        typeof window.XhsMetrics.analysisDetailKeys === 'function'
+        ? window.XhsMetrics.analysisDetailKeys(data.xhsAnalysisSnapshotV1)
+        : [];
+      const detailValues = detailKeys.length ? await getStorage(detailKeys) : {};
+      const hydratedXhsAnalysis = window.XhsMetrics &&
+        typeof window.XhsMetrics.hydrateXhsAnalysisArchiveBundle === 'function'
+        ? window.XhsMetrics.hydrateXhsAnalysisArchiveBundle(
+          data.xhsAnalysisSnapshotV1,
+          detailValues
+        )
+        : data.xhsAnalysisSnapshotV1;
       const analysisSnapshot = xhsAnalysisWithStatus(
-        data.xhsAnalysisSnapshotV1,
+        hydratedXhsAnalysis,
         data.xhsCollectionStatusV1
       );
       currentXhsAnalysis = analysisSnapshot;
@@ -1132,139 +1144,636 @@
     const analysis = currentXhsAnalysis && typeof currentXhsAnalysis === 'object'
       ? currentXhsAnalysis
       : {};
-    const management = analysis.management && typeof analysis.management === 'object'
-      ? analysis.management
+    const safeObject = (value) => value && typeof value === 'object' && !Array.isArray(value)
+      ? value
       : {};
-    const costs = management.costs && typeof management.costs === 'object' ? management.costs : {};
-    const starTask = management.starTaskResult && typeof management.starTaskResult === 'object'
-      ? management.starTaskResult
-      : {};
-    const outsideDirect = management.outsideDirectResult && typeof management.outsideDirectResult === 'object'
-      ? management.outsideDirectResult
-      : {};
-    const star = analysis.star && typeof analysis.star === 'object' ? analysis.star : {};
-    const spotlight = analysis.spotlight && typeof analysis.spotlight === 'object' ? analysis.spotlight : {};
     const safeRows = (value) => Array.isArray(value) ? value : [];
-    const cellNumber = (value) => {
-      if (value === null || value === undefined || value === '') return '';
-      return Number.isFinite(Number(value)) ? Number(value) : '';
+    const management = safeObject(analysis.management);
+    const costs = safeObject(management.costs);
+    const accountOverview = safeObject(management.accountOverview);
+    const starTask = safeObject(management.starTaskResult);
+    const storeResult = safeObject(management.storeResult);
+    const outsideDirect = safeObject(management.outsideDirectResult);
+    const directResult = safeObject(management.directResult);
+    const pgy = safeObject(analysis.pgy);
+    const star = safeObject(analysis.star);
+    const spotlight = safeObject(analysis.spotlight);
+    const dateRange = safeObject(analysis.dateRange);
+    const finiteNumber = (value) => {
+      if (value === null || value === undefined || value === '') return null;
+      const number = typeof value === 'number'
+        ? value
+        : Number(String(value).replace(/[,，￥¥%\s]/g, ''));
+      return Number.isFinite(number) ? number : null;
     };
-    const metric = (value, key) => value && value.metrics && value.metrics[key];
+    const firstValue = (...values) => values.find((value) => (
+      value !== null && value !== undefined && value !== ''
+    ));
+    const sumIfKnown = (...values) => {
+      const numbers = values.map(finiteNumber);
+      return numbers.every((value) => value !== null)
+        ? numbers.reduce((sum, value) => sum + value, 0)
+        : null;
+    };
+    const ratio = (numerator, denominator) => {
+      const top = finiteNumber(numerator);
+      const bottom = finiteNumber(denominator);
+      return top !== null && bottom !== null && bottom > 0 ? top / bottom : null;
+    };
+    const cellNumber = (value) => {
+      const number = finiteNumber(value);
+      return number === null ? '—' : number;
+    };
+    const cellText = (value) => value === null || value === undefined || String(value).trim() === ''
+      ? '—'
+      : String(value);
+    const metric = (value, key) => safeObject(value && value.metrics)[key];
     const appendDataSheet = (sheetName, rows, widths) => {
       const data = rows.length ? rows : [{ 说明: '本次归档暂无该类数据' }];
       const sheet = XLSX.utils.json_to_sheet(data);
       sheet['!cols'] = (widths || []).map((wch) => ({ wch }));
+      if (sheet['!ref']) sheet['!autofilter'] = { ref: sheet['!ref'] };
       XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
     };
+    const normalizeTaskStatus = (value) => {
+      if (value === 'in_task') return 'in_task';
+      if (value === 'out_of_task' || value === 'no_task' || value === 'outside_task') {
+        return 'outside_task';
+      }
+      return 'unknown';
+    };
+    const normalizeObjective = (value) => {
+      const text = value === null || value === undefined ? '' : String(value).trim();
+      const compact = text.toLowerCase().replace(/[\s_-]/g, '');
+      if (text === '13' || compact.includes('direct') || text.includes('直达')) return 'direct';
+      if (text === '4' || compact.includes('seeding') || text.includes('种草')) return 'product_seeding';
+      return text || 'unknown';
+    };
+    const objectiveLabel = (value) => ({
+      direct: '种草直达',
+      product_seeding: '产品种草',
+      unknown: '未知营销诉求',
+    }[normalizeObjective(value)] || String(value));
+    const creatorSpendFallback = sumIfKnown(costs.cooperation, costs.platformFee);
+    const creatorSpend = firstValue(accountOverview.creatorSpend, costs.partnership, creatorSpendFallback);
+    const adSpend = firstValue(accountOverview.adSpend, costs.juguang);
+    const totalSpend = firstValue(accountOverview.totalSpend, costs.total, sumIfKnown(creatorSpend, adSpend));
+    const starAlignedSpend = firstValue(accountOverview.starAlignedSpend, costs.starTaskAligned);
+    const taskAdSpend = firstValue(accountOverview.taskAdSpend, costs.juguangInTask);
+    const outsideTaskAdSpend = firstValue(accountOverview.outsideTaskAdSpend, costs.juguangOutsideTask);
+    const unknownTaskAdSpend = firstValue(accountOverview.unknownTaskAdSpend, costs.juguangUnknownTask);
+    const spotlightDaily = safeRows(spotlight.daily);
+    const taskObjectiveSpend = (taskStatus, marketingObjective) => {
+      const bucket = safeRows(spotlight.byTaskObjective).find((item) => (
+        normalizeTaskStatus(item && item.taskStatus) === taskStatus &&
+        normalizeObjective(item && item.marketingObjective) === marketingObjective
+      ));
+      if (bucket && finiteNumber(bucket.spend) !== null) return finiteNumber(bucket.spend);
+      const matching = spotlightDaily.filter((row) => (
+        normalizeTaskStatus(row && row.taskStatus) === taskStatus &&
+        normalizeObjective(row && row.marketingObjective) === marketingObjective
+      ));
+      return matching.length
+        ? matching.reduce((sum, row) => sum + (finiteNumber(row.spend) || 0), 0)
+        : null;
+    };
 
-    appendDataSheet('小红书管理汇总', [{
-      运行ID: analysis.runId || '',
-      店铺ID: analysis.storeId || '',
-      数据开始: analysis.dateRange && analysis.dateRange.from || '',
-      数据结束: analysis.dateRange && analysis.dateRange.to || '',
-      时区: analysis.dateRange && analysis.dateRange.timezone || '',
-      决策可用: analysis.quality && analysis.quality.decisionReady === true ? '是' : '否',
-      笔记数: cellNumber(management.noteCount),
-      合作实付: cellNumber(costs.cooperation),
-      平台服务费: cellNumber(costs.platformFee),
-      达人合作总成本: cellNumber(costs.partnership),
-      聚光消耗: cellNumber(costs.juguang),
-      总成本: cellNumber(costs.total),
-      星河任务成本: cellNumber(costs.starTaskAligned),
-      星河任务GMV: cellNumber(starTask.gmv),
-      星河任务ROI: cellNumber(starTask.roi),
-      任务外直达消耗: cellNumber(outsideDirect.spend),
-      任务外直达GMV: cellNumber(outsideDirect.gmv),
-      任务外直达ROI: cellNumber(outsideDirect.roi),
-      生成时间: analysis.generatedAt || '',
-    }], [24, 24, 14, 14, 18, 12, 12, 14, 14, 16, 14, 14, 16, 16, 16, 18, 18, 18, 24]);
+    appendDataSheet('小红书账户总览', [{
+      运行ID: cellText(analysis.runId),
+      店铺ID: cellText(analysis.storeId),
+      数据开始: cellText(dateRange.from),
+      数据结束: cellText(dateRange.to),
+      时区: cellText(dateRange.timezone),
+      决策可用: analysis.quality && analysis.quality.decisionReady === true
+        ? '是'
+        : analysis.quality && analysis.quality.decisionReady === false ? '否' : '—',
+      星河数据笔记数: cellNumber(management.noteCount),
+      时间筛选内笔记数: cellNumber(pgy.noteCount),
+      星河任务笔记数: cellNumber(pgy.starTaskNoteCount),
+      超期笔记数: cellNumber(pgy.overdueNoteCount),
+      蒲公英合作实付: cellNumber(safeObject(pgy.costs).cooperation),
+      蒲公英平台服务费: cellNumber(safeObject(pgy.costs).platformFee),
+      蒲公英曝光量: cellNumber(safeObject(pgy.metrics).impressions),
+      蒲公英阅读量: cellNumber(safeObject(pgy.metrics).reads),
+      蒲公英互动量: cellNumber(safeObject(pgy.metrics).interactions),
+      蒲公英阅读率: cellNumber(safeObject(pgy.metrics).readRate),
+      蒲公英互动率: cellNumber(safeObject(pgy.metrics).engagementRate),
+      总投入: cellNumber(totalSpend),
+      达人花费: cellNumber(creatorSpend),
+      广告花费: cellNumber(adSpend),
+      星河归因投入: cellNumber(starAlignedSpend),
+      任务期内广告花费: cellNumber(taskAdSpend),
+      任务期外广告花费: cellNumber(outsideTaskAdSpend),
+      任务周期未知广告花费: cellNumber(unknownTaskAdSpend),
+      任务期内产品种草消耗: cellNumber(taskObjectiveSpend('in_task', 'product_seeding')),
+      任务期内种草直达消耗: cellNumber(taskObjectiveSpend('in_task', 'direct')),
+      任务期外产品种草消耗: cellNumber(taskObjectiveSpend('outside_task', 'product_seeding')),
+      任务期外种草直达消耗: cellNumber(taskObjectiveSpend('outside_task', 'direct')),
+      任务ROI: cellNumber(firstValue(accountOverview.taskRoi, starTask.roi)),
+      任务外直达ROI: cellNumber(firstValue(accountOverview.outsideDirectRoi, outsideDirect.roi)),
+      直达ROI: cellNumber(firstValue(accountOverview.directRoi, directResult.roi)),
+      生成时间: cellText(analysis.generatedAt),
+    }], [24, 24, 14, 14, 18, 12, 16, 18, 18, 18, 20, 16, 16, 16, 16, 16, 14, 14, 14,
+      16, 18, 18, 22, 20, 20, 20, 20, 14, 18, 14, 24]);
 
-    appendDataSheet('小红书笔记联表', safeRows(analysis.notes).map((note) => ({
-      笔记ID: note.noteId || '',
-      标题: note.title || '',
-      达人: note.author && note.author.name || '',
-      发布时间: note.publishDate || '',
-      成熟度: note.maturity || '',
-      任务区间: safeRows(note.task && note.task.intervals).map((item) => (
-        String(item.start || '') + ' 至 ' + String(item.end || '')
-      )).join('；'),
-      星河项目ID: safeRows(note.task && note.task.projectIds).join('；'),
-      星河订单ID: safeRows(note.task && note.task.orderIds).join('；'),
-      合作实付: cellNumber(note.costs && note.costs.cooperation),
-      平台服务费: cellNumber(note.costs && note.costs.platformFee),
-      聚光消耗: cellNumber(note.costs && note.costs.juguang),
-      总成本: cellNumber(note.costs && note.costs.total),
-      任务成本: cellNumber(note.costs && note.costs.starTaskAligned),
-      任务外直达消耗: cellNumber(note.costs && note.costs.outsideDirect),
-      蒲公英曝光: cellNumber(note.pgy && metric(note.pgy, 'impressions')),
-      蒲公英阅读: cellNumber(note.pgy && metric(note.pgy, 'reads')),
-      蒲公英互动: cellNumber(note.pgy && metric(note.pgy, 'interactions')),
-      星河GMV: cellNumber(note.results && note.results.starTaskGmv),
-      星河ROI: cellNumber(note.results && note.results.starTaskRoi),
-      任务外直达GMV: cellNumber(note.results && note.results.outsideDirectGmv),
-      任务外直达ROI: cellNumber(note.results && note.results.outsideDirectRoi),
-    })), [24, 34, 18, 14, 12, 30, 28, 28, 14, 14, 14, 14, 14, 18, 14, 14, 14, 14, 14, 18, 18]);
+    const pgyMonthlyRows = safeRows(pgy.monthly).map((row) => ({
+      月份: cellText(row && row.month),
+      发布笔记数: cellNumber(row && row.noteCount),
+    }));
+    appendDataSheet('蒲公英月度', pgyMonthlyRows.length ? pgyMonthlyRows : [{
+      月份: '—',
+      发布笔记数: '—',
+    }], [14, 16]);
 
-    const layerRows = [];
-    for (const [layer, units] of [['项目', star.projects], ['订单', star.orders]]) {
-      safeRows(units).forEach((unit) => layerRows.push({
-        层级: layer,
-        ID: unit.id || '',
-        名称: unit.name || '',
-        项目ID: unit.projectId || '',
-        状态: unit.status || '',
-        分摊成本: cellNumber(unit.allocatedCost),
-        GMV: cellNumber(metric(unit, 'gmv')),
-        ROI: cellNumber(unit.roi),
-        阅读UV: cellNumber(metric(unit, 'readUv')),
-        互动UV: cellNumber(metric(unit, 'engagementUv')),
-        进店UV: cellNumber(metric(unit, 'storeVisitUv')),
-        成交UV: cellNumber(metric(unit, 'orderUv')),
-      }));
+    const pgyFollowerRows = safeRows(pgy.followerTiers).map((row) => ({
+      粉丝量级: cellText(row && (row.label || row.key)),
+      笔记数量: cellNumber(row && row.noteCount),
+      达人数量: cellNumber(row && row.authorCount),
+      合作费用: cellNumber(row && row.cooperationCost),
+      平均合作费用: cellNumber(row && row.averageCooperationCost),
+      口径: '仅合作费，不含平台服务费',
+    }));
+    appendDataSheet('蒲公英粉丝量级', pgyFollowerRows.length ? pgyFollowerRows : [{
+      粉丝量级: '—',
+      笔记数量: '—',
+      达人数量: '—',
+      合作费用: '—',
+      平均合作费用: '—',
+      口径: '仅合作费，不含平台服务费',
+    }], [14, 14, 14, 16, 18, 30]);
+
+    const spotlightGroups = new Map();
+    for (const row of spotlightDaily) {
+      const accountId = cellText(row && row.accountId);
+      const accountName = cellText(row && (row.accountName || row.accountId));
+      const marketingObjective = normalizeObjective(row && row.marketingObjective);
+      const placementType = row && row.placementType;
+      const key = JSON.stringify([accountId, marketingObjective, placementType]);
+      if (!spotlightGroups.has(key)) {
+        spotlightGroups.set(key, {
+          accountId,
+          accountName,
+          marketingObjective,
+          placementType,
+          noteIds: new Set(),
+          totalSpend: 0,
+          inTaskSpend: 0,
+          outsideTaskSpend: 0,
+          unknownTaskSpend: 0,
+          impressions: 0,
+          clicks: 0,
+          interactions: 0,
+          seedUsers: 0,
+          deepSeedUsers: 0,
+          directSpend: 0,
+          storeVisits: null,
+          orders: null,
+          gmv: null,
+          platformRois: [],
+          directRows: 0,
+          observableDirectRows: 0,
+          unavailableDirectRows: 0,
+          seedingSpend: 0,
+          seedingActiveUv: 0,
+          seedingRows: 0,
+          observableSeedingRows: 0,
+          unavailableSeedingRows: 0,
+        });
+      }
+      const group = spotlightGroups.get(key);
+      if (row && row.noteId !== null && row.noteId !== undefined && row.noteId !== '') {
+        group.noteIds.add(String(row.noteId));
+      }
+      const spend = finiteNumber(row && row.spend) || 0;
+      group.totalSpend += spend;
+      const status = normalizeTaskStatus(row && row.taskStatus);
+      if (status === 'in_task') group.inTaskSpend += spend;
+      else if (status === 'outside_task') group.outsideTaskSpend += spend;
+      else group.unknownTaskSpend += spend;
+      group.impressions += finiteNumber(row && row.impressions) || 0;
+      group.clicks += finiteNumber(row && row.clicks) || 0;
+      group.interactions += finiteNumber(row && row.interactions) || 0;
+      group.seedUsers += finiteNumber(row && row.seedUsers) || 0;
+      group.deepSeedUsers += finiteNumber(row && row.deepSeedUsers) || 0;
+      if (marketingObjective === 'product_seeding') {
+        const external = safeObject(row && row.seedingExternal15);
+        const activeUv = finiteNumber(external.activeUv);
+        group.seedingSpend += spend;
+        group.seedingRows += 1;
+        if (external.observable === true && activeUv !== null && activeUv >= 0) {
+          group.observableSeedingRows += 1;
+          group.seedingActiveUv += activeUv;
+        } else {
+          group.unavailableSeedingRows += 1;
+        }
+      }
+      const conversion = safeObject(row && row.conversion);
+      if (marketingObjective !== 'direct') continue;
+      group.directRows += 1;
+      group.directSpend += spend;
+      const requiredConversionComplete = [
+        conversion.storeVisits, conversion.orders, conversion.gmv,
+      ].every((value) => finiteNumber(value) !== null);
+      const hasObservableFlag = Object.prototype.hasOwnProperty.call(conversion, 'observable');
+      const observable = requiredConversionComplete && (
+        hasObservableFlag ? conversion.observable === true : true
+      );
+      if (observable) {
+        group.observableDirectRows += 1;
+        group.storeVisits = (group.storeVisits || 0) + (finiteNumber(conversion.storeVisits) || 0);
+        group.orders = (group.orders || 0) + (finiteNumber(conversion.orders) || 0);
+        group.gmv = (group.gmv || 0) + (finiteNumber(conversion.gmv) || 0);
+        const platformRoi = finiteNumber(conversion.platformRoi15);
+        if (platformRoi !== null) group.platformRois.push(platformRoi);
+      } else {
+        group.unavailableDirectRows += 1;
+      }
     }
-    appendDataSheet('小红书项目订单', layerRows, [10, 28, 32, 28, 14, 14, 14, 14, 14, 14, 14, 14]);
+    const juguangRows = [...spotlightGroups.values()].sort((left, right) => (
+      right.totalSpend - left.totalSpend
+    )).map((group) => {
+      const platformRois = [...new Set(group.platformRois.map(String))];
+      const conversionObservability = group.directRows === 0 || group.observableDirectRows === 0
+        ? '不可用'
+        : group.unavailableDirectRows > 0 ? '部分不可用' : '完整';
+      const conversionComplete = conversionObservability === '完整';
+      const seedingObservability = group.seedingRows === 0 || group.observableSeedingRows === 0
+        ? '不可用'
+        : group.unavailableSeedingRows > 0 ? '部分不可用' : '完整';
+      const seedingComplete = seedingObservability === '完整';
+      return {
+        广告账户ID: group.accountId,
+        广告账户: group.accountName,
+        营销诉求: objectiveLabel(group.marketingObjective),
+        投放位置: cellText(group.placementType),
+        笔记数: group.noteIds.size,
+        总消耗: group.totalSpend,
+        任务期内消耗: group.inTaskSpend,
+        任务期外消耗: group.outsideTaskSpend,
+        任务周期未知消耗: group.unknownTaskSpend,
+        曝光: group.impressions,
+        点击: group.clicks,
+        互动: group.interactions,
+        新增种草人群: group.seedUsers,
+        新增深度种草人群: group.deepSeedUsers,
+        '15日站外行为可观测性': seedingObservability,
+        '15日站外活跃UV': cellNumber(seedingComplete ? group.seedingActiveUv : null),
+        '15日站外行为成本': cellNumber(seedingComplete
+          ? ratio(group.seedingSpend, group.seedingActiveUv)
+          : null),
+        '15日直达消耗': group.directSpend,
+        '15日转化可观测性': conversionObservability,
+        外链进店数: cellNumber(conversionComplete ? group.storeVisits : null),
+        '15日成交订单数': cellNumber(conversionComplete ? group.orders : null),
+        '15日成交GMV': cellNumber(conversionComplete ? group.gmv : null),
+        '15日计算ROI': cellNumber(conversionComplete ? ratio(group.gmv, group.directSpend) : null),
+        平台原始ROI: conversionComplete &&
+          group.platformRois.length === group.directRows && platformRois.length === 1
+          ? Number(platformRois[0])
+          : '—',
+      };
+    });
+    if (!juguangRows.length) {
+      safeRows(spotlight.byAccount).forEach((row) => {
+        const directSpend = finiteNumber(row && row.directSpend);
+        const conversionComplete = directSpend !== null && directSpend > 0 && [
+          row && row.storeVisits, row && row.orders, row && row.gmv,
+        ].every((value) => finiteNumber(value) !== null);
+        juguangRows.push({
+          广告账户ID: cellText(row && row.key),
+          广告账户: cellText(row && (row.label || row.key)),
+          营销诉求: '全部',
+          投放位置: '—',
+          笔记数: cellNumber(row && row.noteCount),
+          总消耗: cellNumber(row && row.spend),
+          任务期内消耗: '—',
+          任务期外消耗: '—',
+          任务周期未知消耗: '—',
+          曝光: cellNumber(row && row.impressions),
+          点击: cellNumber(row && row.clicks),
+          互动: cellNumber(row && row.interactions),
+          新增种草人群: cellNumber(row && row.seedUsers),
+          新增深度种草人群: cellNumber(row && row.deepSeedUsers),
+          '15日站外行为可观测性': '不可用',
+          '15日站外活跃UV': '—',
+          '15日站外行为成本': '—',
+          '15日直达消耗': cellNumber(directSpend),
+          '15日转化可观测性': conversionComplete ? '完整' : '不可用',
+          外链进店数: cellNumber(conversionComplete ? row && row.storeVisits : null),
+          '15日成交订单数': cellNumber(conversionComplete ? row && row.orders : null),
+          '15日成交GMV': cellNumber(conversionComplete ? row && row.gmv : null),
+          '15日计算ROI': cellNumber(conversionComplete
+            ? firstValue(row && row.calculatedRoi15, row && row.roi)
+            : null),
+          平台原始ROI: cellNumber(conversionComplete ? row && row.platformRoi15 : null),
+        });
+      });
+    }
+    appendDataSheet('聚光分析', juguangRows.length ? juguangRows : [{
+      广告账户ID: '—', 广告账户: '—', 营销诉求: '—', 投放位置: '—', 笔记数: '—',
+      总消耗: '—', 任务期内消耗: '—', 任务期外消耗: '—', 任务周期未知消耗: '—',
+      曝光: '—', 点击: '—', 互动: '—', 新增种草人群: '—', 新增深度种草人群: '—',
+      '15日站外行为可观测性': '不可用', '15日站外活跃UV': '—', '15日站外行为成本': '—',
+      '15日直达消耗': '—', '15日转化可观测性': '不可用', 外链进店数: '—',
+      '15日成交订单数': '—', '15日成交GMV': '—', '15日计算ROI': '—', 平台原始ROI: '—',
+    }], [24, 24, 16, 16, 12, 14, 16, 16, 20, 14, 14, 14, 18, 22, 22, 18, 18,
+      16, 18, 16, 18, 18, 16, 16]);
 
-    appendDataSheet('小红书聚光日报', safeRows(spotlight.daily).map((row) => ({
-      日期: row.date || '',
-      笔记ID: row.noteId || '',
-      广告账户ID: row.accountId || '',
-      广告账户: row.accountName || '',
-      账户类型: row.accountType == null ? '' : row.accountType,
-      营销诉求: row.marketingObjective || '',
-      投放模式: row.deliveryMode == null ? '' : row.deliveryMode,
-      任务状态: row.taskStatus || '',
-      消耗: cellNumber(row.spend),
-      曝光: cellNumber(row.impressions),
-      点击: cellNumber(row.clicks),
-      互动: cellNumber(row.interactions),
-      种草人数: cellNumber(row.seedUsers),
-      深度种草人数: cellNumber(row.deepSeedUsers),
-      进店: cellNumber(row.conversion && row.conversion.storeVisits),
-      成交: cellNumber(row.conversion && row.conversion.orders),
-      GMV: cellNumber(row.conversion && row.conversion.gmv),
-    })), [14, 24, 24, 24, 12, 16, 14, 14, 14, 14, 14, 14, 14, 16, 14, 14, 14]);
+    const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+    const hasStarStore = hasOwn(star, 'store');
+    const rawStarStore = star.store;
+    const starStore = safeObject(rawStarStore);
+    const hasStarTaskSummary = hasOwn(star, 'taskSummary');
+    const rawStarTaskSummary = star.taskSummary;
+    const starTaskSummary = safeObject(rawStarTaskSummary);
+    const legacyStoreMetrics = Object.keys(safeObject(storeResult.metrics)).length
+      ? safeObject(storeResult.metrics)
+      : safeObject(starTask.metrics);
+    const containerValue = (present, rawContainer, container, key, fallback) => {
+      if (!present) return fallback;
+      if (!rawContainer || typeof rawContainer !== 'object' || Array.isArray(rawContainer)) return null;
+      return hasOwn(container, key) ? container[key] : fallback;
+    };
+    const nestedValue = (present, rawContainer, container, section, key, fallback) => {
+      if (!present) return fallback;
+      if (!rawContainer || typeof rawContainer !== 'object' || Array.isArray(rawContainer)) return null;
+      if (!hasOwn(container, section)) return fallback;
+      const rawSection = container[section];
+      const sectionObject = safeObject(rawSection);
+      if (!rawSection || typeof rawSection !== 'object' || Array.isArray(rawSection)) return null;
+      return hasOwn(sectionObject, key) ? sectionObject[key] : fallback;
+    };
+    const storeValue = (key, fallback) => containerValue(
+      hasStarStore, rawStarStore, starStore, key, fallback
+    );
+    const storeNestedValue = (section, key, fallback) => nestedValue(
+      hasStarStore, rawStarStore, starStore, section, key, fallback
+    );
+    const taskValue = (key, fallback) => containerValue(
+      hasStarTaskSummary, rawStarTaskSummary, starTaskSummary, key, fallback
+    );
+    const taskNestedValue = (section, key, fallback) => nestedValue(
+      hasStarTaskSummary, rawStarTaskSummary, starTaskSummary, section, key, fallback
+    );
+    const storeMetric = (key) => storeNestedValue(
+      'metrics', key, firstValue(legacyStoreMetrics[key], key === 'gmv' ? storeResult.gmv : null)
+    );
+    const taskMetric = (key) => taskNestedValue('metrics', key, null);
+    const storeMetricIsExplicit = (key) => hasStarStore && rawStarStore &&
+      typeof rawStarStore === 'object' && !Array.isArray(rawStarStore) && hasOwn(starStore, 'metrics') &&
+      starStore.metrics && typeof starStore.metrics === 'object' && !Array.isArray(starStore.metrics) &&
+      hasOwn(starStore.metrics, key);
+    const taskMetricIsExplicit = (key) => hasStarTaskSummary && rawStarTaskSummary &&
+      typeof rawStarTaskSummary === 'object' && !Array.isArray(rawStarTaskSummary) &&
+      hasOwn(starTaskSummary, 'metrics') && starTaskSummary.metrics &&
+      typeof starTaskSummary.metrics === 'object' && !Array.isArray(starTaskSummary.metrics) &&
+      hasOwn(starTaskSummary.metrics, key);
+    const starStoreMetrics = Object.fromEntries([
+      'readUv', 'searchImpressionUv', 'engagementUv', 'storeVisitUv',
+      'visitRate', 'visitCost', 'gmv', 'seededProductGmv',
+    ].map((key) => [key, storeMetric(key)]));
+    const starTaskMetrics = Object.fromEntries([
+      'readUv', 'searchImpressionUv', 'engagementUv', 'storeVisitUv', 'visitRate', 'visitCost',
+    ].map((key) => [key, taskMetric(key)]));
+    const taskActiveNoteCount = taskValue('activeNoteCount', management.noteCount);
+    const storeCost = storeNestedValue('costs', 'total', starAlignedSpend);
+    const storeCreatorCost = storeNestedValue('costs', 'creator', creatorSpend);
+    const storeAdCost = storeNestedValue('costs', 'adInTask', taskAdSpend);
+    const storeGmv = starStoreMetrics.gmv;
+    const taskGmv = taskValue('gmv', firstValue(starTask.gmv, starStoreMetrics.seededProductGmv));
+    const storeVisitRate = storeMetricIsExplicit('visitRate')
+      ? starStoreMetrics.visitRate
+      : firstValue(starStoreMetrics.visitRate, ratio(starStoreMetrics.storeVisitUv, starStoreMetrics.readUv));
+    const storeVisitCost = storeMetricIsExplicit('visitCost')
+      ? starStoreMetrics.visitCost
+      : firstValue(starStoreMetrics.visitCost, ratio(storeCost, starStoreMetrics.storeVisitUv));
+    const taskVisitRate = taskMetricIsExplicit('visitRate')
+      ? starTaskMetrics.visitRate
+      : firstValue(starTaskMetrics.visitRate, ratio(starTaskMetrics.storeVisitUv, starTaskMetrics.readUv));
+    const storeRoi = storeValue('storeRoi', firstValue(storeResult.roi, ratio(storeGmv, storeCost)));
+    const storeTaskRoi = storeValue('taskRoi', taskValue('roi', starTask.roi));
+    const taskRoi = taskValue('roi', storeValue('taskRoi', starTask.roi));
+    const taskCost = taskNestedValue('costs', 'total', storeCost);
+    const taskCreatorCost = taskNestedValue('costs', 'creator', storeCreatorCost);
+    const taskAdCost = taskNestedValue('costs', 'adInTask', storeAdCost);
+    appendDataSheet('星河汇总', [{
+      汇总层级: '全店汇总',
+      任务笔记数: cellNumber(taskActiveNoteCount),
+      总花费: cellNumber(storeCost),
+      达人花费: cellNumber(storeCreatorCost),
+      广告花费: cellNumber(storeAdCost),
+      阅读UV: cellNumber(starStoreMetrics.readUv),
+      搜索曝光UV: cellNumber(starStoreMetrics.searchImpressionUv),
+      互动UV: cellNumber(starStoreMetrics.engagementUv),
+      进店UV: cellNumber(starStoreMetrics.storeVisitUv),
+      进店率: cellNumber(storeVisitRate),
+      进店成本: cellNumber(storeVisitCost),
+      GMV: cellNumber(storeGmv),
+      全店ROI: cellNumber(storeRoi),
+      任务ROI: cellNumber(storeTaskRoi),
+    }, {
+      汇总层级: '星河任务汇总',
+      任务笔记数: cellNumber(taskActiveNoteCount),
+      总花费: cellNumber(taskCost),
+      达人花费: cellNumber(taskCreatorCost),
+      广告花费: cellNumber(taskAdCost),
+      阅读UV: cellNumber(starTaskMetrics.readUv),
+      搜索曝光UV: cellNumber(starTaskMetrics.searchImpressionUv),
+      互动UV: cellNumber(starTaskMetrics.engagementUv),
+      进店UV: cellNumber(starTaskMetrics.storeVisitUv),
+      进店率: cellNumber(taskVisitRate),
+      进店成本: cellNumber(starTaskMetrics.visitCost),
+      GMV: cellNumber(taskGmv),
+      全店ROI: '—',
+      任务ROI: cellNumber(taskRoi),
+    }], [18, 16, 14, 14, 14, 14, 16, 14, 14, 14, 14, 14, 14, 14]);
 
-    appendDataSheet('小红书星河明细', safeRows(star.daily).map((row) => ({
-      日期: row.date || '',
-      笔记ID: row.noteId || '',
-      任务状态: row.taskStatus || '',
-      项目ID: safeRows(row.projectIds).join('；'),
-      订单ID: safeRows(row.orderIds).join('；'),
-      来源行数: cellNumber(row.rowCount),
-      阅读UV: cellNumber(metric(row, 'readUv')),
-      互动UV: cellNumber(metric(row, 'engagementUv')),
-      搜索曝光UV: cellNumber(metric(row, 'searchImpressionUv')),
-      搜索进店UV: cellNumber(metric(row, 'searchVisitUv')),
-      店铺进店UV: cellNumber(metric(row, 'storeVisitUv')),
-      新客进店UV: cellNumber(metric(row, 'newStoreVisitUv')),
-      收藏UV: cellNumber(metric(row, 'favoriteUv')),
-      加购UV: cellNumber(metric(row, 'cartUv')),
-      成交UV: cellNumber(metric(row, 'orderUv')),
-      新客成交UV: cellNumber(metric(row, 'newOrderUv')),
-      GMV: cellNumber(metric(row, 'gmv')),
-      任务商品GMV: cellNumber(metric(row, 'seededProductGmv')),
-      连带GMV: cellNumber(metric(row, 'linkedProductGmv')),
-    })), [14, 24, 14, 28, 28, 12, 14, 14, 16, 16, 16, 16, 14, 14, 14, 16, 14, 18, 14]);
+    const topLevelOrders = safeRows(star.orders);
+    const attachedOrderIds = new Set();
+    const starProjectTaskRows = [];
+    const appendStarUnit = (layer, unit, projectId) => {
+      const metrics = safeObject(unit && unit.metrics);
+      const unitCosts = safeObject(unit && unit.costs);
+      const order = layer === '任务' ? unit : null;
+      const orderIdentityVerified = !order || order.businessIdentityVerified !== false;
+      const businessOrderId = order && orderIdentityVerified ? order.id : null;
+      const reportOrderId = order && !orderIdentityVerified ? order.reportOrderId : null;
+      starProjectTaskRows.push({
+        层级: layer,
+        项目ID: cellText(layer === '项目' ? unit && unit.id : projectId),
+        任务ID: order ? cellText(businessOrderId) : '—',
+        报表任务标识: order ? cellText(reportOrderId) : '—',
+        业务任务身份: order ? (orderIdentityVerified ? '已验证' : '未验证') : '—',
+        名称: cellText(unit && (unit.name || unit.title)),
+        状态: cellText(unit && (unit.orderStatus || unit.status)),
+        开始日期: cellText(unit && unit.startDate),
+        结束日期: cellText(unit && unit.endDate),
+        投放模式: cellText(unit && unit.deliveryMode),
+        总花费: cellNumber(unitCosts.total),
+        达人花费: cellNumber(unitCosts.creator),
+        任务期内广告花费: cellNumber(unitCosts.adInTask),
+        阅读UV: cellNumber(metrics.readUv),
+        搜索曝光UV: cellNumber(metrics.searchImpressionUv),
+        互动UV: cellNumber(metrics.engagementUv),
+        进店UV: cellNumber(metrics.storeVisitUv),
+        进店率: cellNumber(firstValue(metrics.visitRate, ratio(metrics.storeVisitUv, metrics.readUv))),
+        收藏UV: cellNumber(metrics.favoriteUv),
+        加购UV: cellNumber(metrics.cartUv),
+        成交UV: cellNumber(metrics.orderUv),
+        GMV: cellNumber(metrics.gmv),
+        任务商品GMV: cellNumber(metrics.seededProductGmv),
+        连带GMV: cellNumber(metrics.linkedProductGmv),
+      });
+    };
+    safeRows(star.projects).forEach((project) => {
+      appendStarUnit('项目', project, project && project.id);
+      const nestedOrders = safeRows(project && project.orders);
+      const projectOrders = nestedOrders.length
+        ? nestedOrders
+        : topLevelOrders.filter((order) => String(order && order.projectId || '') === String(project && project.id || ''));
+      projectOrders.forEach((order) => {
+        if (order && order.id !== null && order.id !== undefined) attachedOrderIds.add(String(order.id));
+        appendStarUnit('任务', order, project && project.id);
+      });
+    });
+    topLevelOrders.forEach((order) => {
+      if (order && attachedOrderIds.has(String(order.id))) return;
+      appendStarUnit('任务', order, order && order.projectId);
+    });
+    appendDataSheet('星河项目任务', starProjectTaskRows.length ? starProjectTaskRows : [{
+      层级: '—', 项目ID: '—', 任务ID: '—', 报表任务标识: '—', 业务任务身份: '—',
+      名称: '—', 状态: '—', 开始日期: '—', 结束日期: '—', 投放模式: '—',
+      总花费: '—', 达人花费: '—', 任务期内广告花费: '—',
+      阅读UV: '—', 搜索曝光UV: '—', 互动UV: '—',
+      进店UV: '—', 进店率: '—', 收藏UV: '—', 加购UV: '—', 成交UV: '—', GMV: '—',
+      任务商品GMV: '—', 连带GMV: '—',
+    }], [12, 28, 28, 28, 16, 32, 14, 14, 14, 16, 14, 14, 18, 14, 16, 14, 14, 14, 14, 14, 14, 14, 18, 14]);
+
+    const joinedNoteRows = safeRows(analysis.notes).map((note) => {
+      const noteCosts = safeObject(note && note.costs);
+      const notePgy = safeObject(note && note.pgy);
+      const pgyMetrics = safeObject(notePgy.metrics);
+      const noteJuguang = safeObject(note && note.juguang);
+      const starMetrics = safeObject(note && note.star && note.star.metrics);
+      const noteResults = safeObject(note && note.results);
+      const pgyCostCoverageComplete = !hasOwn(notePgy, 'coverage') || notePgy.coverage === 'complete';
+      const juguangCostCoverageComplete = !hasOwn(noteJuguang, 'coverage') ||
+        noteJuguang.coverage === 'complete';
+      const juguangAlignmentComplete = juguangCostCoverageComplete && (
+        !hasOwn(noteJuguang, 'alignmentCoverage') || noteJuguang.alignmentCoverage === 'complete'
+      );
+      const publishDate = String(note && note.publishDate || '');
+      const canInferPeriod = Boolean(note && note.pgy) && /^\d{4}-\d{2}-\d{2}$/.test(publishDate) &&
+        /^\d{4}-\d{2}-\d{2}$/.test(String(dateRange.from || '')) &&
+        /^\d{4}-\d{2}-\d{2}$/.test(String(dateRange.to || ''));
+      const included = Object.prototype.hasOwnProperty.call(notePgy, 'includedInPeriod')
+        ? notePgy.includedInPeriod
+        : canInferPeriod ? publishDate >= dateRange.from && publishDate <= dateRange.to : null;
+      const periodCreatorFallback = included === true
+        ? sumIfKnown(noteCosts.cooperation, noteCosts.platformFee)
+        : included === false ? 0 : null;
+      const periodCreator = pgyCostCoverageComplete
+        ? hasOwn(noteCosts, 'periodCreator')
+          ? finiteNumber(noteCosts.periodCreator)
+          : finiteNumber(periodCreatorFallback)
+        : null;
+      const creatorTotalFallback = sumIfKnown(noteCosts.cooperation, noteCosts.platformFee);
+      const creatorTotal = pgyCostCoverageComplete
+        ? hasOwn(noteCosts, 'creatorTotal')
+          ? finiteNumber(noteCosts.creatorTotal)
+          : finiteNumber(creatorTotalFallback) !== null
+            ? finiteNumber(creatorTotalFallback)
+            : included === true ? periodCreator : null
+        : null;
+      const totalJuguangBucket = safeObject(noteJuguang.total);
+      const allJuguang = juguangCostCoverageComplete
+        ? hasOwn(totalJuguangBucket, 'spend')
+          ? finiteNumber(totalJuguangBucket.spend)
+          : finiteNumber(noteCosts.juguang)
+        : null;
+      const inTaskBucket = safeObject(noteJuguang.inTask);
+      const inTaskJuguang = juguangAlignmentComplete && hasOwn(inTaskBucket, 'spend')
+        ? finiteNumber(inTaskBucket.spend)
+        : null;
+      const outsideTaskBucket = safeObject(noteJuguang.outsideTask);
+      const outsideStatusBuckets = safeRows(noteJuguang.taskStatuses).filter((bucket) => (
+        normalizeTaskStatus(bucket && (bucket.key || bucket.taskStatus)) === 'outside_task'
+      ));
+      let outsideTaskJuguang = juguangAlignmentComplete && hasOwn(outsideTaskBucket, 'spend')
+        ? finiteNumber(outsideTaskBucket.spend)
+        : null;
+      if (juguangAlignmentComplete && !hasOwn(outsideTaskBucket, 'spend') &&
+        outsideStatusBuckets.length) {
+        const outsideValues = outsideStatusBuckets.map((bucket) => finiteNumber(bucket && bucket.spend));
+        outsideTaskJuguang = outsideValues.every((value) => value !== null)
+          ? outsideValues.reduce((sum, value) => sum + value, 0)
+          : null;
+      }
+      const approvedTotal = sumIfKnown(creatorTotal, allJuguang);
+      const approvedPeriodTotal = sumIfKnown(periodCreator, inTaskJuguang);
+      const approvedVisitCost = ratio(approvedPeriodTotal, starMetrics.storeVisitUv);
+      return {
+        笔记ID: cellText(note && note.noteId),
+        标题: cellText(note && note.title),
+        达人: cellText(note && note.author && note.author.name),
+        达人粉丝数: cellNumber(firstValue(
+          note && note.author && note.author.followerCount,
+          notePgy.followerCount
+        )),
+        发布时间: cellText(note && note.publishDate),
+        SPU名称: cellText(notePgy.spuName),
+        蒲公英计入本期: included === true ? '是' : included === false ? '否（期外）' : '—',
+        成熟度: cellText(note && note.maturity),
+        任务区间: cellText(safeRows(note && note.task && note.task.intervals).map((item) => (
+          String(item.start || '—') + ' 至 ' + String(item.end || '—')
+        )).join('；')),
+        星河项目ID: cellText(safeRows(note && note.task && note.task.projectIds).join('；')),
+        星河任务ID: cellText(safeRows(note && note.task && note.task.orderIds).join('；')),
+        合作实付: cellNumber(pgyCostCoverageComplete ? noteCosts.cooperation : null),
+        平台服务费: cellNumber(pgyCostCoverageComplete ? noteCosts.platformFee : null),
+        达人花费: cellNumber(creatorTotal),
+        本期达人花费: cellNumber(periodCreator),
+        广告花费: cellNumber(allJuguang),
+        任务期内广告花费: cellNumber(inTaskJuguang),
+        任务外直达广告花费: cellNumber(
+          juguangAlignmentComplete ? noteCosts.outsideDirect : null
+        ),
+        总花费: cellNumber(approvedTotal),
+        任务期内花费: cellNumber(approvedPeriodTotal),
+        任务期外花费: cellNumber(outsideTaskJuguang),
+        进店成本: cellNumber(approvedVisitCost),
+        蒲公英曝光量: cellNumber(pgyMetrics.impressions),
+        蒲公英阅读量: cellNumber(pgyMetrics.reads),
+        蒲公英互动量: cellNumber(pgyMetrics.interactions),
+        蒲公英阅读率: cellNumber(firstValue(
+          pgyMetrics.readRate,
+          ratio(pgyMetrics.reads, pgyMetrics.impressions)
+        )),
+        蒲公英互动率: cellNumber(firstValue(
+          pgyMetrics.engagementRate,
+          ratio(pgyMetrics.interactions, pgyMetrics.reads)
+        )),
+        星河阅读UV: cellNumber(starMetrics.readUv),
+        星河搜索曝光UV: cellNumber(starMetrics.searchImpressionUv),
+        星河进店UV: cellNumber(starMetrics.storeVisitUv),
+        星河GMV: cellNumber(firstValue(starMetrics.gmv, noteResults.starGmv)),
+        星河任务GMV: cellNumber(noteResults.starTaskGmv),
+        任务ROI: cellNumber(noteResults.starTaskRoi),
+        任务外直达GMV: cellNumber(noteResults.outsideDirectGmv),
+        任务外直达ROI: cellNumber(noteResults.outsideDirectRoi),
+      };
+    });
+    appendDataSheet('笔记全链路', joinedNoteRows.length ? joinedNoteRows : [{
+      笔记ID: '—', 标题: '—', 达人: '—', 达人粉丝数: '—', 发布时间: '—', 蒲公英计入本期: '—',
+      成熟度: '—', 任务区间: '—', 星河项目ID: '—', 星河任务ID: '—', 合作实付: '—',
+      平台服务费: '—', 本期达人花费: '—', 广告花费: '—', 任务期内广告花费: '—',
+      任务外直达广告花费: '—', 总花费: '—', 任务期内花费: '—', 任务期外花费: '—',
+      进店成本: '—', 蒲公英曝光量: '—', 蒲公英阅读量: '—',
+      蒲公英互动量: '—', 蒲公英阅读率: '—', 蒲公英互动率: '—', 星河阅读UV: '—',
+      星河搜索曝光UV: '—', 星河进店UV: '—', 星河GMV: '—', 星河任务GMV: '—', 任务ROI: '—',
+      任务外直达GMV: '—', 任务外直达ROI: '—',
+    }], [24, 34, 18, 16, 14, 18, 12, 30, 28, 28, 14, 14, 16, 14, 18, 22, 14, 16,
+      16, 16, 16, 16, 16, 16, 14, 18, 16, 14, 14, 14, 18, 18, 18]);
 
     const qualityRows = [{
       记录类型: '质量汇总',

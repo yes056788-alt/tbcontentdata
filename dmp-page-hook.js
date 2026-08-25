@@ -425,5 +425,4 @@
     }
   });
 
-  console.log(TAG, '画像 API bridge 已就绪');
 })();

@@ -11,6 +11,25 @@
   if (!contract) throw new Error('XhsContract must be loaded before XhsMetrics');
 
   const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
+  // chrome.storage.local has the unlimitedStorage permission. Keep the 8 MiB
+  // safety gate per value, but do not truncate later datasets merely because
+  // the combined local detail is larger than the cloud's whole-run limit.
+  const MAX_XHS_ARCHIVE_DETAIL_BYTES = Number.MAX_SAFE_INTEGER;
+  const XHS_DETAIL_CHUNK_ROW_LIMIT = 500;
+  const XHS_DETAIL_CHUNK_TARGET_BYTES = 4 * 1024 * 1024;
+  const XHS_DETAIL_PREVIEW_ROW_LIMIT = 20;
+  const XHS_DETAIL_KEY_PREFIX = 'xhsAnalysisDetailChunkV1:';
+  const XHS_DETAIL_CHUNK_SCHEMA = 'xhsAnalysisDetailChunkV1';
+  const XHS_DETAIL_MANIFEST_SCHEMA = 'xhsAnalysisDetailManifestV1';
+  const XHS_DETAIL_SECTION_KINDS = Object.freeze([
+    'pgyFacts',
+    'spotlightDaily',
+    'starProjects',
+    'starOrders',
+    'starUnassignedNotes',
+    'actions',
+    'notes',
+  ]);
   const XHS_METRIC_KEYS = Object.freeze([
     'xhs_totalSpend',
     'xhs_kolSpend',
@@ -302,8 +321,320 @@
     if (utf8ByteLength(serialized) >= MAX_SNAPSHOT_BYTES) {
       const error = new Error('XHS analysis snapshot exceeds the 8 MB archive limit.');
       error.code = 'XHS_SNAPSHOT_SIZE_LIMIT';
+      error.retryable = false;
       throw error;
     }
+    return snapshot;
+  }
+
+  function jsonClone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function stableArchiveHash(value) {
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, '0');
+  }
+
+  function isXhsAnalysisDetailKey(value) {
+    const key = String(value == null ? '' : value);
+    if (!key.startsWith(XHS_DETAIL_KEY_PREFIX)) return false;
+    const suffix = key.slice(XHS_DETAIL_KEY_PREFIX.length);
+    return /^\d{4,6}$/.test(suffix);
+  }
+
+  function detailKey(index) {
+    return XHS_DETAIL_KEY_PREFIX + String(index).padStart(4, '0');
+  }
+
+  function compactStarProjectForArchive(value) {
+    const project = isObject(value) ? Object.assign({}, value) : {};
+    const orders = Array.isArray(project.orders) ? project.orders : [];
+    project.orderCount = orders.length || Number(project.orderCount) || 0;
+    delete project.orders;
+    return project;
+  }
+
+  function compactStarOrderForArchive(value) {
+    const order = isObject(value) ? Object.assign({}, value) : {};
+    const notes = Array.isArray(order.notes) ? order.notes : [];
+    order.noteCount = notes.length || Number(order.noteCount) || 0;
+    delete order.notes;
+    return order;
+  }
+
+  function detailSectionSources(snapshot) {
+    const pgy = isObject(snapshot.pgy) ? snapshot.pgy : {};
+    const spotlight = isObject(snapshot.spotlight) ? snapshot.spotlight : {};
+    const star = isObject(snapshot.star) ? snapshot.star : {};
+    return {
+      pgyFacts: Array.isArray(pgy.facts) ? pgy.facts : [],
+      spotlightDaily: Array.isArray(spotlight.daily) ? spotlight.daily : [],
+      starProjects: (Array.isArray(star.projects) ? star.projects : [])
+        .map(compactStarProjectForArchive),
+      starOrders: (Array.isArray(star.orders) ? star.orders : [])
+        .map(compactStarOrderForArchive),
+      starUnassignedNotes: Array.isArray(star.unassignedNotes) ? star.unassignedNotes : [],
+      actions: Array.isArray(snapshot.actions) ? snapshot.actions : [],
+      notes: Array.isArray(snapshot.notes) ? snapshot.notes : [],
+    };
+  }
+
+  function previewRows(rows) {
+    const output = [];
+    const maxPreviewBytes = 1024 * 1024;
+    for (const row of rows.slice(0, XHS_DETAIL_PREVIEW_ROW_LIMIT)) {
+      const candidate = output.concat(row);
+      if (utf8ByteLength(JSON.stringify(candidate)) >= maxPreviewBytes) break;
+      output.push(row);
+    }
+    return output;
+  }
+
+  function setDetailSection(snapshot, kind, rows, metadata) {
+    const values = Array.isArray(rows) ? rows : [];
+    const count = Number(metadata && metadata.sourceCount) || values.length;
+    const omitted = count > values.length;
+    if (kind === 'pgyFacts') {
+      if (!isObject(snapshot.pgy)) snapshot.pgy = {};
+      snapshot.pgy.facts = values;
+      snapshot.pgy.factsCount = count;
+      snapshot.pgy.factsOmitted = omitted;
+    } else if (kind === 'spotlightDaily') {
+      if (!isObject(snapshot.spotlight)) snapshot.spotlight = {};
+      snapshot.spotlight.daily = values;
+      snapshot.spotlight.dailyCount = count;
+      snapshot.spotlight.dailyOmitted = omitted;
+    } else if (kind === 'starProjects') {
+      if (!isObject(snapshot.star)) snapshot.star = {};
+      snapshot.star.projects = values;
+      snapshot.star.projectsCount = count;
+      snapshot.star.projectsOmitted = omitted;
+    } else if (kind === 'starOrders') {
+      if (!isObject(snapshot.star)) snapshot.star = {};
+      snapshot.star.orders = values;
+      snapshot.star.ordersCount = count;
+      snapshot.star.ordersOmitted = omitted;
+    } else if (kind === 'starUnassignedNotes') {
+      if (!isObject(snapshot.star)) snapshot.star = {};
+      snapshot.star.unassignedNotes = values;
+      snapshot.star.unassignedNotesCount = count;
+      snapshot.star.unassignedNotesOmitted = omitted;
+    } else if (kind === 'actions') {
+      snapshot.actions = values;
+      snapshot.actionsCount = count;
+      snapshot.actionsOmitted = omitted;
+    } else if (kind === 'notes') {
+      snapshot.notes = values;
+      snapshot.notesCount = count;
+      snapshot.notesOmitted = omitted;
+    }
+  }
+
+  function createDetailChunk(runId, kind, index, items) {
+    return {
+      schema: XHS_DETAIL_CHUNK_SCHEMA,
+      schemaVersion: 1,
+      runId: runId == null ? null : String(runId),
+      index,
+      kind,
+      items,
+    };
+  }
+
+  function createXhsAnalysisArchiveBundle(input, options) {
+    if (!isObject(input)) throw new TypeError('XHS analysis snapshot must be an object.');
+    const settings = isObject(options) ? options : {};
+    const rowLimit = Math.max(1, Math.min(
+      XHS_DETAIL_CHUNK_ROW_LIMIT,
+      Math.floor(Number(settings.rowLimit) || XHS_DETAIL_CHUNK_ROW_LIMIT),
+    ));
+    const targetBytes = Math.max(64 * 1024, Math.min(
+      MAX_SNAPSHOT_BYTES - 1024,
+      Math.floor(Number(settings.targetBytes) || XHS_DETAIL_CHUNK_TARGET_BYTES),
+    ));
+    const configuredDetailBytes = Number(settings.maxDetailBytes);
+    const maxDetailBytes = Number.isFinite(configuredDetailBytes) && configuredDetailBytes > 0
+      ? Math.max(targetBytes, Math.floor(configuredDetailBytes))
+      : MAX_XHS_ARCHIVE_DETAIL_BYTES;
+    const snapshot = jsonClone(input);
+    const sources = detailSectionSources(snapshot);
+    const chunks = {};
+    const manifest = {
+      schema: XHS_DETAIL_MANIFEST_SCHEMA,
+      schemaVersion: 1,
+      rowLimit,
+      complete: true,
+      chunks: [],
+      sections: {},
+      summaryBytes: 0,
+      detailBytes: 0,
+      archiveBytes: 0,
+    };
+    let chunkIndex = 0;
+    let detailBytes = 0;
+
+    for (const kind of XHS_DETAIL_SECTION_KINDS) {
+      const rows = sources[kind];
+      const section = {
+        sourceCount: rows.length,
+        sourceBytes: utf8ByteLength(JSON.stringify(rows)),
+        previewCount: 0,
+        storedCount: 0,
+        omittedCount: 0,
+        chunkCount: 0,
+      };
+      const preview = previewRows(rows);
+      section.previewCount = preview.length;
+      setDetailSection(snapshot, kind, preview, section);
+      const pending = [];
+      let pendingBytes = 0;
+
+      const commit = () => {
+        if (!pending.length) return;
+        const key = detailKey(chunkIndex);
+        const payload = createDetailChunk(input.runId, kind, chunkIndex, pending.splice(0));
+        pendingBytes = 0;
+        const serialized = JSON.stringify(payload);
+        const bytes = utf8ByteLength(serialized);
+        if (bytes >= MAX_SNAPSHOT_BYTES || detailBytes + bytes > maxDetailBytes) {
+          section.omittedCount += payload.items.length;
+          manifest.complete = false;
+          return;
+        }
+        chunks[key] = payload;
+        manifest.chunks.push({
+          key,
+          index: chunkIndex,
+          kind,
+          count: payload.items.length,
+          bytes,
+          hash: stableArchiveHash(serialized),
+        });
+        chunkIndex += 1;
+        detailBytes += bytes;
+        section.storedCount += payload.items.length;
+        section.chunkCount += 1;
+      };
+
+      for (const row of rows) {
+        const rowBytes = utf8ByteLength(JSON.stringify(row));
+        if (pending.length && (
+          pending.length >= rowLimit || pendingBytes + rowBytes + 1024 >= targetBytes
+        )) commit();
+        if (!pending.length && rowBytes + 1024 >= MAX_SNAPSHOT_BYTES) {
+          section.omittedCount += 1;
+          manifest.complete = false;
+          continue;
+        }
+        pending.push(row);
+        pendingBytes += rowBytes + 1;
+        if (pending.length >= rowLimit) commit();
+      }
+      commit();
+      section.omittedCount += Math.max(0, rows.length - section.storedCount - section.omittedCount);
+      if (section.omittedCount > 0) manifest.complete = false;
+      manifest.sections[kind] = section;
+    }
+
+    manifest.detailBytes = detailBytes;
+    snapshot.detailArchive = manifest;
+    if (!manifest.complete) {
+      if (!isObject(snapshot.quality)) snapshot.quality = { decisionReady: false, issues: [] };
+      if (!Array.isArray(snapshot.quality.issues)) snapshot.quality.issues = [];
+      if (!snapshot.quality.issues.some((issue) => issue && issue.code === 'xhs_detail_archive_partial')) {
+        snapshot.quality.issues.push({
+          severity: 'warning',
+          code: 'xhs_detail_archive_partial',
+          message: '小红书汇总已生成，部分超大明细未进入归档分片。',
+        });
+      }
+    }
+    manifest.summaryBytes = utf8ByteLength(JSON.stringify(snapshot));
+    manifest.archiveBytes = manifest.summaryBytes + manifest.detailBytes;
+    manifest.summaryBytes = utf8ByteLength(JSON.stringify(snapshot));
+    manifest.archiveBytes = manifest.summaryBytes + manifest.detailBytes;
+    assertSnapshotWithinLimit(snapshot);
+    Object.values(chunks).forEach(assertSnapshotWithinLimit);
+    return { snapshot, chunks };
+  }
+
+  function analysisDetailKeys(snapshot) {
+    const manifest = isObject(snapshot && snapshot.detailArchive) ? snapshot.detailArchive : {};
+    if (manifest.schema !== XHS_DETAIL_MANIFEST_SCHEMA || !Array.isArray(manifest.chunks)) return [];
+    return manifest.chunks.slice(0, 4096).map((chunk) => String(chunk && chunk.key || ''))
+      .filter((key, index, values) => isXhsAnalysisDetailKey(key) && values.indexOf(key) === index);
+  }
+
+  function hydrateXhsAnalysisArchiveBundle(input, chunkValues) {
+    if (!isObject(input)) return input;
+    const snapshot = jsonClone(input);
+    const manifest = isObject(snapshot.detailArchive) ? snapshot.detailArchive : null;
+    if (!manifest || manifest.schema !== XHS_DETAIL_MANIFEST_SCHEMA || !Array.isArray(manifest.chunks)) {
+      return snapshot;
+    }
+    const available = isObject(chunkValues) ? chunkValues : {};
+    const sectionRows = Object.fromEntries(XHS_DETAIL_SECTION_KINDS.map((kind) => [kind, []]));
+    const sectionMissing = Object.fromEntries(XHS_DETAIL_SECTION_KINDS.map((kind) => [kind, false]));
+    const missingKeys = [];
+    const invalidKeys = [];
+    let loadedRows = 0;
+    const descriptors = manifest.chunks.slice(0, 4096).sort((left, right) => (
+      Number(left && left.index) - Number(right && right.index)
+    ));
+    for (const descriptor of descriptors) {
+      const key = String(descriptor && descriptor.key || '');
+      const kind = String(descriptor && descriptor.kind || '');
+      if (!isXhsAnalysisDetailKey(key) || !XHS_DETAIL_SECTION_KINDS.includes(kind)) {
+        invalidKeys.push(key);
+        if (XHS_DETAIL_SECTION_KINDS.includes(kind)) sectionMissing[kind] = true;
+        continue;
+      }
+      const chunk = available[key];
+      if (!isObject(chunk)) {
+        missingKeys.push(key);
+        sectionMissing[kind] = true;
+        continue;
+      }
+      const serialized = JSON.stringify(chunk);
+      const valid = chunk.schema === XHS_DETAIL_CHUNK_SCHEMA &&
+        String(chunk.runId == null ? '' : chunk.runId) === String(snapshot.runId == null ? '' : snapshot.runId) &&
+        Number(chunk.index) === Number(descriptor.index) &&
+        chunk.kind === kind && Array.isArray(chunk.items) &&
+        chunk.items.length === Number(descriptor.count) &&
+        utf8ByteLength(serialized) === Number(descriptor.bytes) &&
+        stableArchiveHash(serialized) === String(descriptor.hash || '');
+      if (!valid) {
+        invalidKeys.push(key);
+        sectionMissing[kind] = true;
+        continue;
+      }
+      sectionRows[kind].push(...chunk.items);
+      loadedRows += chunk.items.length;
+    }
+    for (const kind of XHS_DETAIL_SECTION_KINDS) {
+      const section = isObject(manifest.sections && manifest.sections[kind])
+        ? manifest.sections[kind]
+        : {};
+      const expectedCount = Number(section.sourceCount) || 0;
+      const expectedStoredCount = Number(section.storedCount) || 0;
+      const complete = !sectionMissing[kind] && Number(section.omittedCount) === 0 &&
+        sectionRows[kind].length === expectedStoredCount && expectedStoredCount === expectedCount;
+      if (complete || expectedCount === 0) {
+        setDetailSection(snapshot, kind, sectionRows[kind], { sourceCount: expectedCount });
+      }
+    }
+    snapshot.detailArchive.load = {
+      complete: manifest.complete === true && missingKeys.length === 0 && invalidKeys.length === 0,
+      loadedRows,
+      missingKeys,
+      invalidKeys,
+    };
     return snapshot;
   }
 
@@ -569,8 +900,15 @@
 
   return Object.freeze({
     MAX_SNAPSHOT_BYTES,
+    MAX_XHS_ARCHIVE_DETAIL_BYTES,
+    XHS_DETAIL_CHUNK_ROW_LIMIT,
+    XHS_DETAIL_KEY_PREFIX,
     XHS_METRIC_KEYS,
+    analysisDetailKeys,
     assertSnapshotWithinLimit,
+    createXhsAnalysisArchiveBundle,
+    hydrateXhsAnalysisArchiveBundle,
+    isXhsAnalysisDetailKey,
     mapAnalysisSnapshot,
   });
 });

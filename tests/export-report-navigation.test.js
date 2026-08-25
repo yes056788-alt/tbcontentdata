@@ -5,12 +5,16 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const reportSource = fs.readFileSync(path.join(__dirname, '..', 'web-tool', 'report.js'), 'utf8');
-const scriptMatch = reportSource.match(
-  /const script = ('<script nonce="' \+ exportScriptNonce \+ '">[^\n]+?<\\\/script>');\n    const storeName/,
-);
-
-assert.ok(scriptMatch, 'expected a self-contained export interaction script');
-const scriptTag = vm.runInNewContext(scriptMatch[1], { exportScriptNonce: 'taobao-report-export-v1' });
+const scriptStart = reportSource.indexOf('const exportScriptBody = [');
+const scriptAssignStart = reportSource.indexOf('const script = \'<script nonce="', scriptStart);
+assert.ok(scriptStart >= 0, 'expected export script body');
+assert.ok(scriptAssignStart >= 0, 'expected export script wrapper');
+const scriptTagEnd = reportSource.indexOf(';', scriptAssignStart);
+assert.ok(scriptTagEnd >= 0, 'expected script assignment terminator');
+const scriptSourceSnippet = reportSource.slice(scriptStart, scriptTagEnd + 1);
+const context = { exportScriptNonce: 'taobao-report-export-v1', __script: '' };
+vm.runInNewContext(scriptSourceSnippet + ';__script = script;', context);
+const scriptTag = context.__script;
 const scriptSource = scriptTag.slice(scriptTag.indexOf('>') + 1, -'</script>'.length);
 
 function fakeElement(dataset, active = false) {
@@ -52,7 +56,7 @@ function fakeElement(dataset, active = false) {
 }
 
 test('exported report switches one visible module at a time', () => {
-  const keys = ['flow', 'guanghe', 'wxt', 'shortVideo', 'dmp'];
+  const keys = ['flow', 'guanghe', 'wxt', 'shortVideo', 'dmp', 'adstar', 'pgy', 'juguang'];
   const tabs = keys.map((key, index) => fakeElement({ exportSection: key }, index === 0));
   const panels = keys.map((key, index) => {
     const panel = fakeElement({ exportPanel: key });
@@ -85,10 +89,16 @@ test('exported report switches one visible module at a time', () => {
   vm.runInNewContext(scriptSource, { document, Array });
 
   tabs[2].listeners.get('click')();
-  assert.deepEqual(panels.map((panel) => panel.hidden), [true, true, false, true, true]);
-  assert.deepEqual(tabs.map((tab) => tab.classList.contains('active')), [false, false, true, false, false]);
-  assert.deepEqual(tabs.map((tab) => tab.getAttribute('aria-selected')), ['false', 'false', 'true', 'false', 'false']);
-  assert.deepEqual(tabs.map((tab) => tab.tabIndex), [-1, -1, 0, -1, -1]);
+  assert.deepEqual(panels.map((panel) => panel.hidden), [true, true, false, true, true, true, true, true]);
+  assert.deepEqual(
+    tabs.map((tab) => tab.classList.contains('active')),
+    [false, false, true, false, false, false, false, false],
+  );
+  assert.deepEqual(
+    tabs.map((tab) => tab.getAttribute('aria-selected')),
+    ['false', 'false', 'true', 'false', 'false', 'false', 'false', 'false'],
+  );
+  assert.deepEqual(tabs.map((tab) => tab.tabIndex), [-1, -1, 0, -1, -1, -1, -1, -1]);
 
   let prevented = false;
   tabs[2].listeners.get('keydown')({
@@ -98,13 +108,175 @@ test('exported report switches one visible module at a time', () => {
     },
   });
   assert.equal(prevented, true);
-  assert.deepEqual(panels.map((panel) => panel.hidden), [true, true, true, true, false]);
-  assert.equal(tabs[4].focused, true);
-  assert.equal(tabs[4].scrolled, true);
+  assert.deepEqual(panels.map((panel) => panel.hidden), [true, true, true, true, true, true, true, false]);
+  assert.equal(tabs[7].focused, true);
+  assert.equal(tabs[7].scrolled, true);
 
   views[1].listeners.get('click')();
   assert.deepEqual(viewPanels.map((panel) => panel.hidden), [true, false]);
   assert.deepEqual(views.map((view) => view.getAttribute('aria-selected')), ['false', 'true']);
   assert.deepEqual(views.map((view) => view.tabIndex), [-1, 0]);
   assert.equal(documentListeners.has('change'), true);
+});
+
+test('查看更多按钮精确控制对应表格并可再次收起', () => {
+  const rowsByTable = {
+    'export-table-flow-1': [{ hidden: true }, { hidden: true }],
+    'export-table-flow-2': [{ hidden: true }, { hidden: true }],
+  };
+  const tables = Object.fromEntries(Object.entries(rowsByTable).map(([id, rows]) => [id, {
+    id,
+    querySelectorAll(selector) {
+      if (selector === '[data-export-table-overflow]') return rows;
+      return [];
+    },
+  }]));
+  function tableButton(tableId) {
+    const attributes = new Map([
+      ['aria-controls', tableId],
+      ['aria-expanded', 'false'],
+    ]);
+    return {
+      textContent: '查看更多',
+      addEventListener(type, listener) {
+        if (type === 'click') this.listener = listener;
+      },
+      getAttribute(name) {
+        return attributes.get(name);
+      },
+      setAttribute(name, value) {
+        attributes.set(name, value);
+      },
+    };
+  }
+  const buttons = [tableButton('export-table-flow-1'), tableButton('export-table-flow-2')];
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === '.export-table-more') return buttons;
+      return [];
+    },
+    getElementById(id) {
+      return tables[id] || null;
+    },
+    addEventListener() {},
+  };
+  vm.runInNewContext(scriptSource, { document, Array });
+
+  buttons[1].listener();
+  assert.equal(rowsByTable['export-table-flow-1'].every((row) => row.hidden), true);
+  assert.equal(rowsByTable['export-table-flow-2'].every((row) => !row.hidden), true);
+  assert.equal(buttons[1].textContent, '收起');
+  assert.equal(buttons[1].getAttribute('aria-expanded'), 'true');
+
+  buttons[1].listener();
+  assert.equal(rowsByTable['export-table-flow-2'].every((row) => row.hidden), true);
+  assert.equal(buttons[1].textContent, '查看更多');
+  assert.equal(buttons[1].getAttribute('aria-expanded'), 'false');
+});
+
+test('导出表格构建默认只展示十行并建立可访问的精确关联', () => {
+  const helperStart = reportSource.indexOf('function applyExportTableLimits(markup, options) {');
+  const helperEnd = reportSource.indexOf('\n  function buildExportReportDocument(metadata) {', helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, 'expected export table limit helper');
+  const helperSource = reportSource.slice(helperStart, helperEnd);
+  const rows = Array.from({ length: 12 }, () => ({
+    hidden: false,
+    attributes: new Map(),
+    setAttribute(name, value) {
+      this.attributes.set(name, value);
+    },
+  }));
+  const appended = [];
+  const parent = {
+    appendChild(node) {
+      appended.push(node);
+    },
+  };
+  const table = {
+    id: '',
+    classList: { contains: () => false },
+    tBodies: [{ rows }],
+    closest(selector) {
+      return selector === '.report-table-block' ? parent : null;
+    },
+    parentElement: parent,
+  };
+  const template = {
+    content: {
+      querySelectorAll(selector) {
+        return selector === 'table' ? [table] : [];
+      },
+    },
+    innerHTML: '',
+  };
+  const document = {
+    createElement(tagName) {
+      if (tagName === 'template') return template;
+      if (tagName === 'button') {
+        const attributes = new Map();
+        return {
+          setAttribute(name, value) {
+            attributes.set(name, value);
+          },
+          getAttribute(name) {
+            return attributes.get(name);
+          },
+        };
+      }
+      throw new Error('unexpected tag: ' + tagName);
+    },
+  };
+  const context = { document, Array, Object, Number, String, Math, __result: null };
+  vm.runInNewContext(helperSource + ';__result = applyExportTableLimits("<table></table>", { tableIdPrefix: "flow" });', context);
+
+  assert.equal(rows.slice(0, 10).every((row) => !row.hidden), true);
+  assert.equal(rows.slice(10).every((row) => row.hidden), true);
+  assert.equal(rows.slice(10).every((row) => row.attributes.has('data-export-table-overflow')), true);
+  assert.equal(table.id, 'export-table-flow-1');
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].textContent, '查看更多');
+  assert.equal(appended[0].getAttribute('aria-controls'), table.id);
+  assert.equal(appended[0].getAttribute('aria-expanded'), 'false');
+});
+
+test('短视频导出移除操作建议且不会使用无效的相对选择器', () => {
+  const helperStart = reportSource.indexOf('function stripShortVideoExportActions(root) {');
+  const helperEnd = reportSource.indexOf('\n  function buildExportReportDocument(metadata) {', helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, 'expected short-video export helper');
+  const helperSource = reportSource.slice(helperStart, helperEnd);
+  const removed = [];
+  const makeSection = (className, headingText, legacyAction = false) => ({
+    className,
+    remove() {
+      removed.push(this);
+    },
+    querySelector(selector) {
+      assert.doesNotMatch(selector, /^\s*>/, 'selector must be valid in querySelector');
+      if (selector === '.wxt-section-heading h2, .wxt-section-heading h3, h2, h3') {
+        return headingText ? { textContent: headingText } : null;
+      }
+      if (selector === '.wxt-priority-actions') return legacyAction ? {} : null;
+      if (selector === '.wxt-priority-actions, .wxt-low-sample-actions') return legacyAction ? {} : null;
+      return null;
+    },
+  });
+  const explicitAction = makeSection('wxt-chart-section wxt-action-section', '操作建议');
+  const legacyAction = makeSection('legacy-section', '操作建议');
+  const evidence = makeSection('wxt-evidence-section', '数据证据');
+  const root = {
+    querySelectorAll(selector) {
+      if (selector === 'section.wxt-action-section') return [explicitAction];
+      if (selector === 'section') return [legacyAction, evidence];
+      return [];
+    },
+  };
+  vm.runInNewContext(helperSource + ';stripShortVideoExportActions(root);', {
+    root,
+    Array,
+    Boolean,
+    String,
+  });
+
+  assert.deepEqual(removed, [explicitAction, legacyAction]);
+  assert.equal(removed.includes(evidence), false);
 });

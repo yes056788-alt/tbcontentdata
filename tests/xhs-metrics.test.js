@@ -415,6 +415,7 @@ test('the archive size guard rejects snapshots at or above 8 MB', () => {
   };
   assert.throws(
     () => metrics.assertSnapshotWithinLimit(oversized),
-    /8\s*MB|too large|snapshot.*limit/i,
+    (error) => error && error.code === 'XHS_SNAPSHOT_SIZE_LIMIT' &&
+      error.retryable === false && /8\s*MB|too large|snapshot.*limit/i.test(error.message),
   );
 });

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { webcrypto } from "node:crypto";
 import test from "node:test";
+import { createNodePersistence } from "../db/node.ts";
+import { saveSharedVaultAtRevision } from "../app/server/vault-deletion.ts";
 import {
   createFileMigrationObjectStore,
   createMigrationFileSource,
@@ -48,7 +50,7 @@ test("dry-run validates every record without opening a migration target", async 
     dryRun: true,
   });
   assert.equal(result.dryRun, true);
-  assert.deepEqual(result.imported, { vault: 1, directory: 1, runs: 2 });
+  assert.deepEqual(result.imported, { vault: 1, directory: 1, runs: 2, runDeletions: 0 });
 });
 
 test("file source parses NDJSON incrementally and can be reopened for the import pass", async (context) => {
@@ -68,7 +70,7 @@ test("file source parses NDJSON incrementally and can be reopened for the import
     dryRun: true,
   });
   assert.equal(first.manifest.catalogSha256, second.manifest.catalogSha256);
-  assert.deepEqual(first.imported, { vault: 1, directory: 1, runs: 2 });
+  assert.deepEqual(first.imported, { vault: 1, directory: 1, runs: 2, runDeletions: 0 });
 });
 
 test("Node importer initializes SQLite, re-encrypts runs, and never imports auth state", async (context) => {
@@ -89,15 +91,15 @@ test("Node importer initializes SQLite, re-encrypts runs, and never imports auth
     runDataKey: FIXTURE_RUN_DATA_KEY,
   });
   assert.equal(result.dryRun, false);
-  assert.deepEqual(result.imported, { vault: 1, directory: 1, runs: 2 });
+  assert.deepEqual(result.imported, { vault: 1, directory: 1, runs: 2, runDeletions: 0 });
 
   assert.equal(database.prepare("SELECT count(*) AS count FROM shared_vault").get().count, 1);
   assert.equal(database.prepare("SELECT count(*) AS count FROM shared_documents").get().count, 1);
   assert.equal(database.prepare("SELECT count(*) AS count FROM runs").get().count, 2);
-  for (const table of ["members", "local_accounts", "auth_sessions", "invites", "audit_logs", "owner_recovery_uses"]) {
+  for (const table of ["members", "local_accounts", "auth_sessions", "invites", "audit_logs", "owner_recovery_uses", "run_deletions"]) {
     assert.equal(database.prepare(`SELECT count(*) AS count FROM ${table}`).get().count, 0, table);
   }
-  assert.equal(database.prepare("SELECT count(*) AS count FROM __drizzle_migrations").get().count, 4);
+  assert.equal(database.prepare("SELECT count(*) AS count FROM __drizzle_migrations").get().count, 5);
 
   const objectPath = resolve(objectsPath, "runs", "store-run-fixture-1.json");
   const stored = await readFile(objectPath, "utf8");
@@ -147,8 +149,111 @@ test("Node importer can reuse the CLI dry-run fingerprint for the write pass", a
   });
 
   assert.equal(result.dryRun, false);
-  assert.deepEqual(result.imported, { vault: 1, directory: 1, runs: 2 });
+  assert.deepEqual(result.imported, { vault: 1, directory: 1, runs: 2, runDeletions: 0 });
   assert.equal(database.prepare("SELECT count(*) AS count FROM shared_vault").get().count, 1);
   assert.equal(database.prepare("SELECT count(*) AS count FROM shared_documents").get().count, 1);
   assert.equal(database.prepare("SELECT count(*) AS count FROM runs").get().count, 2);
+});
+
+test("a real v3 vault can replace a tombstone only with explicit recreate intent", async (context) => {
+  const { SHARED_VAULT_TOMBSTONE_PAYLOAD } = await import(
+    "../lib/shared-vault-tombstone.mjs"
+  );
+  const root = await mkdtemp(resolve(tmpdir(), "tbmig-recreate-vault-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const databasePath = resolve(root, "team.sqlite");
+  const objectsPath = resolve(root, "objects");
+  const migrationsPath = resolve(import.meta.dirname, "..", "drizzle");
+  const packageText = await createFixtureMigration({ version: 3 });
+  const database = openMigrationDatabase(databasePath, migrationsPath);
+  context.after(() => database.close());
+  database.prepare(`
+    INSERT INTO shared_vault
+      (id, encrypted_payload, payload_bytes, revision, updated_by, created_at, updated_at)
+    VALUES (1, ?, ?, 11, 'member-owner', 1, 1)
+  `).run(
+    SHARED_VAULT_TOMBSTONE_PAYLOAD,
+    Buffer.byteLength(SHARED_VAULT_TOMBSTONE_PAYLOAD),
+  );
+
+  const options = {
+    source: fixtureMigrationSource(packageText),
+    passphrase: FIXTURE_PASSPHRASE,
+    database,
+    objectStore: createFileMigrationObjectStore(objectsPath),
+    runDataKey: FIXTURE_RUN_DATA_KEY,
+  };
+  await assert.rejects(
+    importBusinessMigration(options),
+    /recreateVault|recreate-vault|deleted shared vault/i,
+  );
+  assert.equal(
+    database.prepare("SELECT encrypted_payload FROM shared_vault WHERE id = 1").get()
+      ?.encrypted_payload,
+    SHARED_VAULT_TOMBSTONE_PAYLOAD,
+  );
+
+  const result = await importBusinessMigration({
+    ...options,
+    recreateVault: true,
+  });
+  assert.equal(result.dryRun, false);
+  const restored = database.prepare(`
+    SELECT encrypted_payload, revision FROM shared_vault WHERE id = 1
+  `).get();
+  assert.notEqual(restored?.encrypted_payload, SHARED_VAULT_TOMBSTONE_PAYLOAD);
+  assert.equal(restored?.revision, 12);
+});
+
+test("a v4 deleted vault imports its revisioned tombstone and ordinary sync cannot revive it", async (context) => {
+  const { SHARED_VAULT_TOMBSTONE_PAYLOAD } = await import(
+    "../lib/shared-vault-tombstone.mjs"
+  );
+  const root = await mkdtemp(resolve(tmpdir(), "tbmig-vault-tombstone-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const databasePath = resolve(root, "team.sqlite");
+  const objectsPath = resolve(root, "objects");
+  const migrationsPath = resolve(import.meta.dirname, "..", "drizzle");
+  const packageText = await createFixtureMigration({
+    deletedVault: true,
+    emptyDirectory: true,
+    runs: [],
+  });
+  const database = openMigrationDatabase(databasePath, migrationsPath);
+  await importBusinessMigration({
+    source: fixtureMigrationSource(packageText),
+    passphrase: FIXTURE_PASSPHRASE,
+    database,
+    objectStore: createFileMigrationObjectStore(objectsPath),
+    runDataKey: FIXTURE_RUN_DATA_KEY,
+  });
+  const imported = database.prepare(`
+    SELECT encrypted_payload, revision FROM shared_vault WHERE id = 1
+  `).get();
+  assert.equal(imported?.encrypted_payload, SHARED_VAULT_TOMBSTONE_PAYLOAD);
+  assert.equal(imported?.revision, 11);
+  database.close();
+
+  const persistence = createNodePersistence({
+    databasePath,
+    runsRoot: objectsPath,
+    migrationsFolder: migrationsPath,
+  });
+  try {
+    const stalePayload = "STALE_ENCRYPTED_VAULT";
+    await assert.rejects(
+      saveSharedVaultAtRevision(persistence.db, {
+        encryptedPayload: stalePayload,
+        payloadBytes: Buffer.byteLength(stalePayload),
+        expectedRevision: 11,
+        updatedBy: "stale-manager",
+        recreate: false,
+        now: new Date(),
+      }),
+      (error) =>
+        error?.status === 409 && error?.code === "VAULT_RECREATE_REQUIRED",
+    );
+  } finally {
+    persistence.close();
+  }
 });

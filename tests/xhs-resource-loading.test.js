@@ -16,7 +16,7 @@ function section(source, startMarker, endMarker) {
   return source.slice(start, end);
 }
 
-test('local web server exposes XHS contract and metrics modules from the extension source', () => {
+test('local web server exposes browser-facing XHS modules from the extension source', () => {
   const source = read('web-tool/server.mjs');
 
   assert.match(
@@ -27,9 +27,13 @@ test('local web server exposes XHS contract and metrics modules from the extensi
     source,
     /['"]\/xhs-metrics\.js['"]\s*,\s*\{\s*path:\s*join\(extensionRoot,\s*['"]xhs['"],\s*['"]metrics\.js['"]\),\s*type:\s*['"]text\/javascript; charset=utf-8['"]\s*\}/,
   );
+  assert.match(
+    source,
+    /['"]\/xhs-report-model\.js['"]\s*,\s*\{\s*path:\s*join\(extensionRoot,\s*['"]xhs['"],\s*['"]report-model\.js['"]\),\s*type:\s*['"]text\/javascript; charset=utf-8['"]\s*\}/,
+  );
 });
 
-test('cloud sync copies and versions both browser-facing XHS modules', () => {
+test('cloud sync copies and versions all browser-facing XHS modules', () => {
   const source = read('cloud-tool/scripts/sync-web-tool.mjs');
   const copyBlock = section(source, 'await Promise.all([', 'const versionedWebAssets');
   const versionedBlock = section(source, 'const versionedWebAssets', 'const legacyPageHtml');
@@ -42,8 +46,13 @@ test('cloud sync copies and versions both browser-facing XHS modules', () => {
     copyBlock,
     /copyFile\(resolve\(extensionRoot,\s*['"]xhs\/metrics\.js['"]\),\s*resolve\(publicRoot,\s*['"]xhs-metrics\.js['"]\)\)/,
   );
+  assert.match(
+    copyBlock,
+    /copyFile\(resolve\(extensionRoot,\s*['"]xhs\/report-model\.js['"]\),\s*resolve\(publicRoot,\s*['"]xhs-report-model\.js['"]\)\)/,
+  );
   assert.match(versionedBlock, /['"]xhs-contract\.js['"]/);
   assert.match(versionedBlock, /['"]xhs-metrics\.js['"]/);
+  assert.match(versionedBlock, /['"]xhs-report-model\.js['"]/);
 });
 
 test('cloud extension ZIP keeps the complete existing XHS runtime module set', () => {
@@ -52,7 +61,7 @@ test('cloud extension ZIP keeps the complete existing XHS runtime module set', (
 
   for (const modulePath of [
     'xhs/contract.js',
-    'xhs/bindings.js',
+    'xhs/identity.js',
     'xhs/analysis.js',
     'xhs/metrics.js',
     'xhs/runtime.js',

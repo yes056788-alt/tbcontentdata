@@ -2,8 +2,9 @@
 
 importScripts(
   'xhs/contract.js',
+  'xhs/account-login.js',
   'xhs/quality.js',
-  'xhs/bindings.js',
+  'xhs/identity.js',
   'xhs/local-cache.js',
   'xhs/collector-core.js',
   'xhs/page-client.js',
@@ -30,6 +31,17 @@ const xhsRuntime = XhsRuntime.createXhsRuntime({
     pgy: (dependencies) => XhsPgyCollector.createPgyCollector(dependencies),
     juguang: (dependencies) => XhsJuguangCollector.createJuguangCollector(dependencies),
   },
+  probeVerification: async (request) => {
+    const source = request && typeof request === 'object' ? request : {};
+    const platform = source.platform;
+    const tabId = Number(source.tabId);
+    if (!Number.isInteger(tabId) || tabId <= 0) return null;
+    if (platform === 'adstar') return readXingheState(tabId, source.signal);
+    if (platform === 'pgy' || platform === 'juguang') {
+      return readXhsLoginState(tabId, platform, source.signal);
+    }
+    return null;
+  },
 });
 xhsRuntime.register();
 const SYCM_CONTENT_ANALYSIS_PATH = '/xsite/contentanalysis/overview_new_v2';
@@ -37,6 +49,7 @@ const WXT_TRACE_STORAGE_KEY = 'wxtReportApiTraceV1';
 const WXT_TRACE_MAX_RECORDS = 120;
 const BUSINESS_DEFENSE_XINGHE_URL = 'https://adstar.alimama.com/index.htm?forward=https%3A%2F%2Fadstar.alimama.com%2Findex.htm';
 const BUSINESS_DEFENSE_XINGHE_LOGOUT_URL = 'https://adstar.alimama.com/openapi/param2/1/gateway.unionpub/union.logout?forward=https%3A%2F%2Fadstar.alimama.com%2Findex.htm';
+const XHS_PLATFORM_ENTRY_URLS = XhsAccountLogin.XHS_PLATFORM_ENTRY_URLS;
 const BUSINESS_DEFENSE_GH_URL = 'https://creator.guanghe.taobao.com/page/unify/asset-overview';
 const GUANGHE_SETTINGS_HOST = 'xstore.insights.1688.com';
 const GUANGHE_DATA_PATH = '/s-guanghe-creator/asset-overview';
@@ -50,11 +63,11 @@ const CONTENT_DIAGNOSIS_REPORT_KEY = 'taobaoContentDiagnosisReportV1';
 const CONTENT_DIAGNOSIS_WXT_KEY = 'taobaoContentDiagnosisWxtReportV1';
 const ACCOUNT_BATCH_STATUS_KEY = 'taobaoAccountBatchStatusV1';
 const ACCOUNT_VAULT_SESSION_KEY = 'taobaoAccountVaultSessionV1';
+const ACCOUNT_VAULT_LOCK_EPOCH_KEY = 'taobaoAccountVaultLockEpochV1';
 const PROJECT_DIRECTORY_KEY = 'taobaoProjectDirectoryV1';
 const PROJECT_TASK_STATUS_KEY = 'taobaoProjectTaskStatusV1';
 const STORE_RUN_INDEX_KEY = 'taobaoStoreRunIndexV1';
 const STORE_RUN_KEY_PREFIX = 'taobaoStoreRunV1:';
-const XHS_STORE_BINDINGS_KEY = 'xhsStoreAccountBindingsV1';
 const PLATFORM_TASK_IDS = ['sycm', 'guanghe', 'wxt', 'dmp'];
 const XHS_PLATFORM_TASK_IDS = ['adstar', 'pgy', 'juguang'];
 const REPORT_PLATFORM_TASK_IDS = PLATFORM_TASK_IDS.concat(XHS_PLATFORM_TASK_IDS);
@@ -64,7 +77,11 @@ let wxtTraceWriteQueue = Promise.resolve();
 let businessDefenseAutoCollectPromise = null;
 let contentDiagnosisReportPromise = null;
 let accountBatchPromise = null;
+let accountBatchExecution = null;
 let projectTaskPromise = null;
+let projectTaskExecution = null;
+let projectTaskStatusWriteQueue = Promise.resolve();
+let accountSessionMutationQueue = Promise.resolve();
 let accountBatchCancelRequested = false;
 
 chrome.storage.local.get(BUSINESS_DEFENSE_AUTO_STATUS_KEY).then((stored) => {
@@ -80,18 +97,8 @@ chrome.storage.local.get(BUSINESS_DEFENSE_AUTO_STATUS_KEY).then((stored) => {
   });
 }).catch(() => {});
 
-chrome.storage.local.get(CONTENT_DIAGNOSIS_STATUS_KEY).then((stored) => {
-  const previous = stored && stored[CONTENT_DIAGNOSIS_STATUS_KEY];
-  if (!previous || previous.running !== true || contentDiagnosisReportPromise) return;
-  return chrome.storage.local.set({
-    [CONTENT_DIAGNOSIS_STATUS_KEY]: Object.assign({}, previous, {
-      running: false,
-      updatedAt: Date.now(),
-      finishedAt: Date.now(),
-      error: '上次报告任务在扩展重载或浏览器休眠后中断，请重新生成。',
-    }),
-  });
-}).catch(() => {});
+const contentDiagnosisStartupRecoveryPromise = recoverContentDiagnosisStartupStatus()
+  .catch(() => {});
 
 chrome.storage.local.get(ACCOUNT_BATCH_STATUS_KEY).then((stored) => {
   const previous = stored && stored[ACCOUNT_BATCH_STATUS_KEY];
@@ -106,19 +113,78 @@ chrome.storage.local.get(ACCOUNT_BATCH_STATUS_KEY).then((stored) => {
   });
 }).catch(() => {});
 
-chrome.storage.local.get(PROJECT_TASK_STATUS_KEY).then((stored) => {
-  const previous = stored && stored[PROJECT_TASK_STATUS_KEY];
-  if (!previous || previous.running !== true || projectTaskPromise) return;
-  return chrome.storage.local.set({
-    [PROJECT_TASK_STATUS_KEY]: Object.assign({}, previous, {
+const projectTaskStartupRecoveryPromise = recoverProjectTaskStartupStatus()
+  .catch(() => {});
+
+function startupStatusRecoveryMatches(expected, current, idField) {
+  if (!expected || !current || current.running !== true) return false;
+  const expectedId = String(expected[idField] || '').trim();
+  const currentId = String(current[idField] || '').trim();
+  if (expectedId || currentId) return Boolean(expectedId && expectedId === currentId);
+  const expectedStartedAt = Number(expected.startedAt) || 0;
+  const currentStartedAt = Number(current.startedAt) || 0;
+  return expectedStartedAt > 0 && expectedStartedAt === currentStartedAt;
+}
+
+async function recoverContentDiagnosisStartupStatus() {
+  const stored = await chrome.storage.local.get(CONTENT_DIAGNOSIS_STATUS_KEY);
+  const previous = stored && stored[CONTENT_DIAGNOSIS_STATUS_KEY];
+  if (!previous || previous.running !== true || contentDiagnosisReportPromise) return;
+  const confirmed = await chrome.storage.local.get(CONTENT_DIAGNOSIS_STATUS_KEY);
+  const current = confirmed && confirmed[CONTENT_DIAGNOSIS_STATUS_KEY];
+  if (
+    contentDiagnosisReportPromise ||
+    !startupStatusRecoveryMatches(previous, current, 'runId')
+  ) return;
+  await chrome.storage.local.set({
+    [CONTENT_DIAGNOSIS_STATUS_KEY]: Object.assign({}, current, {
       running: false,
+      cancelling: false,
+      cancelled: true,
+      status: 'cancelled',
       updatedAt: Date.now(),
       finishedAt: Date.now(),
-      phase: '任务已中断',
-      error: '上次任务在扩展重载或浏览器休眠后中断，请重新执行。',
+      currentStep: '',
+      activeSteps: [],
+      error: '上次报告任务在扩展重载或浏览器休眠后中断，请重新生成。',
     }),
   });
-}).catch(() => {});
+}
+
+async function recoverProjectTaskStartupStatus() {
+  const stored = await chrome.storage.local.get(PROJECT_TASK_STATUS_KEY);
+  const previous = stored && stored[PROJECT_TASK_STATUS_KEY];
+  if (!previous || previous.running !== true || projectTaskPromise || projectTaskExecution) return;
+  const operation = projectTaskStatusWriteQueue.catch(() => {}).then(async () => {
+    const confirmed = await chrome.storage.local.get(PROJECT_TASK_STATUS_KEY);
+    const current = confirmed && confirmed[PROJECT_TASK_STATUS_KEY];
+    if (
+      projectTaskPromise || projectTaskExecution ||
+      !startupStatusRecoveryMatches(previous, current, 'taskId')
+    ) return;
+    await chrome.storage.local.set({
+      [PROJECT_TASK_STATUS_KEY]: Object.assign({}, current, {
+        running: false,
+        paused: false,
+        waitingForVerification: false,
+        verificationPlatforms: [],
+        cancelling: false,
+        cancelled: true,
+        status: 'cancelled',
+        updatedAt: Date.now(),
+        finishedAt: Date.now(),
+        phase: '任务已中断',
+        pauseReason: '',
+        error: '上次任务在扩展重载或浏览器休眠后中断，请重新执行。',
+      }),
+    });
+  });
+  projectTaskStatusWriteQueue = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  await operation;
+}
 
 function isSensitiveTraceKey(key) {
   const normalized = String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -1349,8 +1415,6 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
 
   if (!isExcel) return;
 
-  console.log(TAG, '检测到 Excel 下载:', url.substring(0, 100), 'mime:', downloadItem.mime);
-
   // 等待下载完成后读取文件
   const downloadId = downloadItem.id;
 
@@ -1364,15 +1428,11 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
     chrome.downloads.search({ id: downloadId }, async (items) => {
       if (!items || items.length === 0) return;
       const item = items[0];
-      console.log(TAG, '下载完成，文件路径:', item.filename);
-
       // 通过 fetch 读取本地文件（需要 file:// 权限，MV3 不支持）
       // 改用：直接 fetch 原始 URL 获取文件内容
       try {
         const response = await fetch(url);
         const buffer = await response.arrayBuffer();
-        console.log(TAG, '成功获取文件内容，大小:', buffer.byteLength);
-
         // ArrayBuffer 转 base64，分块处理避免栈溢出
         const uint8 = new Uint8Array(buffer);
         let binary = '';
@@ -1390,10 +1450,8 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
               type: 'GH_XLSX_FROM_BACKGROUND',
               base64: base64
             });
-            console.log(TAG, '已发送数据到 tab:', tab.id);
           } catch (e) {
             // content-script 未就绪，先注入再重发
-            console.log(TAG, 'content-script 未就绪，尝试注入后重发，tab:', tab.id);
             try {
               await chrome.scripting.executeScript({
                 target: { tabId: tab.id },
@@ -1403,7 +1461,6 @@ chrome.downloads.onCreated.addListener(async (downloadItem) => {
                 type: 'GH_XLSX_FROM_BACKGROUND',
                 base64: base64
               });
-              console.log(TAG, '注入后重发成功，tab:', tab.id);
             } catch (e2) {
               console.error(TAG, '注入重发失败:', e2);
             }
@@ -1447,7 +1504,7 @@ function isAccountManagementWebToolSender(sender) {
   try {
     const url = new URL(String(sender && (sender.url || sender.tab && sender.tab.url) || ''));
     return BUSINESS_DEFENSE_WEB_TOOL_ORIGINS.has(url.origin) &&
-      url.pathname === '/accounts.html';
+      url.pathname === '/accounts.html' && Number(sender && sender.frameId || 0) === 0;
   } catch (error) {
     return false;
   }
@@ -1457,9 +1514,99 @@ function isOneClickWebToolSender(message, sender) {
   if (!isBusinessDefenseWebToolSender(message, sender)) return false;
   try {
     const url = new URL(String(sender && (sender.url || sender.tab && sender.tab.url) || ''));
-    return url.pathname === '/report.html';
+    return url.pathname === '/report.html' && Number(sender && sender.frameId || 0) === 0;
   } catch (error) {
     return false;
+  }
+}
+
+const TEAM_VAULT_START_AUTH_CHALLENGE_TYPE = 'TEAM_VAULT_START_AUTH_CHALLENGE';
+const TEAM_VAULT_SCOPE_ID = 'team:https://tbdata.aizicheng.com';
+const LOCAL_VAULT_SCOPE_ID = 'local:tbcontentdata';
+const TEAM_VAULT_START_AUTH_TIMEOUT_MS = 10000;
+const TEAM_VAULT_START_AUTH_MAX_AGE_MS = 5000;
+
+function webToolSenderOrigin(sender) {
+  try {
+    return new URL(String(sender && (sender.url || sender.tab && sender.tab.url) || '')).origin;
+  } catch (error) {
+    return '';
+  }
+}
+
+function freshVaultAuthorizationNonce() {
+  if (typeof crypto !== 'undefined' && crypto && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) +
+    '-' + Math.random().toString(36).slice(2);
+}
+
+function requestFreshTeamVaultAuthorization(sender, expectedVaultScopeId) {
+  const tabId = Number(sender && sender.tab && sender.tab.id);
+  const frameId = Number(sender && sender.frameId || 0);
+  const documentId = String(sender && sender.documentId || '');
+  if (!Number.isInteger(tabId) || tabId < 0 || !Number.isInteger(frameId) || frameId !== 0) {
+    return Promise.reject(new Error('无法确认团队页面授权状态。'));
+  }
+  const nonce = freshVaultAuthorizationNonce();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    const timer = setTimeout(() => {
+      finish(reject, new Error('团队登录状态确认超时。'));
+    }, TEAM_VAULT_START_AUTH_TIMEOUT_MS);
+    try {
+      chrome.tabs.sendMessage(tabId, {
+        type: TEAM_VAULT_START_AUTH_CHALLENGE_TYPE,
+        nonce,
+        vaultScopeId: expectedVaultScopeId,
+      }, documentId ? { documentId } : { frameId }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          finish(reject, new Error(runtimeError.message || '团队页面未响应授权确认。'));
+          return;
+        }
+        const checkedAt = Number(response && response.checkedAt);
+        const now = Date.now();
+        const valid = response && response.ok === true && response.nonce === nonce &&
+          response.vaultScopeId === expectedVaultScopeId && Number.isSafeInteger(checkedAt) &&
+          checkedAt <= now + 1000 && now - checkedAt <= TEAM_VAULT_START_AUTH_MAX_AGE_MS;
+        if (!valid) {
+          finish(reject, new Error('团队登录或账号库权限已失效。'));
+          return;
+        }
+        finish(resolve, { checkedAt });
+      });
+    } catch (error) {
+      finish(reject, error);
+    }
+  });
+}
+
+async function enforceFreshVaultTaskAuthorization(message, sender, expectedVaultScopeId) {
+  const scopeId = String(expectedVaultScopeId || '');
+  const senderOrigin = webToolSenderOrigin(sender);
+  if (scopeId === LOCAL_VAULT_SCOPE_ID &&
+      (senderOrigin === 'http://localhost:3400' || senderOrigin === 'http://127.0.0.1:3400')) {
+    return { local: true };
+  }
+  try {
+    if (scopeId !== TEAM_VAULT_SCOPE_ID || senderOrigin !== 'https://tbdata.aizicheng.com' ||
+        !message || message.source !== 'business-defense-web-tool') {
+      throw new Error('账号库工作区与页面来源不匹配。');
+    }
+    return await requestFreshTeamVaultAuthorization(sender, scopeId);
+  } catch (error) {
+    try {
+      await lockAccountManagementSession();
+    } catch (lockError) {}
+    throw new Error('团队登录或账号库权限已失效，账号库已锁定，请重新登录并解锁。');
   }
 }
 
@@ -1497,7 +1644,6 @@ chrome.tabs.onCreated.addListener((tab) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-  console.log(TAG, '扩展已安装');
   syncAllActionAvailability().catch(() => {});
 });
 
@@ -1850,6 +1996,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 const GH_AUTOMATIC_SYNC_URL =
   'https://creator.guanghe.taobao.com/page/unify/asset-overview?tab=singleEffect';
+const GUANGHE_TAB_PATTERNS = [
+  '*://creator.guanghe.taobao.com/*',
+  'https://xstore.insights.1688.com/*',
+  '*://web.taobao.com/s-guanghe-creator/asset-overview*',
+];
+let guangheWorkflowTail = Promise.resolve();
+let reusableGuangheContext = null;
+
+function withGuangheWorkflow(operation) {
+  const running = guangheWorkflowTail.catch(() => {}).then(operation);
+  guangheWorkflowTail = running.then(() => undefined, () => undefined);
+  return running;
+}
+
+function rememberGuangheContext(tabId, frameId, permissionRecovered) {
+  if (!Number.isFinite(Number(tabId))) return;
+  reusableGuangheContext = {
+    tabId: Number(tabId),
+    frameId: Number.isFinite(Number(frameId)) ? Number(frameId) : null,
+    permissionRecovered: permissionRecovered === true,
+    updatedAt: Date.now(),
+  };
+}
 
 function isWxtReportSender(sender) {
   try {
@@ -1862,6 +2031,67 @@ function isWxtReportSender(sender) {
 
 function waitMilliseconds(duration) {
   return new Promise((resolve) => setTimeout(resolve, duration));
+}
+
+function projectTaskCancellationError(reason) {
+  if (reason && reason.code === 'PROJECT_TASK_CANCELLED') return reason;
+  const message = reason && reason.message
+    ? reason.message
+    : (typeof reason === 'string' && reason ? reason : '任务已取消。');
+  const error = new Error(message);
+  error.name = 'AbortError';
+  error.code = 'PROJECT_TASK_CANCELLED';
+  error.retryable = false;
+  return error;
+}
+
+function isProjectTaskCancellation(error, signal) {
+  return Boolean(error && (
+    error.code === 'PROJECT_TASK_CANCELLED' ||
+    (error.name === 'AbortError' && signal && signal.aborted)
+  ));
+}
+
+function throwIfProjectTaskCancelled(signal) {
+  if (!signal || !signal.aborted) return;
+  throw projectTaskCancellationError(signal.reason);
+}
+
+function waitMillisecondsWithSignal(duration, signal) {
+  throwIfProjectTaskCancelled(signal);
+  if (!signal) return waitMilliseconds(duration);
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, Math.max(0, Number(duration) || 0));
+    const onAbort = () => {
+      clearTimeout(timeoutId);
+      signal.removeEventListener('abort', onAbort);
+      reject(projectTaskCancellationError(signal.reason));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function raceWithProjectTaskSignal(promise, signal) {
+  throwIfProjectTaskCancelled(signal);
+  if (!signal) return Promise.resolve(promise);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback(value);
+    };
+    const onAbort = () => finish(reject, projectTaskCancellationError(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
 }
 
 function normalizePlatformTaskIds(value) {
@@ -1907,32 +2137,51 @@ function normalizeXhsDateRange(value, required) {
   return { from, to, timezone: 'Asia/Shanghai' };
 }
 
+function projectVerificationChallenge(error, fallbackPlatform) {
+  if (!error || error.code !== 'VERIFICATION_REQUIRED') return null;
+  const platform = ['adstar', 'pgy', 'juguang'].includes(error.platform)
+    ? error.platform
+    : (['adstar', 'pgy', 'juguang'].includes(fallbackPlatform) ? fallbackPlatform : '');
+  const tabId = Number(error.tabId);
+  if (!platform || !Number.isInteger(tabId) || tabId <= 0) return null;
+  return { platform, tabId };
+}
+
 function shouldRetryPlatformError(error) {
+  if (projectVerificationChallenge(error)) return false;
   if (error && error.retryable === false) return false;
   const message = String(error && error.message || error || '');
   return !/(?:滑块|验证码|账号或密码|无权限|未授权|尚未找到.*人群|未找到.*人群包|请先手动创建.*人群|Cannot access contents of url|Extension manifest must request permission)/i.test(message);
 }
 
-async function runPlatformStepWithRetry(step) {
+async function runPlatformStepWithRetry(step, signal, trackPendingRun) {
   let lastError = null;
   let attempts = 0;
   for (let attempt = 1; attempt <= PLATFORM_RETRY_ATTEMPTS; attempt += 1) {
+    if (signal) throwIfProjectTaskCancelled(signal);
     attempts = attempt;
     try {
-      const detail = await step.run(attempt);
+      const running = step.run(attempt, signal);
+      if (typeof trackPendingRun === 'function') trackPendingRun(running);
+      const detail = await (signal ? raceWithProjectTaskSignal(running, signal) : running);
+      if (signal) throwIfProjectTaskCancelled(signal);
       const retryReturnedFailure = Boolean(detail && detail.ok === false &&
         detail.code === 'XHS_COLLECTION_FAILED' && detail.retryable !== false);
       if (!retryReturnedFailure || attempt >= PLATFORM_RETRY_ATTEMPTS) {
         return { detail, attempts };
       }
-      await waitMilliseconds(Math.min(5000, 1200 + attempt * 650));
+      const retryDelay = Math.min(5000, 1200 + attempt * 650);
+      await (signal ? waitMillisecondsWithSignal(retryDelay, signal) : waitMilliseconds(retryDelay));
     } catch (error) {
+      if (signal && isProjectTaskCancellation(error, signal)) throw projectTaskCancellationError(error);
       lastError = error;
       if (attempt >= PLATFORM_RETRY_ATTEMPTS || !shouldRetryPlatformError(error)) break;
       // Each platform runner re-enters and reloads its page before collecting again.
-      await waitMilliseconds(Math.min(5000, 1200 + attempt * 650));
+      const retryDelay = Math.min(5000, 1200 + attempt * 650);
+      await (signal ? waitMillisecondsWithSignal(retryDelay, signal) : waitMilliseconds(retryDelay));
     }
   }
+  if (projectVerificationChallenge(lastError)) throw lastError;
   const message = String(lastError && lastError.message || lastError || '平台任务失败。');
   if (attempts > 1) {
     const wrapped = new Error(message + '（已重新打开并尝试 ' + attempts + ' 次）');
@@ -1943,17 +2192,19 @@ async function runPlatformStepWithRetry(step) {
   throw lastError || new Error(message);
 }
 
-async function waitTabComplete(tabId, timeoutMs) {
+async function waitTabComplete(tabId, timeoutMs, signal) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
+    if (signal) throwIfProjectTaskCancelled(signal);
     try {
       const tab = await chrome.tabs.get(tabId);
       if (tab && tab.status === 'complete') return tab;
     } catch (error) {
       throw new Error('标签页已关闭。');
     }
-    await waitMilliseconds(500);
+    await (signal ? waitMillisecondsWithSignal(500, signal) : waitMilliseconds(500));
   }
+  if (signal) throwIfProjectTaskCancelled(signal);
   throw new Error('页面加载超时。');
 }
 
@@ -1984,7 +2235,9 @@ async function openOrReuseTab(url, queryPatterns, options) {
 async function injectScripts(tabId, scripts) {
   for (const script of scripts) {
     const target = { tabId };
-    if (Array.isArray(script.frameIds) && script.frameIds.length) {
+    if (Array.isArray(script.documentIds) && script.documentIds.length) {
+      target.documentIds = script.documentIds;
+    } else if (Array.isArray(script.frameIds) && script.frameIds.length) {
       target.frameIds = script.frameIds;
     } else {
       target.allFrames = script.allFrames === true;
@@ -1997,20 +2250,102 @@ async function injectScripts(tabId, scripts) {
   }
 }
 
-async function sendTabMessageWithRetry(tabId, message, timeoutMs, messageOptions) {
+async function sendTabMessageWithRetry(
+  tabId,
+  message,
+  timeoutMs,
+  messageOptions,
+  signal,
+  beforeEachSend
+) {
   const startedAt = Date.now();
   let lastError = null;
-  while (Date.now() - startedAt < timeoutMs) {
+  const actionType = String(message && message.type || '');
+  const cancelType = actionType === 'XHS_LOGIN_FILL_PASSWORD' || actionType === 'XHS_LOGIN_OPEN_ACCOUNT'
+    ? 'XHS_LOGIN_CANCEL'
+    : (actionType === 'XINGHE_FILL_LOGIN' || actionType === 'XINGHE_SELECT_ROLE'
+      ? 'XINGHE_CANCEL_OPERATION'
+      : '');
+
+  const cancellationError = () => {
     try {
-      const response = messageOptions
-        ? await chrome.tabs.sendMessage(tabId, message, messageOptions)
-        : await chrome.tabs.sendMessage(tabId, message);
+      throwIfProjectTaskCancelled(signal);
+    } catch (error) {
+      return error;
+    }
+    const error = new Error('任务已取消。');
+    error.code = 'PROJECT_TASK_CANCELLED';
+    return error;
+  };
+
+  const cancelPageOperation = (operationId) => {
+    if (!cancelType || !operationId) return;
+    const cancellation = { type: cancelType, operationId };
+    try {
+      const pending = messageOptions
+        ? chrome.tabs.sendMessage(tabId, cancellation, messageOptions)
+        : chrome.tabs.sendMessage(tabId, cancellation);
+      Promise.resolve(pending).catch(() => {});
+    } catch (error) {}
+  };
+
+  const waitForResponse = async (pending, operationId, remainingMs) => {
+    if (!signal && typeof setTimeout !== 'function') return pending;
+    let abortListener = null;
+    let timeoutId = null;
+    const races = [Promise.resolve(pending)];
+    if (signal) {
+      races.push(new Promise((resolve, reject) => {
+        abortListener = () => {
+          cancelPageOperation(operationId);
+          reject(cancellationError());
+        };
+        signal.addEventListener('abort', abortListener, { once: true });
+      }));
+    }
+    if (typeof setTimeout === 'function') {
+      races.push(new Promise((resolve, reject) => {
+        timeoutId = setTimeout(() => {
+          cancelPageOperation(operationId);
+          reject(new Error('页面脚本未响应。'));
+        }, Math.max(1, remainingMs));
+      }));
+    }
+    try {
+      return await Promise.race(races);
+    } finally {
+      if (signal && abortListener) signal.removeEventListener('abort', abortListener);
+      if (timeoutId !== null && typeof clearTimeout === 'function') clearTimeout(timeoutId);
+    }
+  };
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (signal) throwIfProjectTaskCancelled(signal);
+    if (typeof beforeEachSend === 'function') {
+      await beforeEachSend();
+      if (signal) throwIfProjectTaskCancelled(signal);
+    }
+    const operationId = cancelType
+      ? 'login-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+      : '';
+    const outgoingMessage = operationId
+      ? Object.assign({}, message, { operationId })
+      : message;
+    try {
+      const pending = messageOptions
+        ? chrome.tabs.sendMessage(tabId, outgoingMessage, messageOptions)
+        : chrome.tabs.sendMessage(tabId, outgoingMessage);
+      const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
+      const response = await waitForResponse(pending, operationId, remainingMs);
+      if (signal) throwIfProjectTaskCancelled(signal);
       if (response) return response;
     } catch (error) {
+      if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
       lastError = error;
     }
-    await waitMilliseconds(700);
+    await (signal ? waitMillisecondsWithSignal(700, signal) : waitMilliseconds(700));
   }
+  if (signal) throwIfProjectTaskCancelled(signal);
   throw lastError || new Error('页面脚本未响应。');
 }
 
@@ -2421,7 +2756,7 @@ async function tryGuangheSettingsRecovery(tabId) {
   return results && results[0] && results[0].result || { ok: false, message: '设置页恢复脚本未返回结果。' };
 }
 
-async function clickGuangheMenuItem(tabId, label, timeoutMs) {
+async function clickGuangheMenuItem(tabId, label, timeoutMs, framePurpose) {
   const startedAt = Date.now();
   let lastError = null;
   while (Date.now() - startedAt < timeoutMs) {
@@ -2431,7 +2766,7 @@ async function clickGuangheMenuItem(tabId, label, timeoutMs) {
     } catch (error) {
       lastError = error;
     }
-    frames = sortGuangheFrames(frames, 'menu');
+    frames = sortGuangheFrames(frames, framePurpose === 'data' ? 'data' : 'menu');
     if (!frames.length) frames = [{ frameId: 0, url: BUSINESS_DEFENSE_GH_URL }];
     let permissionFailure = null;
     for (const frame of frames) {
@@ -2661,30 +2996,255 @@ async function runGuangheCollectorOnTab(tabId, source, options) {
   return Object.assign({}, response, { source: source });
 }
 
-async function runBusinessDefenseGuanghe(options) {
-  const tabId = await openOrReuseTab(BUSINESS_DEFENSE_GH_URL, ['*://creator.guanghe.taobao.com/*']);
-  await waitTabComplete(tabId, 30000);
-  await reloadPlatformTab(tabId, 45000);
-  let access = await inspectGuangheAccess(tabId);
-  if (access.permissionDenied) {
-    const recovery = await tryGuangheSettingsRecovery(tabId);
-    if (!recovery.ok) throw new Error(recovery.message || '光合账号无运营权限。');
-    await waitMilliseconds(800);
-    await clickGuangheMenuItem(tabId, '内容数据', 15000);
-    await clickGuangheMenuItem(tabId, '资产总览', 15000);
-    const readyFrame = await waitForGuangheAssetOverview(tabId, 30000);
-    return runGuangheCollectorOnTab(
-      tabId,
-      '淘宝光合（设置→内容数据→资产总览）',
-      Object.assign({}, options || {}, { preferredFrameId: readyFrame.frameId })
-    );
+async function findOrCreateGuangheTab(preferredWindowId) {
+  if (reusableGuangheContext && Number.isFinite(reusableGuangheContext.tabId)) {
+    try {
+      const tab = await chrome.tabs.get(reusableGuangheContext.tabId);
+      if (tab && tab.id && guangheFrameRole(tab.url)) {
+        return { tabId: tab.id, created: false };
+      }
+      reusableGuangheContext = null;
+    } catch (error) {
+      reusableGuangheContext = null;
+    }
   }
-  return runGuangheCollectorOnTab(tabId, '淘宝光合', options);
+
+  const query = { url: GUANGHE_TAB_PATTERNS };
+  if (Number.isFinite(Number(preferredWindowId))) query.windowId = Number(preferredWindowId);
+  let tabs = await chrome.tabs.query(query);
+  if (!tabs.length && Object.prototype.hasOwnProperty.call(query, 'windowId')) {
+    delete query.windowId;
+    tabs = await chrome.tabs.query(query);
+  }
+  const existing = tabs
+    .filter((tab) => tab && Number.isFinite(Number(tab.id)))
+    .sort((left, right) => Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0))[0];
+  if (existing) {
+    rememberGuangheContext(existing.id, null, false);
+    return { tabId: existing.id, created: false };
+  }
+
+  const createOptions = { url: BUSINESS_DEFENSE_GH_URL, active: false };
+  if (Number.isFinite(Number(preferredWindowId))) {
+    createOptions.windowId = Number(preferredWindowId);
+  }
+  const created = await chrome.tabs.create(createOptions);
+  rememberGuangheContext(created.id, null, false);
+  return { tabId: created.id, created: true };
+}
+
+async function readGuangheFrames(tabId) {
+  let frames = [];
+  try {
+    frames = await chrome.webNavigation.getAllFrames({ tabId }) || [];
+  } catch (error) {}
+  if (!frames.length) {
+    const tab = await chrome.tabs.get(tabId);
+    frames = [{ frameId: 0, url: String(tab && tab.url || BUSINESS_DEFENSE_GH_URL) }];
+  }
+  return sortGuangheFrames(frames, 'data');
+}
+
+async function findGuangheAutomaticSyncFrame(tabId, preferredFrameId) {
+  const frames = await readGuangheFrames(tabId);
+  const preferred = Number.isFinite(Number(preferredFrameId)) ? Number(preferredFrameId) : null;
+  frames.sort((left, right) => {
+    if (preferred === null) return 0;
+    return Number(Number(right.frameId) === preferred) - Number(Number(left.frameId) === preferred);
+  });
+  let permissionFailure = null;
+  let staleHook = null;
+  for (const frame of frames) {
+    const role = guangheFrameRole(frame);
+    if (!['asset', 'settings', 'creator'].includes(role)) continue;
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [Number(frame.frameId)] },
+        world: 'MAIN',
+        func: () => {
+          const text = String(document.body && (document.body.innerText || document.body.textContent) || '')
+            .slice(0, 40000);
+          const permissionDenied = /\u5f53\u524d\u5b50\u8d26\u53f7\u65e0\u8fd0\u8425\u6743\u9650|\u6682\u65e0\u8fd0\u8425\u6743\u9650|\u65e0\u6743\u8bbf\u95ee|\u6ca1\u6709\u6743\u9650/.test(text);
+          const directWorkRoute = new URLSearchParams(location.search).get('tab') === 'singleEffect';
+          const visible = (element) => {
+            if (!element) return false;
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0 && style.display !== 'none' &&
+              style.visibility !== 'hidden';
+          };
+          const workScopeVisible = Array.from(document.querySelectorAll('label,button,span,div'))
+            .some((element) => visible(element) &&
+              /^(\u8fd1\s*30\s*\u5929(?:\u7684)?\u4f5c\u54c1|\u6240\u6709\u4f5c\u54c1|\u5168\u90e8\u4f5c\u54c1)$/.test(
+                String(element.textContent || '').trim()
+              ));
+          return {
+            ready: !permissionDenied &&
+              window.__ghPageHookProtocol === 2 &&
+              typeof window.__ghFetchAllContent === 'function' &&
+              Boolean(document.querySelector('[class*="searchBtn"]')) &&
+              (directWorkRoute || workScopeVisible),
+            permissionDenied,
+            hookPresent: Boolean(window.__ghPageHookV2250) ||
+              typeof window.__ghFetchAllContent === 'function',
+            hookProtocol: Number(window.__ghPageHookProtocol) || 0,
+            href: location.href,
+          };
+        },
+      });
+      const injection = results && results[0];
+      const state = injection && injection.result;
+      if (state && state.ready) {
+        return {
+          tabId,
+          frameId: Number(frame.frameId),
+          documentId: String(injection.documentId || frame.documentId || ''),
+          role,
+          href: state.href || frame.url || '',
+        };
+      }
+      if (state && state.hookPresent && state.hookProtocol !== 2 && !staleHook) {
+        staleHook = {
+          frameId: Number(frame.frameId),
+          documentId: String(injection.documentId || frame.documentId || ''),
+          href: state.href || frame.url || '',
+        };
+      }
+    } catch (error) {
+      if (isGuangheFramePermissionError(error)) permissionFailure = error;
+    }
+  }
+  if (permissionFailure) throw guangheFramePermissionError(permissionFailure);
+  if (staleHook) {
+    const error = new Error('光合页面仍在运行旧版采集脚本，将在当前标签页刷新后继续。');
+    error.code = 'GUANGHE_PAGE_HOOK_STALE';
+    error.target = staleHook;
+    throw error;
+  }
+  return null;
+}
+
+async function waitForGuangheAutomaticSyncFrame(tabId, preferredFrameId, timeoutMs) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 60000);
+  while (Date.now() < deadline) {
+    const target = await findGuangheAutomaticSyncFrame(tabId, preferredFrameId);
+    if (target) return target;
+    await waitMilliseconds(400);
+  }
+  const error = new Error('\u5149\u5408\u4f5c\u54c1\u5206\u6790\u9875\u672a\u5b8c\u6210\u52a0\u8f7d\uff0c\u65e0\u6cd5\u8bfb\u53d6\u4e07\u76f8\u53f0\u89c6\u9891\u5bf9\u5e94\u4f5c\u54c1\u3002');
+  error.code = 'GUANGHE_CONTENT_FRAME_NOT_READY';
+  throw error;
+}
+
+async function openRecoveredGuangheContentPage(tabId) {
+  await clickGuangheMenuItem(tabId, '\u5185\u5bb9\u6570\u636e', 15000);
+  await clickGuangheMenuItem(tabId, '\u8d44\u4ea7\u603b\u89c8', 15000);
+  const readyFrame = await waitForGuangheAssetOverview(tabId, 30000);
+  rememberGuangheContext(tabId, readyFrame.frameId, true);
+  await clickGuangheMenuItem(tabId, '\u4f5c\u54c1\u5206\u6790', 15000, 'data');
+  return waitForGuangheAutomaticSyncFrame(tabId, readyFrame.frameId, 60000);
+}
+
+async function prepareGuangheAutomaticSyncTarget(preferredWindowId) {
+  const candidate = await findOrCreateGuangheTab(preferredWindowId);
+  const tabId = candidate.tabId;
+  await waitTabComplete(tabId, 30000);
+
+  const preferredFrameId = reusableGuangheContext && reusableGuangheContext.tabId === tabId
+    ? reusableGuangheContext.frameId
+    : null;
+  let ready = null;
+  try {
+    ready = await findGuangheAutomaticSyncFrame(tabId, preferredFrameId);
+  } catch (error) {
+    if (!error || error.code !== 'GUANGHE_PAGE_HOOK_STALE') throw error;
+    rememberGuangheContext(tabId, null, false);
+    await chrome.tabs.reload(tabId);
+    await waitTabComplete(tabId, 45000);
+    await waitMilliseconds(1200);
+    ready = await findGuangheAutomaticSyncFrame(tabId, null);
+  }
+  if (ready) return Object.assign({}, ready, { created: candidate.created, reused: !candidate.created });
+
+  const frames = await readGuangheFrames(tabId);
+  const recoveredFramePresent = frames.some((frame) => (
+    ['asset', 'settings'].includes(guangheFrameRole(frame))
+  ));
+  const recoveredContext = Boolean(
+    reusableGuangheContext && reusableGuangheContext.tabId === tabId &&
+    reusableGuangheContext.permissionRecovered
+  );
+  if (recoveredFramePresent || recoveredContext) {
+    try {
+      await clickGuangheMenuItem(tabId, '\u4f5c\u54c1\u5206\u6790', 12000, 'data');
+      ready = await waitForGuangheAutomaticSyncFrame(tabId, preferredFrameId, 20000);
+      if (ready) return Object.assign({}, ready, { created: candidate.created, reused: !candidate.created });
+    } catch (error) {
+      try {
+        ready = await openRecoveredGuangheContentPage(tabId);
+        return Object.assign({}, ready, { created: candidate.created, reused: !candidate.created });
+      } catch (recoveryError) {
+        if (recoveryError && recoveryError.retryable === false) throw recoveryError;
+        // A stale MAIN-world hook cannot be upgraded in place; reload this same tab below.
+        rememberGuangheContext(tabId, null, false);
+      }
+    }
+  }
+
+  let access = await inspectGuangheAccess(tabId);
+  if (!access.permissionDenied) {
+    await chrome.tabs.update(tabId, { url: GH_AUTOMATIC_SYNC_URL, active: false });
+    await waitTabComplete(tabId, 30000);
+    await waitMilliseconds(1200);
+    access = await inspectGuangheAccess(tabId);
+    if (!access.permissionDenied) {
+      ready = await waitForGuangheAutomaticSyncFrame(tabId, 0, 60000);
+      rememberGuangheContext(tabId, ready.frameId, false);
+      return Object.assign({}, ready, { created: candidate.created, reused: !candidate.created });
+    }
+  }
+
+  const recovery = await tryGuangheSettingsRecovery(tabId);
+  if (!recovery.ok) {
+    const error = new Error(recovery.message || '\u5149\u5408\u8d26\u53f7\u65e0\u8fd0\u8425\u6743\u9650\uff0c\u4e14\u672a\u80fd\u8fdb\u5165\u5185\u5bb9\u6570\u636e\u3002');
+    error.code = 'GUANGHE_PERMISSION_RECOVERY_FAILED';
+    throw error;
+  }
+  await waitMilliseconds(800);
+  ready = await openRecoveredGuangheContentPage(tabId);
+  return Object.assign({}, ready, { created: candidate.created, reused: !candidate.created });
+}
+
+async function runBusinessDefenseGuanghe(options) {
+  return withGuangheWorkflow(async () => {
+    const tabId = await openOrReuseTab(BUSINESS_DEFENSE_GH_URL, ['*://creator.guanghe.taobao.com/*']);
+    rememberGuangheContext(tabId, null, false);
+    await waitTabComplete(tabId, 30000);
+    await reloadPlatformTab(tabId, 45000);
+    let access = await inspectGuangheAccess(tabId);
+    if (access.permissionDenied) {
+      const recovery = await tryGuangheSettingsRecovery(tabId);
+      if (!recovery.ok) throw new Error(recovery.message || '光合账号无运营权限。');
+      await waitMilliseconds(800);
+      await clickGuangheMenuItem(tabId, '内容数据', 15000);
+      await clickGuangheMenuItem(tabId, '资产总览', 15000);
+      const readyFrame = await waitForGuangheAssetOverview(tabId, 30000);
+      rememberGuangheContext(tabId, readyFrame.frameId, true);
+      return runGuangheCollectorOnTab(
+        tabId,
+        '淘宝光合（设置→内容数据→资产总览）',
+        Object.assign({}, options || {}, { preferredFrameId: readyFrame.frameId })
+      );
+    }
+    const result = await runGuangheCollectorOnTab(tabId, '淘宝光合', options);
+    rememberGuangheContext(tabId, null, false);
+    return result;
+  });
 }
 
 async function runBusinessDefenseSycm() {
   const tabId = await openOrReuseTab(BUSINESS_DEFENSE_SYCM_TRAFFIC_URL, ['*://sycm.taobao.com/flow/monitor/overview*']);
-  await waitTabComplete(tabId, 45000);
+  await waitTabComplete(tabId, 45000, signal);
   await reloadPlatformTab(tabId, 45000);
   await injectScripts(tabId, [
     { files: ['sycm-content-script.js'], allFrames: true },
@@ -2945,7 +3505,8 @@ async function runContentDiagnosisWxtSection(tabId, runId, section) {
   const targetUrl = section === 'shortVideo'
     ? CONTENT_DIAGNOSIS_WXT_SHORT_URL
     : BUSINESS_DEFENSE_WXT_URL;
-  const timeoutMs = section === 'shortVideo' ? 8 * 60 * 1000 : 4 * 60 * 1000;
+  // Short-video generation includes WXT data capture plus the queued Guanghe matching workflow.
+  const timeoutMs = section === 'shortVideo' ? 20 * 60 * 1000 : 4 * 60 * 1000;
   const collect = () => sendTabMessageWithRetry(tabId, { type, runId }, timeoutMs);
   let response = await collect();
   if (!response || (!response.ok && /HTTP\s*(?:401|403)/i.test(String(response.message || '')))) {
@@ -3434,14 +3995,13 @@ async function runBusinessDefenseDmp(options) {
 async function runBusinessDefenseAutoCollect(options) {
   const selectedPlatforms = new Set(normalizePlatformTaskIds(options && options.platforms));
   const steps = [
-    { platform: 'guanghe', name: '光合内容指标', run: runBusinessDefenseGuanghe, startDelayMs: 1200 },
-    { platform: 'sycm', name: '生意参谋流量指标', run: runBusinessDefenseSycm, startDelayMs: 0 },
-    { platform: 'wxt', name: '万相台内容投放', run: runBusinessDefenseWxt, startDelayMs: 2400 },
+    { platform: 'guanghe', name: '光合内容指标', run: runBusinessDefenseGuanghe },
+    { platform: 'sycm', name: '生意参谋流量指标', run: runBusinessDefenseSycm },
+    { platform: 'wxt', name: '万相台内容投放', run: runBusinessDefenseWxt },
     {
       platform: 'dmp',
       name: 'DMP人群资产画像',
       run: () => runBusinessDefenseDmp({ includeXiaohongshu: false }),
-      startDelayMs: 3600,
     },
   ];
   const resultsByName = new Map();
@@ -3504,7 +4064,6 @@ async function runBusinessDefenseAutoCollect(options) {
   const executeStep = async (step) => {
     let result;
     try {
-      if (step.startDelayMs) await waitMilliseconds(step.startDelayMs);
       const execution = await runPlatformStepWithRetry(step);
       const detail = execution.detail;
       const messages = [];
@@ -3595,6 +4154,7 @@ function contentDiagnosisResultMessage(detail) {
 }
 
 const XHS_TERMINAL_COLLECTION_ERROR_CODES = new Set([
+  'XHS_SNAPSHOT_SIZE_LIMIT',
   'XHS_PLATFORM_TAB_MISSING',
   'XHS_PLATFORM_TAB_AMBIGUOUS',
   'XHS_COLLECTOR_UNAVAILABLE',
@@ -3606,159 +4166,6 @@ const XHS_TERMINAL_COLLECTION_ERROR_CODES = new Set([
   'report_schema_invalid',
   'account_identity_mismatch',
 ]);
-
-const XHS_BINDING_PLATFORM_NAMES = Object.freeze({
-  adstar: '淘宝星河',
-  pgy: '蒲公英',
-  juguang: '聚光',
-});
-
-const XHS_BINDING_ISSUE_MESSAGES = Object.freeze({
-  account_binding_mismatch: (platformName) =>
-    `当前${platformName}登录账号与所选店铺绑定不一致。`,
-  account_identity_bound_to_other_store: (platformName) =>
-    `当前${platformName}登录账号已绑定到另一店铺，禁止重新归属。`,
-  account_identity_missing: (platformName) =>
-    `无法确认${platformName}的真实登录账号，禁止用于店铺决策。`,
-  account_identity_ambiguous: (platformName) =>
-    `无法唯一确认${platformName}账号，禁止用于店铺决策。`,
-});
-
-function sanitizeXhsBindingIssues(value) {
-  return (Array.isArray(value) ? value : []).map((record) => {
-    const issue = record && typeof record === 'object' ? record : {};
-    const platform = Object.prototype.hasOwnProperty.call(
-      XHS_BINDING_PLATFORM_NAMES,
-      String(issue.platform || ''),
-    ) ? String(issue.platform) : '';
-    const rawCode = String(issue.code || '');
-    const code = Object.prototype.hasOwnProperty.call(XHS_BINDING_ISSUE_MESSAGES, rawCode)
-      ? rawCode
-      : 'account_binding_issue';
-    const platformName = platform ? XHS_BINDING_PLATFORM_NAMES[platform] : '';
-    const messageFactory = XHS_BINDING_ISSUE_MESSAGES[code];
-    const message = messageFactory && platformName
-      ? messageFactory(platformName)
-      : '账号绑定校验未通过。';
-    return { code, platform, message };
-  }).filter((issue) => issue.platform);
-}
-
-let xhsBindingRegistryQueue = Promise.resolve();
-let xhsBindingMutationPending = 0;
-
-function withXhsBindingRegistryLock(operation) {
-  const task = xhsBindingRegistryQueue.then(
-    () => operation(),
-    () => operation(),
-  );
-  xhsBindingRegistryQueue = task.then(
-    () => undefined,
-    () => undefined,
-  );
-  return task;
-}
-
-function xhsBindingRecord(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-}
-
-function safeXhsBindingUpdatedAt(value) {
-  const updatedAt = batchText(value, 80);
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(updatedAt) ||
-      !Number.isFinite(Date.parse(updatedAt))) return '';
-  return updatedAt;
-}
-
-function safeXhsBindingSummary(registry, storeId) {
-  const stores = xhsBindingRecord(registry && registry.stores);
-  const store = xhsBindingRecord(stores[storeId]);
-  const bindings = xhsBindingRecord(store.platforms);
-  const updatedAt = safeXhsBindingUpdatedAt(store.updatedAt);
-  return {
-    platforms: Object.fromEntries(XHS_PLATFORM_TASK_IDS.map((platform) => [platform, {
-      bound: Array.isArray(bindings[platform]) && bindings[platform].some((token) => (
-        typeof token === 'string' && token.trim().length > 0
-      )),
-      updatedAt,
-    }])),
-  };
-}
-
-function isTrustedXhsBindingResetSender(message, sender) {
-  return Boolean(
-    message && message.confirmedByExtension === true &&
-    sender && sender.id === chrome.runtime.id &&
-    isOneClickWebToolSender(message, sender)
-  );
-}
-
-function xhsBindingTasksRunning(stored) {
-  const source = xhsBindingRecord(stored);
-  const projectStatus = xhsBindingRecord(source[PROJECT_TASK_STATUS_KEY]);
-  const batchStatus = xhsBindingRecord(source[ACCOUNT_BATCH_STATUS_KEY]);
-  return Boolean(
-    projectTaskPromise ||
-    accountBatchPromise ||
-    projectStatus.running ||
-    batchStatus.running ||
-    batchStatus.paused
-  );
-}
-
-function requestXhsBindingReset(message) {
-  xhsBindingMutationPending += 1;
-  const task = withXhsBindingRegistryLock(async () => {
-    const source = xhsBindingRecord(message);
-    if (source.confirmedByExtension !== true) {
-      throw new Error('解除旧绑定缺少扩展内部确认。');
-    }
-    const storeId = batchText(source.storeId, 100);
-    if (!storeId) throw new Error('请先选择项目目录中的店铺。');
-    const platform = batchText(source.platform, 24);
-    if (!XHS_PLATFORM_TASK_IDS.includes(platform)) {
-      throw new Error('小红书绑定平台不在允许范围内。');
-    }
-    const stored = await chrome.storage.local.get([
-      PROJECT_DIRECTORY_KEY,
-      PROJECT_TASK_STATUS_KEY,
-      ACCOUNT_BATCH_STATUS_KEY,
-      XHS_STORE_BINDINGS_KEY,
-    ]);
-    if (xhsBindingTasksRunning(stored)) {
-      throw new Error('任务或批量任务执行期间不能解除小红书店铺绑定。');
-    }
-    const directory = xhsBindingRecord(stored && stored[PROJECT_DIRECTORY_KEY]);
-    const knownStore = (Array.isArray(directory.stores) ? directory.stores : []).some((store) => (
-      xhsBindingRecord(store).id === storeId
-    ));
-    if (!knownStore) throw new Error('所选店铺不在当前项目目录中。');
-
-    const registry = xhsBindingRecord(stored && stored[XHS_STORE_BINDINGS_KEY]);
-    const currentStores = xhsBindingRecord(registry.stores);
-    const currentStore = xhsBindingRecord(currentStores[storeId]);
-    const nextPlatforms = Object.assign({}, xhsBindingRecord(currentStore.platforms));
-    delete nextPlatforms[platform];
-    const updatedAt = new Date().toISOString();
-    const nextRegistry = Object.assign({}, registry, {
-      schema: batchText(registry.schema, 80) || XHS_STORE_BINDINGS_KEY,
-      schemaVersion: Number.isInteger(Number(registry.schemaVersion))
-        ? Number(registry.schemaVersion)
-        : 2,
-      stores: Object.assign({}, currentStores, {
-        [storeId]: Object.assign({}, currentStore, {
-          platforms: nextPlatforms,
-          updatedAt,
-        }),
-      }),
-    });
-    await chrome.storage.local.set({ [XHS_STORE_BINDINGS_KEY]: nextRegistry });
-    return safeXhsBindingSummary(nextRegistry, storeId);
-  });
-  return task.finally(() => {
-    xhsBindingMutationPending = Math.max(0, xhsBindingMutationPending - 1);
-  });
-}
 
 function xhsCollectionFailureRetryable(collections, platforms) {
   const source = collections && typeof collections === 'object' ? collections : {};
@@ -3781,6 +4188,11 @@ function xhsCollectionFailureRetryable(collections, platforms) {
 
 async function runXhsAnalysisTask(options) {
   const source = options && typeof options === 'object' ? options : {};
+  const signal = source.signal;
+  const trackPendingRun = typeof source.trackPendingRun === 'function'
+    ? source.trackPendingRun
+    : null;
+  if (signal) throwIfProjectTaskCancelled(signal);
   const platforms = normalizeProjectPlatformTaskIds(source.platforms)
     .filter((platform) => XHS_PLATFORM_TASK_IDS.includes(platform));
   if (!platforms.length) return { ok: true, skipped: true, partial: false };
@@ -3788,87 +4200,90 @@ async function runXhsAnalysisTask(options) {
   if (!storeId) throw new Error('小红书取数缺少店铺归属标识。');
   const dateRange = normalizeXhsDateRange(source.dateRange, true);
   const runId = batchText(source.runId, 120) || ('xhs-' + Date.now().toString(36));
-  const collection = await xhsRuntime.run({
+  const collectionRun = xhsRuntime.run({
     runId,
     accountKey: storeId,
     dateRange,
     platforms,
+    taskConcurrency: source.taskConcurrency,
+    concurrentAccountTabs: source.concurrentAccountTabs,
+    signal,
   });
+  if (trackPendingRun) trackPendingRun(collectionRun);
+  const collection = await (signal
+    ? raceWithProjectTaskSignal(collectionRun, signal)
+    : collectionRun);
+  if (signal) throwIfProjectTaskCancelled(signal);
   const collections = collection && collection.platforms || {};
   const generatedAt = new Date().toISOString();
-  return withXhsBindingRegistryLock(async () => {
-    const storedBindings = await chrome.storage.local.get(XHS_STORE_BINDINGS_KEY);
-    const bindingResult = XhsBindings.reconcileStoreBindings({
-      storeId,
-      selectedPlatforms: platforms,
-      collections,
-      registry: storedBindings && storedBindings[XHS_STORE_BINDINGS_KEY],
-      updatedAt: generatedAt,
-    });
-    const bindingIssues = Array.isArray(bindingResult.issues) ? bindingResult.issues : [];
-    const safeBindingIssues = sanitizeXhsBindingIssues(bindingIssues);
-    const snapshot = XhsAnalysis.createXhsAnalysisSnapshot({
-      runId,
-      storeId,
-      dateRange,
-      selectedPlatforms: platforms,
-      accountBindings: bindingResult.bindings,
-      bindingIssues: safeBindingIssues.map((issue) => Object.assign({ severity: 'critical' }, issue)),
-      generatedAt,
-      asOf: dateRange.to,
-      targetRoi: Number.isFinite(Number(source.targetRoi)) ? Number(source.targetRoi) : null,
-      collections,
-    });
-    XhsMetrics.assertSnapshotWithinLimit(snapshot);
-    const platformFailures = platforms.filter((platform) => ![
-      'complete', 'verified_no_spend',
-    ].includes(String(collections[platform] && collections[platform].status || 'failed')));
-    const allFailed = platforms.every((platform) => [
-      'failed', 'cancelled', 'missing',
-    ].includes(String(collections[platform] && collections[platform].status || 'missing')));
-    const blockingBindingIssues = bindingIssues.filter((issue) => {
-      const platform = String(issue && issue.platform || '');
-      const status = String(collections[platform] && collections[platform].status || 'missing');
-      const unavailableIdentity = issue && issue.code === 'account_identity_missing' &&
-        platforms.includes(platform) && ['failed', 'cancelled'].includes(status);
-      const partialJuguangIdentity = issue && platform === 'juguang' &&
-        platforms.includes(platform) && status === 'partial' && [
-          'account_identity_missing', 'account_identity_ambiguous',
-        ].includes(issue.code);
-      return !(unavailableIdentity || partialJuguangIdentity);
-    });
-    const bindingGatePassed = bindingResult.ready === true || (
-      bindingIssues.length > 0 && blockingBindingIssues.length === 0
-    );
-    const storedAnalysis = {};
-    if (bindingResult.changed) storedAnalysis[XHS_STORE_BINDINGS_KEY] = bindingResult.registry;
-    if (!allFailed && bindingGatePassed) storedAnalysis.xhsAnalysisSnapshotV1 = snapshot;
-    if (Object.keys(storedAnalysis).length) await chrome.storage.local.set(storedAnalysis);
-    const warnings = (snapshot.quality.issues || [])
-      .map((issue) => issue.message || issue.code)
-      .filter(Boolean);
-    return {
-      ok: !allFailed && bindingGatePassed,
-      code: allFailed ? 'XHS_COLLECTION_FAILED'
-        : (!bindingGatePassed ? 'XHS_ACCOUNT_BINDING_FAILED' : ''),
-      retryable: allFailed && xhsCollectionFailureRetryable(collections, platforms),
-      source: '淘宝星河、蒲公英、聚光三源联表',
-      noteCount: Array.isArray(snapshot.notes) ? snapshot.notes.length : 0,
-      partial: !allFailed && (
-        platformFailures.length > 0 || snapshot.quality.decisionReady !== true || !bindingGatePassed
-      ),
-      status: collection.status,
-      platforms,
-      bindingIssues: safeBindingIssues,
-      warnings,
-      warning: allFailed ? '所选小红书平台均未成功返回。'
-        : (!bindingGatePassed ? '当前平台真实账号与所选店铺绑定校验未通过。' : ''),
-      snapshot: !allFailed && bindingGatePassed ? snapshot : null,
-    };
+  const snapshot = XhsAnalysis.createXhsAnalysisSnapshot({
+    runId,
+    storeId,
+    dateRange,
+    selectedPlatforms: platforms,
+    generatedAt,
+    asOf: dateRange.to,
+    targetRoi: Number.isFinite(Number(source.targetRoi)) ? Number(source.targetRoi) : null,
+    collections,
   });
+  let archiveBundle;
+  try {
+    XhsMetrics.assertSnapshotWithinLimit(snapshot);
+    archiveBundle = { snapshot, chunks: {} };
+  } catch (error) {
+    if (!error || error.code !== 'XHS_SNAPSHOT_SIZE_LIMIT') throw error;
+    archiveBundle = XhsMetrics.createXhsAnalysisArchiveBundle(snapshot);
+  }
+  const archivedSnapshot = archiveBundle.snapshot;
+  XhsMetrics.assertSnapshotWithinLimit(archivedSnapshot);
+  const platformFailures = platforms.filter((platform) => ![
+    'complete', 'verified_no_spend',
+  ].includes(String(collections[platform] && collections[platform].status || 'failed')));
+  const allFailed = platforms.every((platform) => [
+    'failed', 'cancelled', 'missing',
+  ].includes(String(collections[platform] && collections[platform].status || 'missing')));
+  if (!allFailed) {
+    if (signal) throwIfProjectTaskCancelled(signal);
+    const previous = await chrome.storage.local.get('xhsAnalysisSnapshotV1');
+    const previousDetailKeys = XhsMetrics.analysisDetailKeys(previous.xhsAnalysisSnapshotV1);
+    const nextDetailKeys = new Set(Object.keys(archiveBundle.chunks));
+    await chrome.storage.local.set(Object.assign({
+      xhsAnalysisSnapshotV1: archivedSnapshot,
+    }, archiveBundle.chunks));
+    const staleDetailKeys = previousDetailKeys.filter((key) => !nextDetailKeys.has(key));
+    if (staleDetailKeys.length) await chrome.storage.local.remove(staleDetailKeys);
+    if (signal) throwIfProjectTaskCancelled(signal);
+  }
+  const warnings = (archivedSnapshot.quality.issues || [])
+    .map((issue) => issue.message || issue.code)
+    .filter(Boolean);
+  const noteDetails = archivedSnapshot.detailArchive && archivedSnapshot.detailArchive.sections &&
+    archivedSnapshot.detailArchive.sections.notes;
+  return {
+    ok: !allFailed,
+    code: allFailed ? 'XHS_COLLECTION_FAILED' : '',
+    retryable: allFailed && xhsCollectionFailureRetryable(collections, platforms),
+    source: '淘宝星河、蒲公英、聚光三源联表',
+    noteCount: Number(noteDetails && noteDetails.sourceCount) ||
+      (Array.isArray(archivedSnapshot.notes) ? archivedSnapshot.notes.length : 0),
+    partial: !allFailed && (
+      platformFailures.length > 0 || archivedSnapshot.quality.decisionReady !== true ||
+      archivedSnapshot.detailArchive && archivedSnapshot.detailArchive.complete !== true
+    ),
+    status: collection.status,
+    platforms,
+    warnings,
+    warning: allFailed ? '所选小红书平台均未成功返回。' : '',
+    snapshot: !allFailed ? archivedSnapshot : null,
+  };
 }
 
 async function runContentDiagnosisReport(options) {
+  const signal = options && options.signal;
+  const onVerificationRequired = options && typeof options.onVerificationRequired === 'function'
+    ? options.onVerificationRequired
+    : null;
+  if (signal) throwIfProjectTaskCancelled(signal);
   const selectedPlatforms = new Set(normalizeProjectPlatformTaskIds(options && options.platforms));
   const selectedXhsPlatforms = XHS_PLATFORM_TASK_IDS.filter((platform) => selectedPlatforms.has(platform));
   const runId = 'taobao-report-' + Date.now().toString(36) + '-' +
@@ -3891,12 +4306,22 @@ async function runContentDiagnosisReport(options) {
   };
   const resultsByKey = new Map();
   let wxtTabId = null;
+  let xhsVerificationResume = 0;
+  const pendingRuns = new Set();
+  const trackPendingRun = (running) => {
+    const pending = Promise.resolve(running);
+    pendingRuns.add(pending);
+    pending.then(
+      () => pendingRuns.delete(pending),
+      () => pendingRuns.delete(pending),
+    );
+  };
+  const drainPendingRuns = () => Promise.allSettled(Array.from(pendingRuns));
   const steps = [
     {
       key: 'sycm',
       platform: 'sycm',
       name: '生意参谋流量诊断',
-      startDelayMs: 0,
       run: async () => {
         const detail = await runBusinessDefenseSycm();
         report.sycm = detail.snapshot;
@@ -3907,7 +4332,6 @@ async function runContentDiagnosisReport(options) {
       key: 'guanghe',
       platform: 'guanghe',
       name: '光合渠道与资产诊断',
-      startDelayMs: 1200,
       run: async () => {
         const detail = await runBusinessDefenseGuanghe({ metricsOnly: false });
         const snapshot = detail && detail.snapshot;
@@ -3924,7 +4348,6 @@ async function runContentDiagnosisReport(options) {
       key: 'wxtMarketing',
       platform: 'wxt',
       name: '万相台营销场景报告',
-      startDelayMs: 2400,
       run: async () => {
         wxtTabId = await prepareContentDiagnosisWxtTab('marketing');
         const detail = await runContentDiagnosisWxtSection(wxtTabId, runId, 'marketing');
@@ -3947,7 +4370,6 @@ async function runContentDiagnosisReport(options) {
       key: 'dmp',
       platform: 'dmp',
       name: '内容人群画像诊断',
-      startDelayMs: 3600,
       run: async () => {
         const detail = await runBusinessDefenseDmp();
         if (!detail || !detail.snapshot || !Array.isArray(detail.snapshot.results)) {
@@ -3963,12 +4385,18 @@ async function runContentDiagnosisReport(options) {
       name: '小红书三平台全链路',
       run: async (attempt) => {
         const detail = await runXhsAnalysisTask({
-          runId: runId + '-xhs-attempt-' + attempt,
+          runId: runId + '-xhs-attempt-' + attempt +
+            (xhsVerificationResume ? '-verification-resume-' + xhsVerificationResume : ''),
           storeId: options && options.storeId,
           dateRange: options && options.dateRange,
           targetRoi: options && options.targetRoi,
           platforms: selectedXhsPlatforms,
+          taskConcurrency: options && options.taskConcurrency,
+          concurrentAccountTabs: options && options.concurrentAccountTabs,
+          signal,
+          trackPendingRun,
         });
+        if (signal) throwIfProjectTaskCancelled(signal);
         report.xiaohongshu = detail && detail.snapshot || null;
         return detail;
       },
@@ -4001,6 +4429,7 @@ async function runContentDiagnosisReport(options) {
   const persistReportState = (running, extra) => {
     const fields = Object.assign({}, extra || {});
     reportWriteQueue = reportWriteQueue.catch(() => {}).then(() => {
+      if (running && signal && signal.aborted) return;
       const results = orderedResults();
       const activeNames = steps
         .filter((step) => activeKeys.has(step.key))
@@ -4029,7 +4458,9 @@ async function runContentDiagnosisReport(options) {
     return reportWriteQueue;
   };
 
+  if (signal) throwIfProjectTaskCancelled(signal);
   await chrome.storage.local.remove(CONTENT_DIAGNOSIS_WXT_KEY);
+  if (signal) throwIfProjectTaskCancelled(signal);
   await chrome.storage.local.set({
     [CONTENT_DIAGNOSIS_REPORT_KEY]: report,
     [CONTENT_DIAGNOSIS_STATUS_KEY]: {
@@ -4048,32 +4479,57 @@ async function runContentDiagnosisReport(options) {
 
   const executeStep = async (step) => {
     let result;
-    try {
-      if (step.startDelayMs) await waitMilliseconds(step.startDelayMs);
-      const execution = await runPlatformStepWithRetry(step);
-      const detail = execution.detail;
-      const detailOk = !detail || detail.ok !== false;
-      result = {
-        key: step.key,
-        name: step.name,
-        ok: detailOk,
-        code: detail && detail.code || '',
-        partial: Boolean(detail && detail.partial),
-        message: (detailOk && execution.attempts > 1 ? '第 ' + execution.attempts + ' 次尝试成功；' : '') +
-          contentDiagnosisResultMessage(detail),
-      };
-      if (step.key === 'xiaohongshu') {
-        result.bindingIssues = sanitizeXhsBindingIssues(detail && detail.bindingIssues);
+    while (!result) {
+      try {
+        if (signal) throwIfProjectTaskCancelled(signal);
+        const execution = await runPlatformStepWithRetry(step, signal, trackPendingRun);
+        if (signal) throwIfProjectTaskCancelled(signal);
+        const detail = execution.detail;
+        const detailOk = !detail || detail.ok !== false;
+        result = {
+          key: step.key,
+          name: step.name,
+          ok: detailOk,
+          code: detail && detail.code || '',
+          partial: Boolean(detail && detail.partial),
+          message: (detailOk && execution.attempts > 1 ? '第 ' + execution.attempts + ' 次尝试成功；' : '') +
+            contentDiagnosisResultMessage(detail),
+        };
+      } catch (error) {
+        if (signal && isProjectTaskCancellation(error, signal)) throw projectTaskCancellationError(error);
+        const verification = step.key === 'xiaohongshu'
+          ? projectVerificationChallenge(error)
+          : null;
+        if (verification && onVerificationRequired) {
+          try {
+            await onVerificationRequired(error);
+            if (signal) throwIfProjectTaskCancelled(signal);
+            xhsVerificationResume += 1;
+            continue;
+          } catch (waitError) {
+            if (isProjectTaskCancellation(waitError, signal)) {
+              throw projectTaskCancellationError(waitError);
+            }
+            result = {
+              key: step.key,
+              name: step.name,
+              ok: false,
+              code: waitError && waitError.code || error && error.code || '',
+              message: waitError && waitError.message ? waitError.message : String(waitError),
+            };
+          }
+        } else {
+          result = {
+            key: step.key,
+            name: step.name,
+            ok: false,
+            code: error && error.code || '',
+            message: error && error.message ? error.message : String(error),
+          };
+        }
       }
-    } catch (error) {
-      result = {
-        key: step.key,
-        name: step.name,
-        ok: false,
-        code: error && error.code || '',
-        message: error && error.message ? error.message : String(error),
-      };
     }
+    if (signal) throwIfProjectTaskCancelled(signal);
     resultsByKey.set(step.key, result);
     activeKeys.delete(step.key);
     await persistReportState(true);
@@ -4081,7 +4537,9 @@ async function runContentDiagnosisReport(options) {
   };
 
   const wxtPipeline = async () => {
+    if (signal) throwIfProjectTaskCancelled(signal);
     const marketingResult = await executeStep(steps.find((step) => step.key === 'wxtMarketing'));
+    if (signal) throwIfProjectTaskCancelled(signal);
     if (marketingResult && /^WXT_LOGIN_GATE_/.test(String(marketingResult.code || ''))) {
       const shortVideoStep = steps.find((step) => step.key === 'wxtShortVideo');
       resultsByKey.set(shortVideoStep.key, {
@@ -4091,13 +4549,15 @@ async function runContentDiagnosisReport(options) {
         code: marketingResult.code,
         message: '万相台共同登录入口未完成，已跳过重复等待：' + marketingResult.message,
       });
+      if (signal) throwIfProjectTaskCancelled(signal);
       await persistReportState(true);
       return;
     }
     activeKeys.add('wxtShortVideo');
+    if (signal) throwIfProjectTaskCancelled(signal);
     await persistReportState(true);
     const shortVideoStep = steps.find((step) => step.key === 'wxtShortVideo');
-    await executeStep(Object.assign({}, shortVideoStep, { startDelayMs: 0 }));
+    await executeStep(shortVideoStep);
   };
 
   const tasks = [];
@@ -4105,17 +4565,29 @@ async function runContentDiagnosisReport(options) {
   if (selectedPlatforms.has('guanghe')) tasks.push(executeStep(steps.find((step) => step.key === 'guanghe')));
   if (selectedPlatforms.has('dmp')) tasks.push(executeStep(steps.find((step) => step.key === 'dmp')));
   if (selectedPlatforms.has('wxt')) tasks.push(wxtPipeline());
-  await Promise.all(tasks);
   if (selectedXhsPlatforms.length) {
-    await executeStep(steps.find((step) => step.key === 'xiaohongshu'));
+    tasks.push(executeStep(steps.find((step) => step.key === 'xiaohongshu')));
+  }
+  try {
+    await Promise.all(tasks);
+    if (signal) throwIfProjectTaskCancelled(signal);
+  } catch (error) {
+    if (signal && isProjectTaskCancellation(error, signal)) {
+      const cancellation = projectTaskCancellationError(error);
+      cancellation.drainPromise = drainPendingRuns();
+      throw cancellation;
+    }
+    throw error;
   }
 
+  if (signal) throwIfProjectTaskCancelled(signal);
   const finishedAt = Date.now();
   const results = orderedResults();
   const selectedResults = results.filter((item) => !item.skipped);
   const successful = selectedResults.filter((item) => item.ok).length;
   const partial = selectedResults.some((item) => item.ok === false || item.partial);
   report.partial = partial;
+  if (signal) throwIfProjectTaskCancelled(signal);
   await persistReportState(false, { updatedAt: finishedAt, finishedAt, partial });
   return {
     ok: successful > 0,
@@ -4130,19 +4602,22 @@ function batchText(value, maxLength) {
   return String(value == null ? '' : value).trim().slice(0, Number(maxLength) || 160);
 }
 
-function normalizeBatchAccountPlatform(value) {
-  return value === 'xiaohongshu' ? 'xiaohongshu' : 'taobao';
+function normalizeBatchAccountPlatform(value, allowLegacyDefault) {
+  if (value === 'taobao' || value === 'xiaohongshu') return value;
+  return allowLegacyDefault && (value === undefined || value === null || value === '') ? 'taobao' : '';
 }
 
 function sanitizeBatchAccount(value, index) {
   const source = value && typeof value === 'object' ? value : {};
   const username = batchText(source.username, 240);
   const password = String(source.password == null ? '' : source.password).slice(0, 360);
+  const platform = normalizeBatchAccountPlatform(source.platform, source.platform == null);
   if (!username || !password) throw new Error('\u7b2c ' + (index + 1) + ' \u4e2a\u8d26\u53f7\u7f3a\u5c11\u767b\u5f55\u8d26\u53f7\u6216\u5bc6\u7801。');
+  if (!platform) throw new Error('\u7b2c ' + (index + 1) + ' \u4e2a\u8d26\u53f7\u7684\u5e73\u53f0\u7c7b\u578b\u65e0\u6548。');
   return {
     id: batchText(source.id, 80) || 'account-' + (index + 1),
     name: batchText(source.name, 100) || username,
-    platform: normalizeBatchAccountPlatform(source.platform),
+    platform,
     storeId: batchText(source.storeId, 80),
     storeName: batchText(source.storeName, 120) || batchText(source.name, 100) || username,
     username,
@@ -4162,19 +4637,12 @@ function maskedAccountName(username) {
 }
 
 function safeBatchAccount(account) {
-  return {
-    id: account.id,
-    name: account.name,
-    platform: normalizeBatchAccountPlatform(account.platform),
-    storeId: account.storeId,
-    storeName: account.storeName,
-    usernameMasked: maskedAccountName(account.username),
-    roleKeyword: account.roleKeyword,
-    accountGroupId: account.accountGroupId,
-    accountGroupName: account.accountGroupName,
-    storeGroupId: account.storeGroupId,
-    storeGroupName: account.storeGroupName,
-  };
+  return XhsAccountLogin.safeAccountMetadata(account, {
+    id: account.storeId,
+    name: account.storeName,
+    groupId: account.storeGroupId,
+    groupName: account.storeGroupName,
+  });
 }
 
 function batchError(code, message, extra) {
@@ -4230,6 +4698,10 @@ function sanitizeAccountSessionVault(value) {
       id,
       name,
       groupId: storeGroupIds.has(item.groupId) ? item.groupId : '',
+      credentialBindings: {
+        taobaoAccountId: batchText(item.credentialBindings && item.credentialBindings.taobaoAccountId, 100),
+        xiaohongshuAccountId: batchText(item.credentialBindings && item.credentialBindings.xiaohongshuAccountId, 100),
+      },
     };
   }).filter(Boolean);
   const accountIds = new Set();
@@ -4240,11 +4712,12 @@ function sanitizeAccountSessionVault(value) {
     const username = batchText(item.username, 240);
     const password = String(item.password == null ? '' : item.password).slice(0, 360);
     const platform = normalizeBatchAccountPlatform(item.platform);
-    if (!id || accountIds.has(id) || !storeIds.has(storeId) || !username || !password) return null;
+    if (!id || accountIds.has(id) || !storeIds.has(storeId) || !platform || !username || !password) return null;
     accountIds.add(id);
     return {
       id,
-      name: batchText(item.name, 100) || username,
+      label: batchText(item.label || item.name, 100) || (platform === 'xiaohongshu' ? '小红书账号' : '淘宝账号'),
+      name: batchText(item.label || item.name, 100) || (platform === 'xiaohongshu' ? '小红书账号' : '淘宝账号'),
       platform,
       storeId,
       username,
@@ -4254,8 +4727,17 @@ function sanitizeAccountSessionVault(value) {
       enabled: item.enabled !== false,
     };
   }).filter(Boolean);
+  const accountsById = new Map(accounts.map((account) => [account.id, account]));
+  stores.forEach((store) => {
+    [['taobaoAccountId', 'taobao'], ['xiaohongshuAccountId', 'xiaohongshu']].forEach(([key, platform]) => {
+      const account = accountsById.get(store.credentialBindings[key]);
+      if (!account || account.storeId !== store.id || account.platform !== platform || account.enabled === false) {
+        store.credentialBindings[key] = '';
+      }
+    });
+  });
   return {
-    schema: 3,
+    schema: 4,
     accountGroups,
     storeGroups,
     stores,
@@ -4270,24 +4752,162 @@ function sanitizeAccountSessionVault(value) {
 
 function sanitizeAccountManagementSession(value) {
   const source = value && typeof value === 'object' ? value : {};
-  const masterPassword = String(source.masterPassword == null ? '' : source.masterPassword).slice(0, 512);
-  if (masterPassword.length < 8) throw new Error('账号库管理会话缺少有效主密码。');
+  const vaultLockEpoch = Number(source.vaultLockEpoch);
+  if (!Number.isSafeInteger(vaultLockEpoch) || vaultLockEpoch < 0) {
+    throw new Error('账号库锁定版本无效，请刷新页面后重试。');
+  }
+  const vaultFingerprint = String(source.vaultFingerprint || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(vaultFingerprint)) {
+    throw new Error('账号库密文校验标识无效，请刷新页面后重试。');
+  }
+  const vaultSessionKey = String(source.vaultSessionKey || '').trim();
+  if (vaultSessionKey && !/^[A-Za-z0-9+/]{43}=$/.test(vaultSessionKey)) {
+    throw new Error('账号库会话密钥无效，请重新解锁。');
+  }
   return {
-    schema: 2,
+    schema: 6,
+    vaultScopeId: sanitizeVaultScopeId(source.vaultScopeId),
+    vaultLockEpoch,
+    vaultFingerprint,
+    ...(vaultSessionKey ? { vaultSessionKey } : {}),
     vault: sanitizeAccountSessionVault(source.vault),
-    masterPassword,
     unlockedAt: Date.now(),
   };
 }
 
-function accountVaultFromSession(value) {
-  if (!value || typeof value !== 'object') return null;
-  if (value.vault && typeof value.vault === 'object') return value.vault;
-  return Array.isArray(value.accounts) ? value : null;
+function queueAccountSessionMutation(callback) {
+  const operation = accountSessionMutationQueue.catch(() => {}).then(callback);
+  accountSessionMutationQueue = operation.then(() => undefined, () => undefined);
+  return operation;
 }
 
-function summarizeAccountSession(session) {
-  const vault = accountVaultFromSession(session);
+function revokeVaultCredentialTasks() {
+  if (typeof projectTaskExecution !== 'undefined' && projectTaskExecution &&
+      projectTaskExecution.credentialMode === 'vault' &&
+      !projectTaskExecution.controller.signal.aborted) {
+    projectTaskExecution.controller.abort(projectTaskCancellationError('账号库已锁定，任务已安全停止。'));
+  }
+  if (typeof accountBatchPromise !== 'undefined' && accountBatchPromise) {
+    accountBatchCancelRequested = true;
+    if (accountBatchExecution && accountBatchExecution.credentialMode === 'vault' &&
+        !accountBatchExecution.controller.signal.aborted) {
+      accountBatchExecution.controller.abort(
+        projectTaskCancellationError('账号库已锁定，批量任务已安全停止。')
+      );
+    }
+  }
+}
+
+function lockAccountManagementSession(requestedEpoch) {
+  return queueAccountSessionMutation(async () => {
+    const stored = await chrome.storage.local.get(ACCOUNT_VAULT_LOCK_EPOCH_KEY);
+    const currentEpoch = Math.max(0, Number(stored[ACCOUNT_VAULT_LOCK_EPOCH_KEY]) || 0);
+    const requested = Number(requestedEpoch);
+    const nextEpoch = Number.isSafeInteger(requested) && requested >= 0
+      ? Math.max(currentEpoch, requested)
+      : currentEpoch + 1;
+    // Persist the revocation generation before touching session storage. If
+    // the service worker is interrupted afterwards, every consumer will still
+    // reject and erase plaintext from an older generation.
+    await chrome.storage.local.set({ [ACCOUNT_VAULT_LOCK_EPOCH_KEY]: nextEpoch });
+    await chrome.storage.session.remove(ACCOUNT_VAULT_SESSION_KEY);
+    revokeVaultCredentialTasks();
+    return nextEpoch;
+  });
+}
+
+function setAccountManagementSession(message) {
+  return queueAccountSessionMutation(async () => {
+    const [lockState, sessionState] = await Promise.all([
+      chrome.storage.local.get(ACCOUNT_VAULT_LOCK_EPOCH_KEY),
+      chrome.storage.session.get(ACCOUNT_VAULT_SESSION_KEY),
+    ]);
+    const currentEpoch = Math.max(0, Number(lockState[ACCOUNT_VAULT_LOCK_EPOCH_KEY]) || 0);
+    const incomingEpoch = Number(message && message.vaultLockEpoch);
+    if (!Number.isSafeInteger(incomingEpoch) || incomingEpoch < 0 || incomingEpoch !== currentEpoch) {
+      throw new Error('账号库已在其他页面锁定，请重新登录并解锁。');
+    }
+    const session = sanitizeAccountManagementSession(message);
+    const existing = sessionState[ACCOUNT_VAULT_SESSION_KEY];
+    if (existing && Number(existing.vaultLockEpoch) !== currentEpoch) {
+      await chrome.storage.session.remove(ACCOUNT_VAULT_SESSION_KEY);
+    }
+    if (!session.vaultSessionKey && existing &&
+        Number(existing.vaultLockEpoch) === currentEpoch &&
+        existing.vaultScopeId === session.vaultScopeId &&
+        /^[A-Za-z0-9+/]{43}=$/.test(String(existing.vaultSessionKey || ''))) {
+      session.vaultSessionKey = existing.vaultSessionKey;
+    }
+    if (!session.vaultSessionKey) {
+      throw new Error('账号库会话缺少解锁密钥，请重新输入主密码。');
+    }
+    await chrome.storage.session.set({ [ACCOUNT_VAULT_SESSION_KEY]: session });
+    return session;
+  });
+}
+
+function clearAccountManagementSession() {
+  return queueAccountSessionMutation(async () => {
+    const stored = await chrome.storage.local.get(ACCOUNT_VAULT_LOCK_EPOCH_KEY);
+    const nextEpoch = Math.max(0, Number(stored[ACCOUNT_VAULT_LOCK_EPOCH_KEY]) || 0) + 1;
+    await chrome.storage.local.set({ [ACCOUNT_VAULT_LOCK_EPOCH_KEY]: nextEpoch });
+    await chrome.storage.session.remove(ACCOUNT_VAULT_SESSION_KEY);
+    revokeVaultCredentialTasks();
+    return nextEpoch;
+  });
+}
+
+function readValidatedAccountSession(expectedVaultScopeId) {
+  return queueAccountSessionMutation(async () => {
+    const expected = sanitizeVaultScopeId(expectedVaultScopeId);
+    const [lockState, sessionState] = await Promise.all([
+      chrome.storage.local.get(ACCOUNT_VAULT_LOCK_EPOCH_KEY),
+      chrome.storage.session.get(ACCOUNT_VAULT_SESSION_KEY),
+    ]);
+    const session = sessionState && sessionState[ACCOUNT_VAULT_SESSION_KEY];
+    if (!session) return null;
+    const canonicalEpoch = Math.max(0, Number(lockState[ACCOUNT_VAULT_LOCK_EPOCH_KEY]) || 0);
+    const sessionEpoch = Number(session.vaultLockEpoch);
+    let actualScope = '';
+    try {
+      actualScope = sanitizeVaultScopeId(session.vaultScopeId);
+    } catch (error) {}
+    if (!Number.isSafeInteger(sessionEpoch) || sessionEpoch < 0 || sessionEpoch !== canonicalEpoch) {
+      await chrome.storage.session.remove(ACCOUNT_VAULT_SESSION_KEY);
+      throw new Error('账号库会话已锁定或失效，请重新解锁。');
+    }
+    if (actualScope !== expected) {
+      await chrome.storage.session.remove(ACCOUNT_VAULT_SESSION_KEY);
+      throw new Error('账号库属于其他工作区，请刷新并重新解锁。');
+    }
+    return session;
+  });
+}
+
+function sanitizeVaultScopeId(value) {
+  const vaultScopeId = batchText(value, 220);
+  if (!['team:https://tbdata.aizicheng.com', 'local:tbcontentdata'].includes(vaultScopeId)) {
+    throw new Error('账号库工作区范围无效，请刷新页面后重试。');
+  }
+  return vaultScopeId;
+}
+
+function accountVaultFromSession(value, expectedVaultScopeId) {
+  if (!value || typeof value !== 'object') return null;
+  const expected = expectedVaultScopeId == null || expectedVaultScopeId === ''
+    ? ''
+    : sanitizeVaultScopeId(expectedVaultScopeId);
+  const actual = value.vaultScopeId ? sanitizeVaultScopeId(value.vaultScopeId) : '';
+  if (expected && actual !== expected) {
+    throw new Error('账号库属于其他工作区，请刷新并重新解锁。');
+  }
+  if (expected && !actual) return null;
+  if (value.vault && typeof value.vault === 'object') return value.vault;
+  return !expected && Array.isArray(value.accounts) ? value : null;
+}
+
+function summarizeAccountSession(session, expectedVaultScopeId) {
+  const vault = accountVaultFromSession(session, expectedVaultScopeId);
   if (!vault || typeof vault !== 'object') {
     return { unlocked: false, totalEnabledAccounts: 0, storeGroups: [], stores: [] };
   }
@@ -4323,6 +4943,7 @@ function summarizeAccountSession(session) {
   });
   return {
     schema: 2,
+    vaultScopeId: batchText(session && session.vaultScopeId, 220),
     unlocked: true,
     unlockedAt: Number(session && session.unlockedAt) || Number(vault.unlockedAt) || Date.now(),
     totalEnabledAccounts: stores.reduce((total, store) => total + store.enabledAccountCount, 0),
@@ -4337,13 +4958,22 @@ function summarizeAccountSession(session) {
   };
 }
 
-function accountManagementSession(session) {
-  const vault = accountVaultFromSession(session);
-  const masterPassword = String(session && session.masterPassword || '');
-  if (!vault || masterPassword.length < 8) return null;
+function accountManagementSession(session, expectedVaultScopeId, expectedVaultFingerprint) {
+  if (!session || typeof session !== 'object') return null;
+  const expectedFingerprint = String(expectedVaultFingerprint || '').trim().toLowerCase();
+  const actualFingerprint = String(session.vaultFingerprint || '').trim().toLowerCase();
+  const vaultSessionKey = String(session.vaultSessionKey || '').trim();
+  if (!/^[a-f0-9]{64}$/.test(expectedFingerprint) || actualFingerprint !== expectedFingerprint ||
+      !/^[A-Za-z0-9+/]{43}=$/.test(vaultSessionKey)) return null;
+  const vault = accountVaultFromSession(session, expectedVaultScopeId);
+  if (!vault) return null;
   return {
-    vault,
-    masterPassword,
+    schema: 1,
+    vaultScopeId: sanitizeVaultScopeId(session.vaultScopeId),
+    vaultLockEpoch: Number(session.vaultLockEpoch),
+    vaultFingerprint: actualFingerprint,
+    vaultSessionKey,
+    vault: sanitizeAccountSessionVault(vault),
     unlockedAt: Number(session.unlockedAt) || Date.now(),
   };
 }
@@ -4354,7 +4984,8 @@ function accountSessionBatchAccount(vault, account) {
   const accountGroup = vault.accountGroups.find((item) => item.id === account.accountGroupId);
   return {
     id: account.id,
-    name: account.name,
+    label: account.label,
+    name: account.label || account.name,
     platform: normalizeBatchAccountPlatform(account.platform),
     storeId: store && store.id || account.storeId,
     storeName: store && store.name || account.name,
@@ -4371,6 +5002,7 @@ function accountSessionBatchAccount(vault, account) {
 function prepareAccountBatchFromSession(vault, request, previousStatus) {
   if (!vault || typeof vault !== 'object') throw new Error('\u8d26\u53f7\u5e93\u5c1a\u672a\u5728\u672c\u6b21 Chrome \u4f1a\u8bdd\u89e3\u9501。');
   const source = request && typeof request === 'object' ? request : {};
+  const vaultScopeId = source.vaultScopeId ? sanitizeVaultScopeId(source.vaultScopeId) : '';
   const taskType = 'report';
   const resume = source.resume === true;
   let accounts = [];
@@ -4383,6 +5015,9 @@ function prepareAccountBatchFromSession(vault, request, previousStatus) {
   if (resume) {
     const status = previousStatus && typeof previousStatus === 'object' ? previousStatus : {};
     if (!status.paused || status.taskType !== taskType) throw new Error('\u5f53\u524d\u6ca1\u6709\u53ef\u7ee7\u7eed\u7684\u672c\u7c7b\u4efb\u52a1。');
+    if (vaultScopeId && status.vaultScopeId !== vaultScopeId) {
+      throw new Error('暂停任务属于其他账号库工作区，不能继续。');
+    }
     const statusAccountIds = Array.isArray(status.accountIds) ? status.accountIds : [];
     if (statusAccountIds.length > 100) throw new Error('暂停任务的账号数量超过 100 个，无法继续。');
     const byId = new Map(vault.accounts.map((account) => [account.id, account]));
@@ -4458,6 +5093,7 @@ function prepareAccountBatchFromSession(vault, request, previousStatus) {
     startedAt,
     taskType,
     platforms,
+    ...(vaultScopeId ? { vaultScopeId } : {}),
   };
 }
 
@@ -4488,15 +5124,27 @@ async function signedDingTalkWebhook(config) {
   return url.toString();
 }
 
-async function sendDingTalkNotification(config, text) {
+async function sendDingTalkNotification(config, text, options) {
+  const notificationOptions = options && typeof options === 'object' ? options : {};
+  const signal = notificationOptions.signal;
+  if (signal) throwIfProjectTaskCancelled(signal);
   const normalized = sanitizeNotificationConfig(config);
   if (!normalized.webhook) return { ok: false, skipped: true, message: '\u672a\u914d\u7f6e\u9489\u9489\u673a\u5668\u4eba。' };
-  const response = await fetch(await signedDingTalkWebhook(normalized), {
+  const webhookRun = signedDingTalkWebhook(normalized);
+  const webhook = await (signal ? raceWithProjectTaskSignal(webhookRun, signal) : webhookRun);
+  if (signal) throwIfProjectTaskCancelled(signal);
+  const requestOptions = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ msgtype: 'text', text: { content: String(text || '').slice(0, 1800) } }),
-  });
-  const body = await response.json().catch(() => ({}));
+  };
+  if (signal) requestOptions.signal = signal;
+  const fetchRun = fetch(webhook, requestOptions);
+  const response = await (signal ? raceWithProjectTaskSignal(fetchRun, signal) : fetchRun);
+  if (signal) throwIfProjectTaskCancelled(signal);
+  const bodyRun = response.json().catch(() => ({}));
+  const body = await (signal ? raceWithProjectTaskSignal(bodyRun, signal) : bodyRun);
+  if (signal) throwIfProjectTaskCancelled(signal);
   if (!response.ok || Number(body.errcode || 0) !== 0) {
     throw new Error('\u9489\u9489\u63d0\u9192\u53d1\u9001\u5931\u8d25：' + (body.errmsg || 'HTTP ' + response.status));
   }
@@ -4511,16 +5159,18 @@ async function ensureXingheContentScript(tabId) {
   }
 }
 
-async function readXingheState(tabId) {
+async function readXingheState(tabId, signal) {
   await ensureXingheContentScript(tabId);
   const frames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null);
   const targets = Array.isArray(frames) && frames.length ? frames : [{ frameId: 0 }];
   const observations = (await Promise.all(targets.map(async (frame) => {
     try {
-      const response = await chrome.tabs.sendMessage(
+      const response = await sendTabMessageWithRetry(
         tabId,
         { type: 'XINGHE_GET_STATE' },
-        { frameId: Number(frame.frameId) || 0 }
+        5000,
+        { frameId: Number(frame.frameId) || 0 },
+        signal
       );
       if (!response || response.ok === false || !response.state) return null;
       return Object.assign({}, response.state, {
@@ -4550,27 +5200,29 @@ async function readXingheState(tabId) {
   return observations[0];
 }
 
-async function waitForXingheState(tabId, predicate, timeoutMs) {
+async function waitForXingheState(tabId, predicate, timeoutMs, signal) {
   const deadline = Date.now() + (Number(timeoutMs) || 90000);
   let lastState = null;
   let lastError = null;
   while (Date.now() < deadline) {
+    if (signal) throwIfProjectTaskCancelled(signal);
     try {
       const tab = await chrome.tabs.get(tabId);
       if (tab.status === 'complete') {
-        lastState = await readXingheState(tabId);
+        lastState = await readXingheState(tabId, signal);
         if (!predicate || predicate(lastState)) return lastState;
       }
     } catch (error) {
       lastError = error;
     }
-    await waitMilliseconds(800);
+    await (signal ? waitMillisecondsWithSignal(800, signal) : waitMilliseconds(800));
   }
   if (lastError && !lastState) throw lastError;
   return lastState || { kind: 'loading', message: '\u661f\u6cb3\u9875\u9762\u52a0\u8f7d\u8d85\u65f6。' };
 }
 
-async function prepareXingheTab() {
+async function prepareXingheTab(signal) {
+  if (signal) throwIfProjectTaskCancelled(signal);
   const tabId = await openOrReuseTab(
     BUSINESS_DEFENSE_XINGHE_URL,
     ['*://adstar.alimama.com/*'],
@@ -4578,46 +5230,59 @@ async function prepareXingheTab() {
   );
   const tab = await chrome.tabs.get(tabId);
   if (!tab.url || !String(tab.url).startsWith('https://adstar.alimama.com/')) {
+    if (signal) throwIfProjectTaskCancelled(signal);
     await chrome.tabs.update(tabId, { url: BUSINESS_DEFENSE_XINGHE_URL, active: false });
   }
-  await waitTabComplete(tabId, 45000);
+  await waitTabComplete(tabId, 45000, signal);
+  if (signal) throwIfProjectTaskCancelled(signal);
   await ensureXingheContentScript(tabId);
+  if (signal) throwIfProjectTaskCancelled(signal);
   return tabId;
 }
 
-async function resolveXinghePendingState(tabId, state, timeoutMs) {
+async function resolveXinghePendingState(tabId, state, timeoutMs, signal) {
   if (!state || state.kind !== 'sessionPending') return state;
   return waitForXingheState(
     tabId,
     (item) => item && !['loading', 'sessionPending'].includes(item.kind),
-    Number(timeoutMs) || 15000
+    Number(timeoutMs) || 15000,
+    signal
   );
 }
 
-async function logoutXinghe(tabId) {
+async function logoutXinghe(tabId, signal) {
   let lastState = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (signal) throwIfProjectTaskCancelled(signal);
     try {
       await ensureXingheContentScript(tabId);
-      const response = await chrome.tabs.sendMessage(
+      if (signal) throwIfProjectTaskCancelled(signal);
+      const response = await sendTabMessageWithRetry(
         tabId,
         { type: 'XINGHE_LOGOUT' },
-        { frameId: 0 }
+        10000,
+        { frameId: 0 },
+        signal
       );
       if (!response || response.ok === false) {
         throw new Error(response && response.message || '\u661f\u6cb3\u9000\u51fa\u6309\u94ae\u672a\u54cd\u5e94。');
       }
     } catch (error) {
+      if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
       await chrome.tabs.update(tabId, { url: BUSINESS_DEFENSE_XINGHE_LOGOUT_URL, active: false });
     }
-    await waitMilliseconds(1000);
-    try { await waitTabComplete(tabId, 30000); } catch (error) {}
+    await (signal ? waitMillisecondsWithSignal(1000, signal) : waitMilliseconds(1000));
+    try { await waitTabComplete(tabId, 30000, signal); } catch (error) {
+      if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
+    }
+    if (signal) throwIfProjectTaskCancelled(signal);
     lastState = await waitForXingheState(
       tabId,
       (item) => item && item.kind !== 'loading',
-      20000
+      20000,
+      signal
     );
-    lastState = await resolveXinghePendingState(tabId, lastState, 15000);
+    lastState = await resolveXinghePendingState(tabId, lastState, 15000, signal);
     if (lastState && lastState.kind === 'login') return;
     if (lastState && lastState.kind === 'verification') {
       throw batchError('VERIFICATION_REQUIRED', lastState.message || '\u661f\u6cb3\u9000\u51fa\u65f6\u9700\u8981\u4eba\u5de5\u9a8c\u8bc1。', { tabId });
@@ -4632,23 +5297,30 @@ async function logoutXinghe(tabId) {
 function checkXingheBlockingState(state, tabId) {
   if (!state) return;
   if (state.kind === 'verification') {
-    throw batchError('VERIFICATION_REQUIRED', state.message || '\u661f\u6cb3\u9700\u8981\u4eba\u5de5\u9a8c\u8bc1。', { tabId });
+    throw batchError('VERIFICATION_REQUIRED', '\u661f\u6cb3\u9700\u8981\u4eba\u5de5\u9a8c\u8bc1。', { tabId });
   }
   if (state.kind === 'loginError') {
-    throw batchError('LOGIN_FAILED', state.message || '\u661f\u6cb3\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef。', { tabId });
+    throw batchError('LOGIN_FAILED', '\u661f\u6cb3\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef。', { tabId });
   }
 }
 
 async function loginXingheAccount(account, options) {
-  const tabId = await prepareXingheTab();
   const resume = Boolean(options && options.resume);
-  let state = await waitForXingheState(tabId, (item) => item && item.kind !== 'loading', 45000);
-  state = await resolveXinghePendingState(tabId, state, 20000);
+  const signal = options && options.signal;
+  const assertCredentialAuthorization = options &&
+    typeof options.assertCredentialAuthorization === 'function'
+    ? options.assertCredentialAuthorization
+    : null;
+  const tabId = await prepareXingheTab(signal);
+  if (signal) throwIfProjectTaskCancelled(signal);
+  let state = await waitForXingheState(tabId, (item) => item && item.kind !== 'loading', 45000, signal);
+  state = await resolveXinghePendingState(tabId, state, 20000, signal);
+  checkXingheBlockingState(state, tabId);
   if (!resume && (!state || state.kind !== 'login')) {
-    await logoutXinghe(tabId);
+    await logoutXinghe(tabId, signal);
     // Account switches made back-to-back are more likely to trigger platform risk controls.
-    await waitMilliseconds(1800);
-    state = await waitForXingheState(tabId, (item) => item && item.kind !== 'loading', 45000);
+    await (signal ? waitMillisecondsWithSignal(1800, signal) : waitMilliseconds(1800));
+    state = await waitForXingheState(tabId, (item) => item && item.kind !== 'loading', 45000, signal);
   }
   checkXingheBlockingState(state, tabId);
 
@@ -4660,18 +5332,29 @@ async function loginXingheAccount(account, options) {
     const selection = await sendTabMessageWithRetry(tabId, {
       type: 'XINGHE_SELECT_ROLE',
       roleKeyword: account.roleKeyword,
-    }, 15000, { frameId: Number(state.frameId) || 0 });
+    }, 15000, { frameId: Number(state.frameId) || 0 }, signal);
     if (!selection || selection.ok === false) {
-      throw batchError('ROLE_NOT_FOUND', selection && selection.message || '\u661f\u6cb3\u767b\u5f55\u8eab\u4efd\u9009\u62e9\u5931\u8d25。');
+      throw batchError('ROLE_NOT_FOUND', '\u661f\u6cb3\u767b\u5f55\u8eab\u4efd\u9009\u62e9\u5931\u8d25。');
     }
   } else if (state.kind === 'login') {
+    if (!assertCredentialAuthorization) {
+      throw projectTaskCancellationError('无法实时确认账号库授权，已拒绝提交星河凭据。');
+    }
+    const authorizeCredentialSend = async () => {
+      try {
+        await assertCredentialAuthorization();
+      } catch (error) {
+        throw projectTaskCancellationError(error);
+      }
+      if (signal) throwIfProjectTaskCancelled(signal);
+    };
     const submission = await sendTabMessageWithRetry(tabId, {
       type: 'XINGHE_FILL_LOGIN',
       username: account.username,
       password: account.password,
-    }, 15000, { frameId: Number(state.frameId) || 0 });
+    }, 15000, { frameId: Number(state.frameId) || 0 }, signal, authorizeCredentialSend);
     if (!submission || submission.ok === false) {
-      throw batchError('LOGIN_FORM_FAILED', submission && submission.message || '\u661f\u6cb3\u5bc6\u7801\u767b\u5f55\u8868\u5355\u63d0\u4ea4\u5931\u8d25。');
+      throw batchError('LOGIN_FORM_FAILED', '\u661f\u6cb3\u8d26\u53f7\u5bc6\u7801\u8868\u5355\u63d0\u4ea4\u5931\u8d25。');
     }
   }
 
@@ -4679,18 +5362,19 @@ async function loginXingheAccount(account, options) {
   let sessionPendingSince = null;
   let loginPageSince = null;
   while (Date.now() < deadline) {
-    state = await waitForXingheState(tabId, (item) => item && item.kind !== 'loading', 15000);
+    if (signal) throwIfProjectTaskCancelled(signal);
+    state = await waitForXingheState(tabId, (item) => item && item.kind !== 'loading', 15000, signal);
     checkXingheBlockingState(state, tabId);
     if (state.kind === 'rolePicker') {
       loginPageSince = null;
       const selection = await sendTabMessageWithRetry(tabId, {
         type: 'XINGHE_SELECT_ROLE',
         roleKeyword: account.roleKeyword,
-      }, 15000, { frameId: Number(state.frameId) || 0 });
+      }, 15000, { frameId: Number(state.frameId) || 0 }, signal);
       if (!selection || selection.ok === false) {
-        throw batchError('ROLE_NOT_FOUND', selection && selection.message || '\u661f\u6cb3\u767b\u5f55\u8eab\u4efd\u9009\u62e9\u5931\u8d25。');
+        throw batchError('ROLE_NOT_FOUND', '\u661f\u6cb3\u767b\u5f55\u8eab\u4efd\u9009\u62e9\u5931\u8d25。');
       }
-      await waitMilliseconds(700);
+      await (signal ? waitMillisecondsWithSignal(700, signal) : waitMilliseconds(700));
       continue;
     }
     if (state.kind === 'loggedIn' || state.kind === 'noPermission') {
@@ -4702,7 +5386,7 @@ async function loginXingheAccount(account, options) {
       if (Date.now() - sessionPendingSince >= 7000) {
         return { tabId, state: 'loggedIn', noPermission: false };
       }
-      await waitMilliseconds(800);
+      await (signal ? waitMillisecondsWithSignal(800, signal) : waitMilliseconds(800));
       continue;
     }
     sessionPendingSince = null;
@@ -4711,13 +5395,590 @@ async function loginXingheAccount(account, options) {
       if (Date.now() - loginPageSince >= 15000) {
         throw batchError('LOGIN_FAILED', '\u661f\u6cb3\u767b\u5f55\u540e\u6301\u7eed\u505c\u7559\u5728\u5bc6\u7801\u9875，\u8bf7\u68c0\u67e5\u8d26\u53f7\u5bc6\u7801。');
       }
-      await waitMilliseconds(800);
+      await (signal ? waitMillisecondsWithSignal(800, signal) : waitMilliseconds(800));
       continue;
     }
     loginPageSince = null;
-    await waitMilliseconds(800);
+    await (signal ? waitMillisecondsWithSignal(800, signal) : waitMilliseconds(800));
   }
   throw batchError('LOGIN_TIMEOUT', '\u661f\u6cb3\u767b\u5f55\u8d85\u65f6。');
+}
+
+async function queryUniqueXhsLoginTarget(platform) {
+  const targetUrl = XHS_PLATFORM_ENTRY_URLS[platform];
+  if (!XhsAccountLogin.isExpectedPlatformUrl(platform, targetUrl)) {
+    throw new Error('小红书平台登录地址无效。');
+  }
+  const origin = new URL(targetUrl).origin;
+  const tabs = (await chrome.tabs.query({ url: origin + '/*' }))
+    .filter((tab) => tab && tab.id && XhsAccountLogin.isPlatformOriginUrl(platform, tab.url));
+  if (tabs.length > 1) {
+    throw batchError('XHS_TAB_AMBIGUOUS', '检测到多个' + (platform === 'pgy' ? '蒲公英' : '聚光') +
+      '标签页。请只保留一个后重试。');
+  }
+  return tabs[0] || null;
+}
+
+async function ensureXhsLoginContentScript(tabId) {
+  try {
+    await injectScripts(tabId, [{ files: ['xiaohongshu-login-content.js'], allFrames: true }]);
+  } catch (error) {
+    if (!/Cannot access|No tab|closed|frame|document/i.test(String(error && error.message || error))) throw error;
+  }
+}
+
+async function readXhsLoginState(tabId, platform, signal) {
+  await ensureXhsLoginContentScript(tabId);
+  const frames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null);
+  let targets = Array.isArray(frames) && frames.length ? frames : null;
+  if (!targets) {
+    const tab = await chrome.tabs.get(tabId);
+    targets = [{ frameId: 0, url: tab && tab.url }];
+  }
+  targets = targets.filter((frame) =>
+    XhsAccountLogin.isAllowedDocumentUrl(frame && frame.url) &&
+    XhsAccountLogin.isAllowedPlatformDocumentUrl(platform, frame && frame.url));
+  const observations = (await Promise.all(targets.map(async (frame) => {
+    try {
+      const documentId = batchText(frame && frame.documentId, 160);
+      const messageTarget = documentId
+        ? { documentId }
+        : { frameId: Number(frame.frameId) || 0 };
+      const response = await sendTabMessageWithRetry(
+        tabId,
+        { type: 'XHS_LOGIN_GET_STATE' },
+        5000,
+        messageTarget,
+        signal
+      );
+      if (!response || response.ok === false || !response.state) return null;
+      const href = batchText(response.href, 1000);
+      if (!XhsAccountLogin.isAllowedPlatformDocumentUrl(platform, href) ||
+          !XhsAccountLogin.sameExactOrigin(frame.url, href)) return null;
+      const kind = batchText(response.state.kind, 40);
+      if (!['verification', 'loginError', 'login', 'entry', 'loggedIn', 'productReady', 'unsupported']
+        .includes(kind)) return null;
+      return {
+        kind,
+        frameId: Number(frame.frameId) || 0,
+        documentId,
+        href,
+      };
+    } catch (error) {
+      return null;
+    }
+  }))).filter(Boolean);
+  if (!observations.length) throw new Error('小红书登录页未返回可识别状态。');
+  const priority = (state) => {
+    const topFrame = state.frameId === 0;
+    if (state.kind === 'verification') return topFrame ? 220 : 210;
+    if (state.kind === 'loginError') return topFrame ? 210 : 200;
+    if (state.kind === 'login') return topFrame ? 190 : 180;
+    if (state.kind === 'entry') return topFrame ? 170 : 160;
+    if (state.kind === 'loggedIn') return topFrame ? 150 : 140;
+    if (state.kind === 'productReady') return topFrame ? 130 : 125;
+    if (state.kind === 'unsupported') return topFrame ? 120 : 110;
+    return 0;
+  };
+  observations.sort((left, right) => priority(right) - priority(left));
+  return observations[0];
+}
+
+async function waitForXhsLoginState(tabId, platform, predicate, timeoutMs, signal) {
+  const deadline = Date.now() + (Number(timeoutMs) || 90000);
+  let lastState = null;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    if (signal) throwIfProjectTaskCancelled(signal);
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab && tab.status === 'complete') {
+        lastState = await readXhsLoginState(tabId, platform, signal);
+        if (!predicate || predicate(lastState, tab)) return lastState;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await (signal ? waitMillisecondsWithSignal(700, signal) : waitMilliseconds(700));
+  }
+  if (lastError && !lastState) throw new Error('小红书登录页状态读取失败。');
+  return lastState || { kind: 'loading', message: '小红书登录页加载超时。' };
+}
+
+function checkXhsLoginBlockingState(state, tabId) {
+  if (!state) return;
+  if (state.kind === 'verification') {
+    throw batchError('VERIFICATION_REQUIRED', '小红书登录需要人工安全验证。', { tabId });
+  }
+  if (state.kind === 'loginError') {
+    throw batchError('LOGIN_FAILED', '小红书账号或密码错误。', { tabId });
+  }
+  if (state.kind === 'unsupported') {
+    throw batchError('LOGIN_FORM_FAILED', '小红书登录页未提供账号密码表单。', { tabId });
+  }
+}
+
+async function confirmXhsPlatformSession(tabId, platform, signal) {
+  if (signal) throwIfProjectTaskCancelled(signal);
+  let tab = await chrome.tabs.get(tabId);
+  if (!XhsAccountLogin.isPlatformOriginUrl(platform, tab && tab.url)) return null;
+  await waitTabComplete(tabId, 45000, signal).catch((error) => {
+    if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
+  });
+  if (signal) throwIfProjectTaskCancelled(signal);
+  let state = null;
+  try {
+    state = await readXhsLoginState(tabId, platform, signal);
+  } catch (error) {
+    return null;
+  }
+  if (signal) throwIfProjectTaskCancelled(signal);
+  checkXhsLoginBlockingState(state, tabId);
+  if (!state || !['loggedIn', 'productReady'].includes(state.kind)) return null;
+  if (!XhsAccountLogin.isPlatformOriginUrl(platform, state.href)) return null;
+  tab = await chrome.tabs.get(tabId);
+  if (!XhsAccountLogin.isPlatformOriginUrl(platform, tab && tab.url)) return null;
+  return {
+    tabId,
+    state: state.kind === 'loggedIn' ? 'loggedIn' : 'readyForIdentityCheck',
+    platform,
+  };
+}
+
+async function submitXhsPasswordLogin(tabId, platform, account, options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const signal = source.signal;
+  const assertCredentialAuthorization = typeof source.assertCredentialAuthorization === 'function'
+    ? source.assertCredentialAuthorization
+    : null;
+  let state = await waitForXhsLoginState(
+    tabId,
+    platform,
+    (item) => item && item.kind !== 'loading',
+    45000,
+    signal
+  );
+  checkXhsLoginBlockingState(state, tabId);
+  if (state.kind === 'loggedIn') {
+    const confirmed = await confirmXhsPlatformSession(tabId, platform, signal);
+    if (confirmed) return confirmed;
+    throw batchError('LOGIN_FORM_FAILED', '小红书平台页的登录状态未通过确认。');
+  }
+  if (state.kind === 'entry') {
+    const entryTarget = state.documentId
+      ? { documentId: state.documentId }
+      : { frameId: Number(state.frameId) || 0 };
+    const opened = await sendTabMessageWithRetry(tabId, {
+      type: 'XHS_LOGIN_OPEN_ACCOUNT',
+    }, 15000, entryTarget, signal);
+    if (!opened || opened.ok === false) {
+      throw batchError('LOGIN_FORM_FAILED', '无法打开小红书账号登录表单。');
+    }
+    state = await waitForXhsLoginState(
+      tabId,
+      platform,
+      (item) => item && item.kind !== 'loading',
+      30000,
+      signal
+    );
+    checkXhsLoginBlockingState(state, tabId);
+    if (state.kind === 'loggedIn') {
+      const confirmed = await confirmXhsPlatformSession(tabId, platform, signal);
+      if (confirmed) return confirmed;
+      throw batchError('LOGIN_FORM_FAILED', '小红书平台页的登录状态未通过确认。');
+    }
+  }
+  if (state.kind !== 'login') {
+    throw batchError('LOGIN_FORM_FAILED', '小红书登录页未进入账号密码模式。');
+  }
+  if (!assertCredentialAuthorization) {
+    throw projectTaskCancellationError('无法实时确认账号库授权，已拒绝提交小红书凭据。');
+  }
+  const credentialTarget = {};
+  const authorizeCredentialSend = async () => {
+    try {
+      await assertCredentialAuthorization();
+    } catch (error) {
+      throw projectTaskCancellationError(error);
+    }
+    if (signal) throwIfProjectTaskCancelled(signal);
+    const freshState = await readXhsLoginState(tabId, platform, signal);
+    checkXhsLoginBlockingState(freshState, tabId);
+    if (!freshState || freshState.kind !== 'login' ||
+        !XhsAccountLogin.isAllowedLoginUrl(freshState.href)) {
+      throw batchError('LOGIN_FORM_FAILED', '小红书登录文档已变化，已拒绝提交账号密码。');
+    }
+    const documentId = batchText(freshState.documentId, 160);
+    if (!documentId) {
+      throw batchError('LOGIN_FORM_FAILED', '无法绑定小红书登录文档，已拒绝提交账号密码。');
+    }
+    delete credentialTarget.frameId;
+    credentialTarget.documentId = documentId;
+    state = freshState;
+  };
+  const submission = await sendTabMessageWithRetry(tabId, {
+    type: 'XHS_LOGIN_FILL_PASSWORD',
+    username: account.username,
+    password: account.password,
+  }, 15000, credentialTarget, signal, authorizeCredentialSend);
+  if (!submission || submission.ok === false) {
+    const allowedCodes = ['VERIFICATION_REQUIRED', 'LOGIN_FAILED', 'LOGIN_FORM_FAILED'];
+    const code = allowedCodes.includes(submission && submission.code)
+      ? submission.code
+      : 'LOGIN_FORM_FAILED';
+    const messages = {
+      VERIFICATION_REQUIRED: '小红书登录需要人工安全验证。',
+      LOGIN_FAILED: '小红书账号或密码错误。',
+      LOGIN_FORM_FAILED: '小红书账号密码表单提交失败。',
+    };
+    const error = batchError(code, messages[code], { tabId, platform });
+    if (code === 'VERIFICATION_REQUIRED') error.credentialSubmitted = true;
+    throw error;
+  }
+
+  const deadline = Date.now() + 120000;
+  while (Date.now() < deadline) {
+    if (signal) throwIfProjectTaskCancelled(signal);
+    const tab = await chrome.tabs.get(tabId);
+    if (XhsAccountLogin.isPlatformOriginUrl(platform, tab && tab.url)) {
+      const confirmed = await confirmXhsPlatformSession(tabId, platform, signal);
+      if (confirmed) return Object.assign({}, confirmed, { credentialSubmitted: true });
+    }
+    try {
+      state = await readXhsLoginState(tabId, platform, signal);
+      checkXhsLoginBlockingState(state, tabId);
+    } catch (error) {
+      if (error && ['VERIFICATION_REQUIRED', 'LOGIN_FAILED', 'LOGIN_FORM_FAILED'].includes(error.code)) {
+        if (error.code === 'VERIFICATION_REQUIRED') error.credentialSubmitted = true;
+        throw error;
+      }
+    }
+    await (signal ? waitMillisecondsWithSignal(800, signal) : waitMilliseconds(800));
+  }
+  throw batchError('LOGIN_TIMEOUT', '小红书登录超时。');
+}
+
+async function ensureXhsPlatformSession(platform, account, options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const signal = source.signal;
+  const taskSessionCoordinator = source.taskSessionCoordinator &&
+    typeof source.taskSessionCoordinator === 'object'
+    ? source.taskSessionCoordinator
+    : null;
+  if (signal) throwIfProjectTaskCancelled(signal);
+  const targetUrl = XHS_PLATFORM_ENTRY_URLS[platform];
+  if (!XhsAccountLogin.isExpectedPlatformUrl(platform, targetUrl)) {
+    throw new Error('小红书平台登录地址无效。');
+  }
+  const taskOwnedTabId = Number(source.taskOwnedTabId);
+  const resumesTaskTab = Number.isInteger(taskOwnedTabId) && taskOwnedTabId > 0;
+  let tabId = taskOwnedTabId;
+  if (resumesTaskTab) {
+    const taskTab = await chrome.tabs.get(tabId);
+    if (!taskTab || !XhsAccountLogin.isAllowedPlatformDocumentUrl(platform, taskTab.url)) {
+      throw batchError(
+        'XHS_LOGIN_TAB_UNTRUSTED',
+        '小红书验证标签页已关闭或离开对应官方平台，已停止登录。',
+        { tabId, platform }
+      );
+    }
+  } else {
+    const target = await queryUniqueXhsLoginTarget(platform);
+    if (signal) throwIfProjectTaskCancelled(signal);
+    tabId = target && target.id || (await chrome.tabs.create({ url: targetUrl, active: false })).id;
+    if (signal) throwIfProjectTaskCancelled(signal);
+    if (target) await chrome.tabs.update(tabId, { url: targetUrl, active: false });
+  }
+  await waitTabComplete(tabId, 45000, signal);
+  if (signal) throwIfProjectTaskCancelled(signal);
+  const settledTab = await chrome.tabs.get(tabId);
+  if (!settledTab || !XhsAccountLogin.isAllowedPlatformDocumentUrl(platform, settledTab.url)) {
+    throw batchError(
+      'XHS_LOGIN_TAB_UNTRUSTED',
+      '小红书登录标签页离开了对应官方平台，已停止登录。',
+      { tabId, platform }
+    );
+  }
+  const confirmed = await confirmXhsPlatformSession(tabId, platform, signal);
+  if (confirmed) {
+    if (source.allowExistingSession === true ||
+        (taskSessionCoordinator && taskSessionCoordinator.established === true)) {
+      return Object.assign({}, confirmed, { taskSessionReused: true });
+    }
+    const sharedSubmission = taskSessionCoordinator &&
+      taskSessionCoordinator.credentialSubmission;
+    if (sharedSubmission) {
+      try {
+        await sharedSubmission;
+      } catch (error) {
+        if (error && ['PROJECT_TASK_CANCELLED', 'VERIFICATION_REQUIRED'].includes(error.code)) {
+          throw error;
+        }
+      }
+      if (taskSessionCoordinator.established === true) {
+        return Object.assign({}, confirmed, { taskSessionReused: true });
+      }
+    }
+    throw batchError(
+      'XHS_EXISTING_SESSION_UNVERIFIED',
+      '账号库模式检测到' + (platform === 'pgy' ? '蒲公英' : '聚光') +
+        '已有登录态，但无法确认它属于所选账号。请先在平台退出当前账号后重试，' +
+        '或改用“复用当前 Chrome 登录态”。',
+      { tabId, platform }
+    );
+  }
+  if (signal) throwIfProjectTaskCancelled(signal);
+  const submitAndRememberTaskSession = async () => {
+    try {
+      const result = await submitXhsPasswordLogin(tabId, platform, account, source);
+      if (taskSessionCoordinator && result &&
+          (result.credentialSubmitted === true || result.taskSessionReused === true)) {
+        taskSessionCoordinator.established = true;
+      }
+      return result;
+    } catch (error) {
+      if (taskSessionCoordinator && error && error.credentialSubmitted === true) {
+        taskSessionCoordinator.established = true;
+      }
+      throw error;
+    }
+  };
+  const refreshSharedTaskSession = async () => {
+    if (!taskSessionCoordinator || taskSessionCoordinator.established !== true) return null;
+    if (signal) throwIfProjectTaskCancelled(signal);
+    await chrome.tabs.update(tabId, { url: targetUrl, active: false });
+    await waitTabComplete(tabId, 45000, signal);
+    if (signal) throwIfProjectTaskCancelled(signal);
+    const refreshedTab = await chrome.tabs.get(tabId);
+    if (!refreshedTab || !XhsAccountLogin.isAllowedPlatformDocumentUrl(platform, refreshedTab.url)) {
+      throw batchError(
+        'XHS_LOGIN_TAB_UNTRUSTED',
+        '小红书登录标签页离开了对应官方平台，已停止登录。',
+        { tabId, platform }
+      );
+    }
+    const sharedSession = await confirmXhsPlatformSession(tabId, platform, signal);
+    return sharedSession
+      ? Object.assign({}, sharedSession, { taskSessionReused: true })
+      : null;
+  };
+
+  if (!taskSessionCoordinator) return submitAndRememberTaskSession();
+  if (taskSessionCoordinator.established === true) {
+    const reused = await refreshSharedTaskSession();
+    if (reused) return reused;
+  }
+
+  const inFlightSubmission = taskSessionCoordinator.credentialSubmission;
+  if (inFlightSubmission) {
+    try {
+      await inFlightSubmission;
+    } catch (error) {
+      if (error && ['PROJECT_TASK_CANCELLED', 'VERIFICATION_REQUIRED'].includes(error.code)) {
+        throw error;
+      }
+    }
+    if (taskSessionCoordinator.established === true) {
+      const reused = await refreshSharedTaskSession();
+      if (reused) return reused;
+    }
+    // The sibling's platform-specific login failed or did not establish shared SSO.
+    // Continue this platform independently so one failure never poisons the other.
+    return submitAndRememberTaskSession();
+  }
+
+  const ownSubmission = submitAndRememberTaskSession();
+  taskSessionCoordinator.credentialSubmission = ownSubmission;
+  try {
+    return await ownSubmission;
+  } finally {
+    if (taskSessionCoordinator.credentialSubmission === ownSubmission) {
+      taskSessionCoordinator.credentialSubmission = null;
+    }
+  }
+}
+
+const PLATFORM_SESSION_PREPARE_TIMEOUTS_MS = Object.freeze({
+  // 星河账号库模式会先退出既有会话再重新登录；保留完整的正常慢路径余量。
+  adstar: 10 * 60 * 1000,
+  pgy: 5 * 60 * 1000,
+  juguang: 5 * 60 * 1000,
+});
+const PLATFORM_SESSION_AUTHORIZATION_TIMEOUT_MS = 15 * 1000;
+
+function platformSessionPreparationTimeoutMs(platform, options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const configured = source.sessionPreparationTimeoutMs;
+  const candidate = configured && typeof configured === 'object'
+    ? Number(configured[platform])
+    : Number(configured);
+  if (Number.isFinite(candidate) && candidate > 0) {
+    return Math.max(1, Math.floor(candidate));
+  }
+  return PLATFORM_SESSION_PREPARE_TIMEOUTS_MS[platform] || 5 * 60 * 1000;
+}
+
+function platformSessionPreparationTimeoutError(platform, timeoutMs) {
+  const names = { adstar: '星河', pgy: '蒲公英', juguang: '聚光' };
+  const error = new Error((names[platform] || '平台') + '登录准备超时，请稍后重试。');
+  error.code = 'SESSION_PREPARE_TIMEOUT';
+  error.platform = platform;
+  error.timeoutMs = timeoutMs;
+  error.retryable = false;
+  return error;
+}
+
+function runPlatformSessionPreparation(platform, operation, options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const parentSignal = source.signal;
+  const timeoutMs = platformSessionPreparationTimeoutMs(platform, source);
+  if (parentSignal) throwIfProjectTaskCancelled(parentSignal);
+  const controller = new AbortController();
+  const operationSignal = controller.signal;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    const cleanup = () => {
+      if (timer !== null) clearTimeout(timer);
+      if (parentSignal) parentSignal.removeEventListener('abort', abortFromParent);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const abortFromParent = () => {
+      const parentReason = parentSignal && parentSignal.reason;
+      const reason = parentReason && (
+        parentReason.code === 'VERIFICATION_REQUIRED' ||
+        parentReason.code === 'PROJECT_TASK_CANCELLED'
+      )
+        ? parentReason
+        : projectTaskCancellationError(parentReason);
+      if (!operationSignal.aborted) controller.abort(reason);
+      finish(reject, reason);
+    };
+
+    if (parentSignal) parentSignal.addEventListener('abort', abortFromParent, { once: true });
+    timer = setTimeout(() => {
+      const error = platformSessionPreparationTimeoutError(platform, timeoutMs);
+      if (!operationSignal.aborted) controller.abort(error);
+      finish(reject, error);
+    }, timeoutMs);
+
+    let pending;
+    try {
+      pending = operation(operationSignal);
+    } catch (error) {
+      finish(reject, error);
+      return;
+    }
+    Promise.resolve(pending).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
+async function loginXhsAccount(account, options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const signal = source.signal;
+  const resumeContext = source.resumeContext && typeof source.resumeContext === 'object'
+    ? source.resumeContext
+    : null;
+  const platforms = Array.from(new Set((Array.isArray(source.platforms) ? source.platforms : [])
+    .filter((platform) => platform === 'pgy' || platform === 'juguang')));
+  if (!platforms.length) return { state: 'skipped', platforms: {} };
+  if (signal) throwIfProjectTaskCancelled(signal);
+  const results = {};
+  const loginController = new AbortController();
+  const loginSignal = loginController.signal;
+  const abortConcurrentLogins = (reason) => {
+    if (!loginSignal.aborted) loginController.abort(reason);
+  };
+  const abortFromProject = () => abortConcurrentLogins(
+    signal && signal.reason || projectTaskCancellationError('任务已取消。')
+  );
+  if (signal) signal.addEventListener('abort', abortFromProject, { once: true });
+  const taskSessionCoordinator = {
+    established: Boolean(resumeContext && (
+      resumeContext.credentialSubmitted === true || resumeContext.taskSessionEstablished === true
+    )),
+    credentialSubmission: null,
+  };
+  const loginPlatform = async (platform) => {
+    try {
+      const result = await runPlatformSessionPreparation(platform, (sessionSignal) => (
+        ensureXhsPlatformSession(platform, account, {
+          signal: sessionSignal,
+          assertCredentialAuthorization: source.assertCredentialAuthorization,
+          allowExistingSession: taskSessionCoordinator.established,
+          taskSessionCoordinator,
+          taskOwnedTabId: resumeContext && resumeContext.platform === platform
+            ? resumeContext.tabId
+            : null,
+        })
+      ), {
+        signal: loginSignal,
+        sessionPreparationTimeoutMs: source.sessionPreparationTimeoutMs,
+      });
+      if (result && (result.credentialSubmitted === true || result.taskSessionReused === true)) {
+        taskSessionCoordinator.established = true;
+      }
+      return result;
+    } catch (error) {
+      if (error && error.code === 'VERIFICATION_REQUIRED' && !error.platform) {
+        error.platform = platform;
+      }
+      if (error && error.code === 'VERIFICATION_REQUIRED') {
+        error.taskSessionEstablished = taskSessionCoordinator.established ||
+          error.credentialSubmitted === true;
+        abortConcurrentLogins(error);
+        throw error;
+      }
+      if (error && error.code === 'PROJECT_TASK_CANCELLED') {
+        abortConcurrentLogins(error);
+        throw error;
+      }
+      if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
+      if (loginSignal.aborted) throwIfProjectTaskCancelled(loginSignal);
+      return {
+        ok: false,
+        state: 'failed',
+        code: String(error && error.code || 'LOGIN_FAILED').slice(0, 80),
+        message: String(error && error.message || error || '小红书平台登录失败。').slice(0, 500),
+        platform,
+        tabId: Number(error && error.tabId) || null,
+      };
+    }
+  };
+  try {
+    const settled = await Promise.allSettled(platforms.map(async (platform) => {
+      results[platform] = await loginPlatform(platform);
+    }));
+    if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
+    const verificationFailure = settled.find((item) => (
+      item.status === 'rejected' && item.reason && item.reason.code === 'VERIFICATION_REQUIRED'
+    ));
+    if (verificationFailure) throw verificationFailure.reason;
+    const cancellationFailure = settled.find((item) => (
+      item.status === 'rejected' && item.reason && item.reason.code === 'PROJECT_TASK_CANCELLED'
+    ));
+    if (cancellationFailure) throw cancellationFailure.reason;
+    const unexpectedFailure = settled.find((item) => item.status === 'rejected');
+    if (unexpectedFailure) throw unexpectedFailure.reason;
+  } finally {
+    if (signal) signal.removeEventListener('abort', abortFromProject);
+  }
+  const failedCount = platforms.filter((platform) => (
+    results[platform] && (results[platform].ok === false || results[platform].state === 'failed')
+  )).length;
+  return {
+    state: failedCount === 0 ? 'loggedIn' : (failedCount === platforms.length ? 'failed' : 'partial'),
+    platforms: results,
+  };
 }
 
 const ACCOUNT_RUN_SNAPSHOT_KEYS = [
@@ -4735,7 +5996,9 @@ const ACCOUNT_RUN_SNAPSHOT_KEYS = [
 ];
 
 async function clearAccountRunSnapshots() {
-  await chrome.storage.local.remove(ACCOUNT_RUN_SNAPSHOT_KEYS.concat([
+  const stored = await chrome.storage.local.get('xhsAnalysisSnapshotV1');
+  const detailKeys = XhsMetrics.analysisDetailKeys(stored.xhsAnalysisSnapshotV1);
+  await chrome.storage.local.remove(ACCOUNT_RUN_SNAPSHOT_KEYS.concat(detailKeys, [
     'businessDefenseLastAutoCollectAt',
     'sycmContentDiagnosisSnapshotV1',
     'wxtReportApiTraceV1',
@@ -4754,9 +6017,17 @@ function resultFailures(result) {
 
 async function archiveAccountRun(account, batchId, startedAt, loginResult, autoResult, reportResult, failureMessage, options) {
   const archiveOptions = options && typeof options === 'object' ? options : {};
+  const signal = archiveOptions.signal;
+  if (signal) throwIfProjectTaskCancelled(signal);
   const taskType = ['collect', 'report', 'both'].includes(archiveOptions.taskType) ? archiveOptions.taskType : 'both';
   const runMode = archiveOptions.runMode === 'current' ? 'current' : 'batch';
-  const stored = await chrome.storage.local.get(ACCOUNT_RUN_SNAPSHOT_KEYS.concat(STORE_RUN_INDEX_KEY));
+  const baseStored = await chrome.storage.local.get(ACCOUNT_RUN_SNAPSHOT_KEYS.concat(STORE_RUN_INDEX_KEY));
+  const xhsDetailKeys = XhsMetrics.analysisDetailKeys(baseStored.xhsAnalysisSnapshotV1);
+  const detailStored = xhsDetailKeys.length
+    ? await chrome.storage.local.get(xhsDetailKeys)
+    : {};
+  const stored = Object.assign({}, baseStored, detailStored);
+  if (signal) throwIfProjectTaskCancelled(signal);
   const finishedAt = Date.now();
   const runId = 'store-run-' + finishedAt.toString(36) + '-' + Math.random().toString(36).slice(2, 9);
   const failures = resultFailures(autoResult).concat(resultFailures(reportResult));
@@ -4769,6 +6040,9 @@ async function archiveAccountRun(account, batchId, startedAt, loginResult, autoR
     (taskType === 'both' && reportFailed && collectFailed);
   const snapshots = {};
   ACCOUNT_RUN_SNAPSHOT_KEYS.forEach((key) => {
+    if (stored[key] !== undefined) snapshots[key] = stored[key];
+  });
+  xhsDetailKeys.forEach((key) => {
     if (stored[key] !== undefined) snapshots[key] = stored[key];
   });
   const safeAccount = safeBatchAccount(account);
@@ -4809,11 +6083,30 @@ async function archiveAccountRun(account, batchId, startedAt, loginResult, autoR
     failureCount: failures.length,
   };
   const index = Array.isArray(stored[STORE_RUN_INDEX_KEY]) ? stored[STORE_RUN_INDEX_KEY] : [];
+  if (signal) throwIfProjectTaskCancelled(signal);
   await chrome.storage.local.set({
     [STORE_RUN_KEY_PREFIX + runId]: record,
     [STORE_RUN_INDEX_KEY]: [entry].concat(index.filter((item) => item && item.runId !== runId)).slice(0, 1000),
   });
+  if (signal && signal.aborted) {
+    await rollbackAccountRunArchive(runId);
+    throwIfProjectTaskCancelled(signal);
+  }
   return entry;
+}
+
+async function rollbackAccountRunArchive(runId) {
+  const safeRunId = batchText(runId, 120);
+  if (!safeRunId) return;
+  const runKey = STORE_RUN_KEY_PREFIX + safeRunId;
+  const stored = await chrome.storage.local.get([runKey, STORE_RUN_INDEX_KEY]);
+  const index = Array.isArray(stored && stored[STORE_RUN_INDEX_KEY])
+    ? stored[STORE_RUN_INDEX_KEY]
+    : [];
+  await chrome.storage.local.remove(runKey);
+  await chrome.storage.local.set({
+    [STORE_RUN_INDEX_KEY]: index.filter((item) => item && item.runId !== safeRunId),
+  });
 }
 
 async function saveAccountBatchStatus(value) {
@@ -4822,13 +6115,56 @@ async function saveAccountBatchStatus(value) {
   return status;
 }
 
-async function runAccountBatch(payload) {
+async function runAccountBatch(payload, executionOptions) {
+  const execution = executionOptions && typeof executionOptions === 'object' ? executionOptions : {};
+  const signal = execution.signal;
+  const assertFreshVaultAuthorization = typeof execution.assertFreshVaultAuthorization === 'function'
+    ? execution.assertFreshVaultAuthorization
+    : null;
   const accounts = (Array.isArray(payload && payload.accounts) ? payload.accounts : [])
     .slice(0, 100)
     .map(sanitizeBatchAccount)
     .filter((account) => account.platform === 'taobao');
   if (!accounts.length) throw new Error('当前分组没有可执行的淘宝账号。');
   const taskType = 'report';
+  const vaultScopeId = payload && payload.vaultScopeId ? sanitizeVaultScopeId(payload.vaultScopeId) : '';
+  const vaultLockEpoch = Number(payload && payload.vaultLockEpoch);
+  if (!vaultScopeId || !Number.isSafeInteger(vaultLockEpoch) || vaultLockEpoch < 0) {
+    throw new Error('账号库会话已失效，请重新解锁后再启动批量任务。');
+  }
+  const requiresFreshAuthorization = vaultScopeId.startsWith('team:');
+  const assertBatchCredentialGeneration = async (options) => {
+    const checkOptions = options && typeof options === 'object' ? options : {};
+    if (accountBatchCancelRequested) {
+      throw projectTaskCancellationError('批量任务已取消。');
+    }
+    if (signal) throwIfProjectTaskCancelled(signal);
+    if (checkOptions.freshAuthorization === true) {
+      if (!assertFreshVaultAuthorization) {
+        if (requiresFreshAuthorization) {
+          accountBatchCancelRequested = true;
+          throw projectTaskCancellationError('无法实时确认团队账号库授权，批量任务已安全停止。');
+        }
+      } else {
+        try {
+          await assertFreshVaultAuthorization();
+        } catch (error) {
+          accountBatchCancelRequested = true;
+          throw projectTaskCancellationError(error);
+        }
+      }
+    }
+    if (accountBatchCancelRequested) {
+      throw projectTaskCancellationError('批量任务已取消。');
+    }
+    if (signal) throwIfProjectTaskCancelled(signal);
+    await assertVaultCredentialGeneration(vaultScopeId, vaultLockEpoch);
+    if (accountBatchCancelRequested) {
+      throw projectTaskCancellationError('批量任务已取消。');
+    }
+    if (signal) throwIfProjectTaskCancelled(signal);
+  };
+  await assertBatchCredentialGeneration();
   const platforms = normalizePlatformTaskIds(payload && payload.platforms);
   const notification = sanitizeNotificationConfig(payload && payload.notification);
   const resume = payload && payload.resume === true;
@@ -4854,6 +6190,7 @@ async function runAccountBatch(payload) {
     resumeIndex: startIndex,
     selection: payload && payload.selection || {},
     taskType,
+    ...(vaultScopeId ? { vaultScopeId } : {}),
     platforms,
     accountIds: accounts.map((account) => account.id),
     accounts: accounts.map(safeBatchAccount),
@@ -4869,18 +6206,30 @@ async function runAccountBatch(payload) {
     const accountStartedAt = Date.now();
     let loginResult = null;
     let xingheTabId = null;
-    if (accountBatchCancelRequested) break;
-    await saveAccountBatchStatus(Object.assign({}, baseStatus, {
-      currentIndex: index,
-      resumeIndex: index,
-      currentAccountId: account.id,
-      currentStoreName: account.storeName,
-      phase: '\u6e05\u7406\u4e0a\u4e00\u8d26\u53f7\u6570\u636e',
-      results: completedResults,
-    }));
-    await clearAccountRunSnapshots();
+    if (accountBatchCancelRequested || signal && signal.aborted) break;
+    try {
+      await assertBatchCredentialGeneration();
+      await saveAccountBatchStatus(Object.assign({}, baseStatus, {
+        currentIndex: index,
+        resumeIndex: index,
+        currentAccountId: account.id,
+        currentStoreName: account.storeName,
+        phase: '\u6e05\u7406\u4e0a\u4e00\u8d26\u53f7\u6570\u636e',
+        results: completedResults,
+      }));
+      await assertBatchCredentialGeneration();
+      await clearAccountRunSnapshots();
+      await assertBatchCredentialGeneration();
+    } catch (error) {
+      if (accountBatchCancelRequested || isProjectTaskCancellation(error, signal)) {
+        accountBatchCancelRequested = true;
+        break;
+      }
+      throw error;
+    }
 
     try {
+      await assertBatchCredentialGeneration();
       await saveAccountBatchStatus(Object.assign({}, baseStatus, {
         currentIndex: index,
         resumeIndex: index,
@@ -4889,46 +6238,100 @@ async function runAccountBatch(payload) {
         phase: '\u767b\u5f55\u6dd8\u5b9d\u661f\u6cb3',
         results: completedResults,
       }));
-      loginResult = await loginXingheAccount(account, { resume: resume && index === startIndex });
+      await assertBatchCredentialGeneration({ freshAuthorization: true });
+      loginResult = await loginXingheAccount(account, {
+        resume: resume && index === startIndex,
+        signal,
+        assertCredentialAuthorization: () => (
+          assertBatchCredentialGeneration({ freshAuthorization: true })
+        ),
+      });
       xingheTabId = loginResult.tabId;
+      await assertBatchCredentialGeneration();
     } catch (error) {
+      if (accountBatchCancelRequested || isProjectTaskCancellation(error, signal)) {
+        accountBatchCancelRequested = true;
+        break;
+      }
       if (error && error.code === 'VERIFICATION_REQUIRED') {
-        const tabId = error.tabId || xingheTabId || await prepareXingheTab();
-        try { await chrome.tabs.update(tabId, { active: true }); } catch (activateError) {}
-        const pauseReason = account.storeName + '\uff08' + maskedAccountName(account.username) + '\uff09\u767b\u5f55\u68c0\u6d4b\u5230\u6ed1\u5757\u6216\u9a8c\u8bc1\u7801。';
-        let notificationMessage = '';
         try {
-          const notice = await sendDingTalkNotification(notification,
-            '\u3010\u6dd8\u5b9d\u5168\u94fe\u8def\u53d6\u6570\u3011' + pauseReason + '\u8bf7\u5728 Chrome \u661f\u6cb3\u9875\u5b8c\u6210\u9a8c\u8bc1\uff0c\u7136\u540e\u56de\u5de5\u5177\u70b9\u51fb\u201c\u7ee7\u7eed\u6279\u91cf\u4efb\u52a1\u201d。');
-          notificationMessage = notice.ok ? '\u5df2\u53d1\u9001\u9489\u9489\u63d0\u9192。' : notice.message;
-        } catch (noticeError) {
-          notificationMessage = noticeError && noticeError.message ? noticeError.message : String(noticeError);
+          await assertBatchCredentialGeneration();
+          const tabId = error.tabId || xingheTabId || await prepareXingheTab(signal);
+          await assertBatchCredentialGeneration();
+          try {
+            await chrome.tabs.update(tabId, { active: true });
+          } catch (activateError) {
+            if (accountBatchCancelRequested || isProjectTaskCancellation(activateError, signal)) {
+              throw projectTaskCancellationError(activateError);
+            }
+          }
+          await assertBatchCredentialGeneration();
+          const pauseReason = account.storeName + '\uff08' + maskedAccountName(account.username) + '\uff09\u767b\u5f55\u68c0\u6d4b\u5230\u6ed1\u5757\u6216\u9a8c\u8bc1\u7801。';
+          let notificationMessage = '';
+          try {
+            if (notification.webhook) {
+              await assertBatchCredentialGeneration({ freshAuthorization: true });
+            }
+            const notice = await sendDingTalkNotification(
+              notification,
+              '\u3010\u6dd8\u5b9d\u5168\u94fe\u8def\u53d6\u6570\u3011' + pauseReason + '\u8bf7\u5728 Chrome \u661f\u6cb3\u9875\u5b8c\u6210\u9a8c\u8bc1\uff0c\u7136\u540e\u56de\u5de5\u5177\u70b9\u51fb\u201c\u7ee7\u7eed\u6279\u91cf\u4efb\u52a1\u201d。',
+              { signal }
+            );
+            await assertBatchCredentialGeneration();
+            notificationMessage = notice.ok ? '\u5df2\u53d1\u9001\u9489\u9489\u63d0\u9192。' : notice.message;
+          } catch (noticeError) {
+            if (accountBatchCancelRequested || isProjectTaskCancellation(noticeError, signal)) {
+              throw projectTaskCancellationError(noticeError);
+            }
+            await assertBatchCredentialGeneration();
+            notificationMessage = noticeError && noticeError.message ? noticeError.message : String(noticeError);
+          }
+          await assertBatchCredentialGeneration();
+          await saveAccountBatchStatus(Object.assign({}, baseStatus, {
+            running: false,
+            paused: true,
+            currentIndex: index,
+            resumeIndex: index,
+            currentAccountId: account.id,
+            currentStoreName: account.storeName,
+            phase: '\u7b49\u5f85\u4eba\u5de5\u9a8c\u8bc1',
+            pauseReason,
+            notificationMessage,
+            results: completedResults,
+          }));
+          await assertBatchCredentialGeneration();
+          return { ok: true, paused: true, batchId, resumeIndex: index };
+        } catch (verificationError) {
+          if (accountBatchCancelRequested || isProjectTaskCancellation(verificationError, signal)) {
+            accountBatchCancelRequested = true;
+            break;
+          }
+          throw verificationError;
         }
-        await saveAccountBatchStatus(Object.assign({}, baseStatus, {
-          running: false,
-          paused: true,
-          currentIndex: index,
-          resumeIndex: index,
-          currentAccountId: account.id,
-          currentStoreName: account.storeName,
-          phase: '\u7b49\u5f85\u4eba\u5de5\u9a8c\u8bc1',
-          pauseReason,
-          notificationMessage,
-          results: completedResults,
-        }));
-        return { ok: true, paused: true, batchId, resumeIndex: index };
       }
       const message = error && error.message ? error.message : String(error);
-      const archive = await archiveAccountRun(
-        account,
-        batchId,
-        accountStartedAt,
-        null,
-        null,
-        null,
-        message,
-        { taskType, runMode: 'batch' }
-      );
+      let archive;
+      try {
+        await assertBatchCredentialGeneration();
+        archive = await archiveAccountRun(
+          account,
+          batchId,
+          accountStartedAt,
+          null,
+          null,
+          null,
+          message,
+          { taskType, runMode: 'batch', signal }
+        );
+        await assertBatchCredentialGeneration();
+      } catch (archiveError) {
+        if (accountBatchCancelRequested || isProjectTaskCancellation(archiveError, signal)) {
+          accountBatchCancelRequested = true;
+          if (archive && archive.runId) await rollbackAccountRunArchive(archive.runId);
+          break;
+        }
+        throw archiveError;
+      }
       completedResults.push({
         accountId: account.id,
         storeName: account.storeName,
@@ -4947,7 +6350,7 @@ async function runAccountBatch(payload) {
     let reportResult = null;
     let failureMessage = '';
     try {
-      if (accountBatchCancelRequested) throw batchError('BATCH_CANCELLED', '\u6279\u91cf\u4efb\u52a1\u5df2\u53d6\u6d88。');
+      await assertBatchCredentialGeneration();
       await saveAccountBatchStatus(Object.assign({}, baseStatus, {
         currentIndex: index,
         resumeIndex: index,
@@ -4956,29 +6359,48 @@ async function runAccountBatch(payload) {
         phase: '\u4e00\u952e\u53d6\u6570\u5e76\u751f\u6210\u62a5\u544a',
         results: completedResults,
       }));
-      reportResult = await ensureContentDiagnosisReportTask({ platforms }).promise;
+      await assertBatchCredentialGeneration();
+      reportResult = await ensureContentDiagnosisReportTask({ platforms, signal }).promise;
+      await assertBatchCredentialGeneration();
     } catch (error) {
+      if (accountBatchCancelRequested || isProjectTaskCancellation(error, signal)) {
+        accountBatchCancelRequested = true;
+        break;
+      }
       failureMessage = error && error.message ? error.message : String(error);
     }
 
-    await saveAccountBatchStatus(Object.assign({}, baseStatus, {
-      currentIndex: index,
-      resumeIndex: index,
-      currentAccountId: account.id,
-      currentStoreName: account.storeName,
-      phase: '\u4fdd\u5b58\u5e97\u94fa\u5386\u53f2\u6570\u636e',
-      results: completedResults,
-    }));
-    const archive = await archiveAccountRun(
-      account,
-      batchId,
-      accountStartedAt,
-      loginResult,
-      null,
-      reportResult,
-      failureMessage,
-      { taskType, runMode: 'batch' }
-    );
+    let archive;
+    try {
+      await assertBatchCredentialGeneration();
+      await saveAccountBatchStatus(Object.assign({}, baseStatus, {
+        currentIndex: index,
+        resumeIndex: index,
+        currentAccountId: account.id,
+        currentStoreName: account.storeName,
+        phase: '\u4fdd\u5b58\u5e97\u94fa\u5386\u53f2\u6570\u636e',
+        results: completedResults,
+      }));
+      await assertBatchCredentialGeneration();
+      archive = await archiveAccountRun(
+        account,
+        batchId,
+        accountStartedAt,
+        loginResult,
+        null,
+        reportResult,
+        failureMessage,
+        { taskType, runMode: 'batch', signal }
+      );
+      await assertBatchCredentialGeneration();
+    } catch (error) {
+      if (accountBatchCancelRequested || isProjectTaskCancellation(error, signal)) {
+        accountBatchCancelRequested = true;
+        if (archive && archive.runId) await rollbackAccountRunArchive(archive.runId);
+        break;
+      }
+      throw error;
+    }
     completedResults.push({
       accountId: account.id,
       storeName: account.storeName,
@@ -5001,14 +6423,14 @@ async function runAccountBatch(payload) {
         phase: '\u9000\u51fa\u5f53\u524d\u661f\u6cb3\u8d26\u53f7',
         results: completedResults,
       }));
-      try { await logoutXinghe(xingheTabId); } catch (error) {
+      try { await logoutXinghe(xingheTabId, signal); } catch (error) {
         completedResults[completedResults.length - 1].logoutWarning = error && error.message ? error.message : String(error);
       }
-      await waitMilliseconds(1800);
+      await (signal ? waitMillisecondsWithSignal(1800, signal) : waitMilliseconds(1800));
     }
   }
 
-  const cancelled = accountBatchCancelRequested;
+  const cancelled = accountBatchCancelRequested || Boolean(signal && signal.aborted);
   const finishedAt = Date.now();
   await saveAccountBatchStatus(Object.assign({}, baseStatus, {
     running: false,
@@ -5025,24 +6447,636 @@ async function runAccountBatch(payload) {
   return { ok: true, cancelled, batchId, results: completedResults };
 }
 
-async function saveProjectTaskStatus(value) {
+async function saveProjectTaskStatus(value, expectedTaskId, options) {
   const status = Object.assign({}, value, { updatedAt: Date.now() });
-  await chrome.storage.local.set({ [PROJECT_TASK_STATUS_KEY]: status });
-  return status;
+  const ownerTaskId = batchText(expectedTaskId, 120);
+  const saveOptions = options && typeof options === 'object' ? options : {};
+  const operation = projectTaskStatusWriteQueue.catch(() => {}).then(async () => {
+    if (ownerTaskId) {
+      const stored = await chrome.storage.local.get(PROJECT_TASK_STATUS_KEY);
+      const current = stored && stored[PROJECT_TASK_STATUS_KEY];
+      if (!current || batchText(current.taskId, 120) !== ownerTaskId) {
+        return { saved: false, status: current || null };
+      }
+      if (saveOptions.onlyWhileRunning && current.running !== true) {
+        return { saved: false, status: current };
+      }
+    }
+    await chrome.storage.local.set({ [PROJECT_TASK_STATUS_KEY]: status });
+    return { saved: true, status };
+  });
+  projectTaskStatusWriteQueue = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
 }
 
-async function runProjectTask(payload) {
+function createProjectTaskId() {
+  return 'project-task-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 9);
+}
+
+async function loadProjectCredentialPlan(storeId, platforms, vaultScopeId) {
+  const expectedVaultScopeId = sanitizeVaultScopeId(vaultScopeId);
+  const session = await readValidatedAccountSession(expectedVaultScopeId);
+  const vault = accountVaultFromSession(session, expectedVaultScopeId);
+  const plan = XhsAccountLogin.resolveCredentialPlan(vault, { storeId, platforms });
+  return Object.assign({}, plan, {
+    vaultScopeId: expectedVaultScopeId,
+    vaultLockEpoch: Number(session && session.vaultLockEpoch),
+  });
+}
+
+async function assertVaultCredentialGeneration(vaultScopeId, vaultLockEpoch) {
+  const expectedVaultScopeId = sanitizeVaultScopeId(vaultScopeId);
+  const expectedEpoch = Number(vaultLockEpoch);
+  if (!Number.isSafeInteger(expectedEpoch) || expectedEpoch < 0) {
+    throw new Error('账号库会话已失效，请重新解锁。');
+  }
+  const session = await readValidatedAccountSession(expectedVaultScopeId);
+  if (!session || Number(session.vaultLockEpoch) !== expectedEpoch) {
+    throw new Error('账号库已锁定，请重新解锁后再登录平台。');
+  }
+  return session;
+}
+
+async function preflightProjectTaskCredentials(payload) {
   const source = payload && typeof payload === 'object' ? payload : {};
+  const credentialMode = source.credentialMode;
+  if (!['vault', 'currentSession'].includes(credentialMode)) {
+    throw new Error('请选择有效的登录方式。');
+  }
+  if (credentialMode === 'currentSession') return null;
+  const vaultScopeId = sanitizeVaultScopeId(source.vaultScopeId);
+  const store = source.store && typeof source.store === 'object' ? source.store : {};
+  const storeId = batchText(store.id, 100);
+  if (!storeId || !batchText(store.name, 120)) {
+    throw new Error('请先选择本次任务归属的店铺。');
+  }
+  const platforms = normalizeProjectPlatformTaskIds(source.platforms);
+  return loadProjectCredentialPlan(storeId, platforms, vaultScopeId);
+}
+
+function projectVerificationPlatformName(platform) {
+  if (platform === 'adstar') return '星河';
+  if (platform === 'pgy') return '蒲公英';
+  if (platform === 'juguang') return '聚光';
+  return '平台';
+}
+
+async function waitForProjectVerification(error, options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const signal = source.signal;
+  const platform = ['adstar', 'pgy', 'juguang'].includes(source.platform)
+    ? source.platform
+    : error && error.platform;
+  const tabId = Number(error && error.tabId);
+  if (!error || error.code !== 'VERIFICATION_REQUIRED' || !Number.isInteger(tabId) || tabId <= 0) {
+    throw error || new Error('验证页面信息无效。');
+  }
+  if (!['adstar', 'pgy', 'juguang'].includes(platform)) {
+    throw new Error('无法确认需要人工验证的平台。');
+  }
+  if (signal) throwIfProjectTaskCancelled(signal);
+  try { await chrome.tabs.update(tabId, { active: true }); } catch (activateError) {}
+
+  let consecutiveReadFailures = 0;
+  while (true) {
+    if (signal) throwIfProjectTaskCancelled(signal);
+    let state = null;
+    try {
+      state = platform === 'adstar'
+        ? await waitForXingheState(
+          tabId,
+          (item) => item && item.kind !== 'loading',
+          15000,
+          signal
+        )
+        : await waitForXhsLoginState(
+          tabId,
+          platform,
+          (item) => item && item.kind !== 'loading',
+          15000,
+          signal
+        );
+      consecutiveReadFailures = 0;
+    } catch (readError) {
+      if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
+      consecutiveReadFailures += 1;
+      if (consecutiveReadFailures >= 5) {
+        throw new Error(projectVerificationPlatformName(platform) + '验证页面状态连续读取失败，请重新启动任务。');
+      }
+    }
+    if (state && !['loading', 'verification'].includes(state.kind)) return state;
+    await (signal ? waitMillisecondsWithSignal(800, signal) : waitMilliseconds(800));
+  }
+}
+
+async function prepareCurrentSessionProjectPlatforms(platforms, options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const signal = source.signal;
+  const onVerificationWaiting = typeof source.onVerificationWaiting === 'function'
+    ? source.onVerificationWaiting
+    : null;
+  const onVerificationResolved = typeof source.onVerificationResolved === 'function'
+    ? source.onVerificationResolved
+    : null;
+  const suppliedTabIds = source.taskOwnedTabIds && typeof source.taskOwnedTabIds === 'object'
+    ? source.taskOwnedTabIds
+    : {};
+  const selected = normalizeProjectPlatformTaskIds(platforms)
+    .filter((platform) => ['adstar', 'pgy', 'juguang'].includes(platform));
+  const taskOwnedTabIds = {};
+  const results = {};
+
+  const platformFailureResult = (error, tabId) => ({
+    ok: false,
+    state: 'failed',
+    code: String(error && error.code || ''),
+    message: error && error.message ? error.message : String(error || '平台预检失败。'),
+    tabId: Number.isInteger(Number(tabId)) && Number(tabId) > 0 ? Number(tabId) : null,
+  });
+  const rethrowGlobalPreflightError = (error, verificationInProgress) => {
+    if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
+    const code = String(error && error.code || '');
+    if (verificationInProgress || ['PROJECT_TASK_CANCELLED', 'VERIFICATION_REQUIRED'].includes(code)) {
+      throw error;
+    }
+  };
+
+  const suppliedTabId = (platform) => {
+    if (!Object.prototype.hasOwnProperty.call(suppliedTabIds, platform)) return null;
+    const tabId = Number(suppliedTabIds[platform]);
+    if (!Number.isInteger(tabId) || tabId <= 0) {
+      throw new Error(projectVerificationPlatformName(platform) + '任务标签页编号无效。');
+    }
+    return tabId;
+  };
+  const isAllowedXingheTaskUrl = (value) => (
+    /^https:\/\/(?:adstar\.alimama\.com|login\.taobao\.com|passport\.taobao\.com|login\.tmall\.com)(?:\/|$)/i
+      .test(String(value || ''))
+  );
+  const isAllowedTaskUrl = (platform, value) => platform === 'adstar'
+    ? isAllowedXingheTaskUrl(value)
+    : XhsAccountLogin.isAllowedPlatformDocumentUrl(platform, value);
+  const assertTaskOwnedTab = async (platform, tabId) => {
+    let tab = await chrome.tabs.get(tabId);
+    if (!isAllowedTaskUrl(platform, tab && tab.url)) {
+      throw new Error(projectVerificationPlatformName(platform) + '任务标签页已离开官方平台。');
+    }
+    if (tab && tab.status !== 'complete') {
+      await waitTabComplete(tabId, 45000, signal);
+      if (signal) throwIfProjectTaskCancelled(signal);
+      tab = await chrome.tabs.get(tabId);
+      if (!isAllowedTaskUrl(platform, tab && tab.url)) {
+        throw new Error(projectVerificationPlatformName(platform) + '任务标签页已离开官方平台。');
+      }
+    }
+    return tabId;
+  };
+
+  for (const platform of selected) {
+    let candidateTabId = null;
+    try {
+      if (signal) throwIfProjectTaskCancelled(signal);
+      const owned = suppliedTabId(platform);
+      if (owned) {
+        candidateTabId = owned;
+        taskOwnedTabIds[platform] = await assertTaskOwnedTab(platform, owned);
+        continue;
+      }
+      if (platform === 'adstar') {
+        taskOwnedTabIds[platform] = await prepareXingheTab(signal);
+        continue;
+      }
+      const existing = await queryUniqueXhsLoginTarget(platform);
+      if (signal) throwIfProjectTaskCancelled(signal);
+      if (existing && existing.id) {
+        candidateTabId = Number(existing.id);
+        taskOwnedTabIds[platform] = await assertTaskOwnedTab(platform, candidateTabId);
+        continue;
+      }
+      const created = await chrome.tabs.create({
+        url: XHS_PLATFORM_ENTRY_URLS[platform],
+        active: false,
+      });
+      const createdTabId = Number(created && created.id);
+      if (!Number.isInteger(createdTabId) || createdTabId <= 0) {
+        throw new Error('无法为' + projectVerificationPlatformName(platform) + '创建任务标签页。');
+      }
+      candidateTabId = createdTabId;
+      taskOwnedTabIds[platform] = await assertTaskOwnedTab(platform, createdTabId);
+    } catch (error) {
+      rethrowGlobalPreflightError(error, false);
+      results[platform] = platformFailureResult(
+        error,
+        taskOwnedTabIds[platform] || candidateTabId,
+      );
+    }
+  }
+
+  const readState = async (platform, tabId) => {
+    if (platform === 'adstar') {
+      return waitForXingheState(
+        tabId,
+        (state) => state && !['loading', 'sessionPending'].includes(state.kind),
+        45000,
+        signal,
+      );
+    }
+    return waitForXhsLoginState(
+      tabId,
+      platform,
+      (state) => state && state.kind !== 'loading',
+      45000,
+      signal,
+    );
+  };
+  const assertReadyState = (platform, state) => {
+    const ready = platform === 'adstar'
+      ? ['loggedIn', 'noPermission'].includes(state && state.kind)
+      : ['loggedIn', 'productReady'].includes(state && state.kind);
+    if (ready) return;
+    const name = projectVerificationPlatformName(platform);
+    if (state && state.kind === 'loginError') throw new Error(name + '当前登录状态无效，请重新登录。');
+    if (state && state.kind === 'rolePicker') throw new Error(name + '仍需手动选择登录身份。');
+    if (state && ['login', 'entry', 'unsupported'].includes(state.kind)) {
+      throw new Error(name + '当前未登录，请先在该平台完成登录。');
+    }
+    throw new Error(name + '当前会话状态未通过确认。');
+  };
+  const isReadyState = (platform, state) => platform === 'adstar'
+    ? ['loggedIn', 'noPermission'].includes(state && state.kind)
+    : ['loggedIn', 'productReady'].includes(state && state.kind);
+  const isProductUrl = (platform, value) => platform === 'adstar'
+    ? /^https:\/\/adstar\.alimama\.com(?:\/|$)/i.test(String(value || ''))
+    : XhsAccountLogin.isPlatformOriginUrl(platform, value);
+  const waitForProductOriginState = async (platform, tabId) => {
+    const deadline = Date.now() + 45000;
+    let lastReadError = null;
+    while (Date.now() < deadline) {
+      if (signal) throwIfProjectTaskCancelled(signal);
+      const tab = await chrome.tabs.get(tabId);
+      if (!isAllowedTaskUrl(platform, tab && tab.url)) {
+        throw new Error(projectVerificationPlatformName(platform) + '任务标签页已离开官方平台。');
+      }
+      if (isProductUrl(platform, tab && tab.url)) {
+        if (tab && tab.status !== 'complete') {
+          await waitTabComplete(tabId, Math.max(1, deadline - Date.now()), signal);
+          if (signal) throwIfProjectTaskCancelled(signal);
+          const settledTab = await chrome.tabs.get(tabId);
+          if (!isAllowedTaskUrl(platform, settledTab && settledTab.url)) {
+            throw new Error(projectVerificationPlatformName(platform) + '任务标签页已离开官方平台。');
+          }
+          if (!isProductUrl(platform, settledTab && settledTab.url)) {
+            await (signal ? waitMillisecondsWithSignal(800, signal) : waitMilliseconds(800));
+            continue;
+          }
+        }
+        try {
+          return await readState(platform, tabId);
+        } catch (readError) {
+          if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
+          lastReadError = readError;
+        }
+      }
+      await (signal ? waitMillisecondsWithSignal(800, signal) : waitMilliseconds(800));
+    }
+    const name = projectVerificationPlatformName(platform);
+    const error = new Error(name + '验证完成后未返回对应产品页，请重新启动任务。');
+    if (lastReadError) error.cause = lastReadError;
+    throw error;
+  };
+
+  for (const platform of selected) {
+    if (results[platform] && results[platform].state === 'failed') continue;
+    const tabId = taskOwnedTabIds[platform];
+    let verificationInProgress = false;
+    try {
+      if (signal) throwIfProjectTaskCancelled(signal);
+      let state = await readState(platform, tabId);
+      while (true) {
+        while (state && state.kind === 'verification') {
+          verificationInProgress = true;
+          const waitingPlatforms = [platform];
+          const error = batchError(
+            'VERIFICATION_REQUIRED',
+            projectVerificationPlatformName(platform) + '登录需要人工验证。',
+            { platform, tabId },
+          );
+          if (onVerificationWaiting) {
+            await onVerificationWaiting({
+              platform,
+              waitingPlatforms,
+              message: projectVerificationPlatformName(platform) +
+                '登录需要人工验证，请在已打开的页面完成，任务会自动继续。',
+            });
+          }
+          state = await waitForProjectVerification(error, { platform, signal });
+          if (signal) throwIfProjectTaskCancelled(signal);
+          if (onVerificationResolved) {
+            await onVerificationResolved({ platform, waitingPlatforms: [] });
+          }
+          verificationInProgress = false;
+        }
+        if (isReadyState(platform, state)) {
+          state = await waitForProductOriginState(platform, tabId);
+          if (state && state.kind === 'verification') continue;
+        }
+        assertReadyState(platform, state);
+        break;
+      }
+      results[platform] = { ok: true, state: state.kind, tabId };
+    } catch (error) {
+      rethrowGlobalPreflightError(error, verificationInProgress);
+      results[platform] = platformFailureResult(error, tabId);
+    }
+  }
+  return { taskOwnedTabIds, platforms: results };
+}
+
+async function prepareProjectPlatformSessions(plan, options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const signal = source.signal;
+  const onVerificationWaiting = typeof source.onVerificationWaiting === 'function'
+    ? source.onVerificationWaiting
+    : null;
+  const onVerificationResolved = typeof source.onVerificationResolved === 'function'
+    ? source.onVerificationResolved
+    : null;
+  const assertFreshVaultAuthorization = typeof source.assertFreshVaultAuthorization === 'function'
+    ? source.assertFreshVaultAuthorization
+    : null;
+  const requiresFreshAuthorization = String(plan && plan.vaultScopeId || '').startsWith('team:');
+  const assertFreshPlatformAuthorization = async () => {
+    if (!assertFreshVaultAuthorization) {
+      if (requiresFreshAuthorization) {
+        throw projectTaskCancellationError(
+          '无法实时确认团队账号库授权，任务已安全停止。'
+        );
+      }
+      return;
+    }
+    try {
+      await assertFreshVaultAuthorization();
+    } catch (error) {
+      throw projectTaskCancellationError(error);
+    }
+    if (signal) throwIfProjectTaskCancelled(signal);
+  };
+  const assertProjectCredentialAuthorization = async () => {
+    await assertFreshPlatformAuthorization();
+    await assertVaultCredentialGeneration(plan.vaultScopeId, plan.vaultLockEpoch);
+    if (signal) throwIfProjectTaskCancelled(signal);
+  };
+  const authorizationTimeoutMs = source.sessionAuthorizationTimeoutMs !== undefined
+    ? source.sessionAuthorizationTimeoutMs
+    : (source.sessionPreparationTimeoutMs !== undefined
+      ? source.sessionPreparationTimeoutMs
+      : PLATFORM_SESSION_AUTHORIZATION_TIMEOUT_MS);
+  const results = { credentialMode: 'vault', taobao: null, xiaohongshu: null };
+  const failedPlatformPreparation = (platform, error) => ({
+    ok: false,
+    state: 'failed',
+    code: String(error && error.code || 'LOGIN_FAILED').slice(0, 80),
+    message: String(error && error.message || error ||
+      projectVerificationPlatformName(platform) + '登录失败。').slice(0, 500),
+    tabId: Number(error && error.tabId) || null,
+  });
+  const isGlobalPreparationFailure = (error, branchSignal) => Boolean(
+    (signal && signal.aborted) ||
+    (branchSignal && branchSignal.aborted) ||
+    (error && error.code === 'PROJECT_TASK_CANCELLED')
+  );
+  const waitingPlatforms = new Set();
+  const waitingVerificationTabs = new Map();
+  const loginWithVerification = async (defaultPlatform, login, branchSignal) => {
+    let resumeContext = null;
+    while (true) {
+      try {
+        return await login(resumeContext);
+      } catch (error) {
+        if (!error || error.code !== 'VERIFICATION_REQUIRED') throw error;
+        const platform = ['adstar', 'pgy', 'juguang'].includes(error.platform)
+          ? error.platform
+          : defaultPlatform;
+        waitingPlatforms.add(platform);
+        const verificationTabId = Number(error.tabId);
+        if (Number.isInteger(verificationTabId) && verificationTabId > 0) {
+          waitingVerificationTabs.set(platform, verificationTabId);
+        }
+        if (onVerificationWaiting) {
+          await onVerificationWaiting({
+            platform,
+            waitingPlatforms: Array.from(waitingPlatforms),
+            message: projectVerificationPlatformName(platform) +
+              '登录需要人工验证，请在已打开的页面完成，任务会自动继续。',
+          });
+        }
+        await waitForProjectVerification(error, { platform, signal: branchSignal });
+        waitingPlatforms.delete(platform);
+        waitingVerificationTabs.delete(platform);
+        if (onVerificationResolved) {
+          await onVerificationResolved({
+            platform,
+            waitingPlatforms: Array.from(waitingPlatforms),
+          });
+        }
+        const remainingVerificationTabs = Array.from(waitingVerificationTabs.values());
+        const nextVerificationTabId = remainingVerificationTabs[remainingVerificationTabs.length - 1];
+        if (Number.isInteger(nextVerificationTabId) && nextVerificationTabId > 0) {
+          try { await chrome.tabs.update(nextVerificationTabId, { active: true }); } catch (activateError) {}
+        }
+        resumeContext = {
+          platform,
+          tabId: verificationTabId,
+          credentialSubmitted: error.credentialSubmitted === true,
+          taskSessionEstablished: error.taskSessionEstablished === true,
+        };
+      }
+    }
+  };
+  const preparationController = new AbortController();
+  const preparationSignal = preparationController.signal;
+  let preparationFailure = null;
+  const abortPreparations = () => {
+    if (!preparationSignal.aborted) {
+      preparationController.abort(signal && signal.reason || projectTaskCancellationError('任务已取消。'));
+    }
+  };
+  if (signal) {
+    if (signal.aborted) abortPreparations();
+    else signal.addEventListener('abort', abortPreparations, { once: true });
+  }
+  const runPreparation = async (prepare) => {
+    try {
+      return await prepare(preparationSignal);
+    } catch (error) {
+      if (!preparationSignal.aborted) {
+        preparationFailure = error;
+        preparationController.abort(error);
+      }
+      throw error;
+    }
+  };
+  try {
+    const preparationEntries = [];
+    if (plan.accounts.taobao) {
+      preparationEntries.push({
+        authorizationPlatform: 'adstar',
+        onAuthorizationTimeout(error) {
+          results.taobao = Object.assign(
+            failedPlatformPreparation('adstar', error),
+            { noPermission: false },
+          );
+        },
+        prepare: async (branchSignal) => {
+          throwIfProjectTaskCancelled(branchSignal);
+          try {
+            const login = await loginWithVerification('adstar', (resumeContext) => (
+              runPlatformSessionPreparation('adstar', (sessionSignal) => (
+                loginXingheAccount(plan.accounts.taobao, {
+                  resume: Boolean(resumeContext),
+                  signal: sessionSignal,
+                  assertCredentialAuthorization: assertProjectCredentialAuthorization,
+                })
+              ), {
+                signal: branchSignal,
+                sessionPreparationTimeoutMs: source.sessionPreparationTimeoutMs,
+              })
+            ), branchSignal);
+            results.taobao = {
+              ok: true,
+              state: login.state,
+              noPermission: Boolean(login.noPermission),
+              tabId: login.tabId,
+            };
+          } catch (error) {
+            if (isGlobalPreparationFailure(error, branchSignal)) throw error;
+            results.taobao = Object.assign(
+              failedPlatformPreparation('adstar', error),
+              { noPermission: false },
+            );
+          }
+        },
+      });
+    }
+    if (plan.accounts.xiaohongshu) {
+      const selected = plan.platforms.filter((platform) => platform === 'pgy' || platform === 'juguang');
+      preparationEntries.push({
+        authorizationPlatform: selected[0] || 'pgy',
+        onAuthorizationTimeout(error) {
+          results.xiaohongshu = {
+            state: 'failed',
+            platforms: Object.fromEntries(selected.map((platform) => [
+              platform,
+              failedPlatformPreparation(
+                platform,
+                platformSessionPreparationTimeoutError(platform, error.timeoutMs),
+              ),
+            ])),
+          };
+        },
+        prepare: async (branchSignal) => {
+          throwIfProjectTaskCancelled(branchSignal);
+          try {
+            const login = await loginWithVerification(selected[0] || 'pgy', (resumeContext) => (
+              loginXhsAccount(plan.accounts.xiaohongshu, {
+                platforms: selected,
+                resume: Boolean(resumeContext),
+                resumeContext,
+                signal: branchSignal,
+                assertCredentialAuthorization: assertProjectCredentialAuthorization,
+                sessionPreparationTimeoutMs: source.sessionPreparationTimeoutMs,
+              })
+            ), branchSignal);
+            results.xiaohongshu = {
+              state: login.state,
+              platforms: Object.fromEntries(Object.entries(login.platforms || {}).map(([platform, item]) => {
+                const itemState = item && item.state || '';
+                return [platform, {
+                  ok: Boolean(item) && item.ok !== false && itemState !== 'failed',
+                  state: itemState,
+                  code: String(item && item.code || '').slice(0, 80),
+                  message: String(item && item.message || '').slice(0, 500),
+                  tabId: Number(item && item.tabId) || null,
+                }];
+              })),
+            };
+          } catch (error) {
+            if (isGlobalPreparationFailure(error, branchSignal)) throw error;
+            results.xiaohongshu = {
+              state: 'failed',
+              platforms: Object.fromEntries(selected.map((platform) => [
+                platform,
+                failedPlatformPreparation(platform, error),
+              ])),
+            };
+          }
+        },
+      });
+    }
+    throwIfProjectTaskCancelled(preparationSignal);
+    const authorizationSettled = await Promise.allSettled(preparationEntries.map((entry) => (
+      runPlatformSessionPreparation(entry.authorizationPlatform, async (authorizationSignal) => {
+        await assertProjectCredentialAuthorization();
+        throwIfProjectTaskCancelled(authorizationSignal);
+      }, {
+        signal: preparationSignal,
+        sessionPreparationTimeoutMs: authorizationTimeoutMs,
+      })
+    )));
+    const authorizedPreparations = [];
+    authorizationSettled.forEach((item, index) => {
+      const entry = preparationEntries[index];
+      if (item.status === 'fulfilled') {
+        authorizedPreparations.push(entry.prepare);
+        return;
+      }
+      if (item.reason && item.reason.code === 'SESSION_PREPARE_TIMEOUT') {
+        entry.onAuthorizationTimeout(item.reason);
+        return;
+      }
+      throw item.reason;
+    });
+    throwIfProjectTaskCancelled(preparationSignal);
+    const preparations = authorizedPreparations.map((prepare) => runPreparation(prepare));
+    const settled = await Promise.allSettled(preparations);
+    const failure = settled.find((item) => item.status === 'rejected');
+    if (failure) {
+      if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
+      throw preparationFailure || failure.reason;
+    }
+    return results;
+  } catch (error) {
+    if (error && error.code === 'VERIFICATION_REQUIRED' && error.tabId) {
+      try { await chrome.tabs.update(error.tabId, { active: true }); } catch (activateError) {}
+    }
+    throw error;
+  } finally {
+    if (signal) signal.removeEventListener('abort', abortPreparations);
+  }
+}
+
+async function runProjectTask(payload, executionOptions) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const execution = executionOptions && typeof executionOptions === 'object' ? executionOptions : {};
+  const signal = execution.signal;
   const storeSource = source.store && typeof source.store === 'object' ? source.store : {};
   const storeId = batchText(storeSource.id, 100);
   const storeName = batchText(storeSource.name, 120);
   const taskType = 'report';
   const platforms = normalizeProjectPlatformTaskIds(source.platforms);
+  const credentialMode = source.credentialMode;
+  if (!['vault', 'currentSession'].includes(credentialMode)) {
+    throw new Error('请选择有效的登录方式。');
+  }
+  const vaultScopeId = credentialMode === 'vault' ? sanitizeVaultScopeId(source.vaultScopeId) : '';
   const hasXhs = platforms.some((platform) => XHS_PLATFORM_TASK_IDS.includes(platform));
   const dateRange = normalizeXhsDateRange(source.dateRange, hasXhs);
   if (!storeId || !storeName) throw new Error('请先选择本次任务归属的店铺。');
   const startedAt = Date.now();
-  const taskId = 'project-task-' + startedAt.toString(36) + '-' + Math.random().toString(36).slice(2, 9);
+  const taskId = batchText(execution.taskId, 120) || createProjectTaskId();
   const baseStatus = {
     schema: 1,
     taskId,
@@ -5050,76 +7084,298 @@ async function runProjectTask(payload) {
     platforms,
     dateRange,
     runMode: 'current',
+    credentialMode,
+    ...(vaultScopeId ? { vaultScopeId } : {}),
     storeId,
     storeName,
     storeGroupId: batchText(storeSource.groupId, 100),
     storeGroupName: batchText(storeSource.groupName, 100),
     running: true,
+    paused: false,
+    waitingForVerification: false,
+    verificationPlatforms: [],
+    cancelling: false,
+    cancelled: false,
     startedAt,
     finishedAt: null,
     phase: '准备一键取数',
+    status: 'running',
+    pauseReason: '',
     error: '',
   };
-  await saveProjectTaskStatus(baseStatus);
-  await clearAccountRunSnapshots();
-
-  let reportResult = null;
-  let failureMessage = '';
+  execution.baseStatus = baseStatus;
+  let committedArchive = null;
+  let credentialPlan = execution.credentialPlan || null;
+  execution.credentialPlan = null;
+  let loginResult = { state: credentialMode === 'vault' ? 'pending' : 'currentSession', noPermission: false };
   try {
-    await saveProjectTaskStatus(Object.assign({}, baseStatus, { phase: '一键读取并生成项目结果' }));
-    reportResult = await ensureContentDiagnosisReportTask({
-      platforms,
-      dateRange,
-      storeId,
-      targetRoi: source.targetRoi,
-    }).promise;
-  } catch (error) {
-    failureMessage = error && error.message ? error.message : String(error);
-  }
+    throwIfProjectTaskCancelled(signal);
 
-  await saveProjectTaskStatus(Object.assign({}, baseStatus, { phase: '保存店铺运行记录' }));
-  const account = {
-    id: 'current-session',
-    name: '当前登录账号',
-    storeId,
-    storeName,
-    username: '',
-    roleKeyword: '',
-    accountGroupId: '',
-    accountGroupName: '',
-    storeGroupId: baseStatus.storeGroupId,
-    storeGroupName: baseStatus.storeGroupName,
-  };
-  const archive = await archiveAccountRun(
-    account,
-    taskId,
-    startedAt,
-    { state: 'currentSession', noPermission: false },
-    null,
-    reportResult,
-    failureMessage,
-    { taskType, runMode: 'current' }
-  );
-  const finishedAt = Date.now();
-  await saveProjectTaskStatus(Object.assign({}, baseStatus, {
-    running: false,
-    finishedAt,
-    phase: archive.status === 'failed' ? '任务失败' : '任务已完成',
-    status: archive.status,
-    archiveRunId: archive.runId,
-    failureCount: archive.failureCount,
-    error: failureMessage,
-  }));
-  return {
-    ok: archive.status !== 'failed',
-    partial: archive.status === 'partial',
-    taskId,
-    runId: archive.runId,
-    status: archive.status,
-    message: failureMessage || (archive.status === 'failed'
-      ? '本次所选平台均未成功返回，请根据任务记录修复后重试。'
-      : '一键取数结果已归档。'),
-  };
+    // Resolve and validate the encrypted-vault bindings before clearing any
+    // previous report state or writing a running project status. A locked or
+    // incomplete vault is a preflight error, not a reason to mutate local state.
+    if (credentialMode === 'vault' && !credentialPlan) {
+      credentialPlan = await loadProjectCredentialPlan(storeId, platforms, vaultScopeId);
+      throwIfProjectTaskCancelled(signal);
+    }
+    if (credentialMode === 'vault' && credentialPlan && credentialPlan.vaultScopeId !== vaultScopeId) {
+      throw new Error('账号库属于其他工作区，请刷新并重新解锁。');
+    }
+
+    await saveProjectTaskStatus(baseStatus);
+    throwIfProjectTaskCancelled(signal);
+    await clearAccountRunSnapshots();
+    throwIfProjectTaskCancelled(signal);
+
+    if (credentialMode === 'vault') {
+      await saveProjectTaskStatus(
+        Object.assign({}, baseStatus, { phase: '使用账号库准备平台登录' }),
+        taskId,
+      );
+      throwIfProjectTaskCancelled(signal);
+      const prepared = await prepareProjectPlatformSessions(credentialPlan, {
+        signal,
+        assertFreshVaultAuthorization: execution.assertFreshVaultAuthorization,
+        onVerificationWaiting: async (details) => {
+          const waiting = Array.isArray(details && details.waitingPlatforms)
+            ? details.waitingPlatforms
+            : [];
+          const names = waiting.map(projectVerificationPlatformName);
+          await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+            paused: true,
+            waitingForVerification: true,
+            verificationPlatforms: waiting,
+            phase: '等待' + (names.length ? names.join('、') : '平台') + '人工验证',
+            status: 'waiting_verification',
+            pauseReason: '仍在等待' + (names.length ? names.join('、') : '平台') +
+              '人工验证；请在已打开的页面完成，任务会自动继续。',
+          }), taskId);
+        },
+        onVerificationResolved: async (details) => {
+          const waiting = Array.isArray(details && details.waitingPlatforms)
+            ? details.waitingPlatforms
+            : [];
+          const names = waiting.map(projectVerificationPlatformName);
+          await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+            paused: waiting.length > 0,
+            waitingForVerification: waiting.length > 0,
+            verificationPlatforms: waiting,
+            phase: waiting.length
+              ? '等待' + names.join('、') + '人工验证'
+              : '验证已完成，继续准备平台登录',
+            status: waiting.length ? 'waiting_verification' : 'running',
+            pauseReason: waiting.length
+              ? '仍在等待' + names.join('、') + '人工验证；请在已打开的页面完成，任务会自动继续。'
+              : '',
+          }), taskId);
+        },
+      });
+      loginResult = {
+        state: 'vault',
+        noPermission: Boolean(prepared.taobao && prepared.taobao.noPermission),
+      };
+      throwIfProjectTaskCancelled(signal);
+    }
+    if (credentialMode === 'currentSession' && hasXhs) {
+      await saveProjectTaskStatus(
+        Object.assign({}, baseStatus, { phase: '检查当前会话的平台验证状态' }),
+        taskId,
+      );
+      throwIfProjectTaskCancelled(signal);
+      await prepareCurrentSessionProjectPlatforms(platforms, {
+        signal,
+        onVerificationWaiting: async (details) => {
+          const waiting = Array.isArray(details && details.waitingPlatforms)
+            ? details.waitingPlatforms
+            : [];
+          const names = waiting.map(projectVerificationPlatformName);
+          await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+            paused: true,
+            waitingForVerification: true,
+            verificationPlatforms: waiting,
+            phase: '等待' + (names.length ? names.join('、') : '平台') + '人工验证',
+            status: 'waiting_verification',
+            pauseReason: '仍在等待' + (names.length ? names.join('、') : '平台') +
+              '人工验证；请在已打开的页面完成，任务会自动继续。',
+          }), taskId);
+        },
+        onVerificationResolved: async (details) => {
+          const waiting = Array.isArray(details && details.waitingPlatforms)
+            ? details.waitingPlatforms
+            : [];
+          const names = waiting.map(projectVerificationPlatformName);
+          await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+            paused: waiting.length > 0,
+            waitingForVerification: waiting.length > 0,
+            verificationPlatforms: waiting,
+            phase: waiting.length
+              ? '等待' + names.join('、') + '人工验证'
+              : '验证已完成，继续检查当前会话',
+            status: waiting.length ? 'waiting_verification' : 'running',
+            pauseReason: waiting.length
+              ? '仍在等待' + names.join('、') + '人工验证；请在已打开的页面完成，任务会自动继续。'
+              : '',
+          }), taskId);
+        },
+      });
+      throwIfProjectTaskCancelled(signal);
+    }
+
+    let reportResult = null;
+    let failureMessage = '';
+    const onReportVerificationRequired = async (error) => {
+      const verification = projectVerificationChallenge(error);
+      if (!verification) throw error;
+      const waiting = [verification.platform];
+      const names = waiting.map(projectVerificationPlatformName);
+      await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+        paused: true,
+        waitingForVerification: true,
+        verificationPlatforms: waiting,
+        phase: '等待' + names.join('、') + '人工验证',
+        status: 'waiting_verification',
+        pauseReason: '仍在等待' + names.join('、') +
+          '人工验证；请在已打开的页面完成，任务会自动继续。',
+      }), taskId);
+      await waitForProjectVerification(error, {
+        platform: verification.platform,
+        signal,
+      });
+      if (signal) throwIfProjectTaskCancelled(signal);
+      await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+        phase: '验证已完成，继续读取小红书数据',
+      }), taskId);
+    };
+    try {
+      await saveProjectTaskStatus(
+        Object.assign({}, baseStatus, { phase: '一键读取并生成项目结果' }),
+        taskId,
+      );
+      throwIfProjectTaskCancelled(signal);
+      reportResult = await ensureContentDiagnosisReportTask({
+        platforms,
+        dateRange,
+        storeId,
+        targetRoi: source.targetRoi,
+        taskConcurrency: source.taskConcurrency,
+        concurrentAccountTabs: source.concurrentAccountTabs,
+        signal,
+        onVerificationRequired: onReportVerificationRequired,
+      }).promise;
+      throwIfProjectTaskCancelled(signal);
+    } catch (error) {
+      if (isProjectTaskCancellation(error, signal)) {
+        if (error && error.drainPromise && typeof error.drainPromise.then === 'function') {
+          execution.drainPromise = error.drainPromise;
+        }
+        throw projectTaskCancellationError(error);
+      }
+      failureMessage = error && error.message ? error.message : String(error);
+    }
+
+    throwIfProjectTaskCancelled(signal);
+    await saveProjectTaskStatus(
+      Object.assign({}, baseStatus, { phase: '保存店铺运行记录' }),
+      taskId,
+    );
+    throwIfProjectTaskCancelled(signal);
+    const selectedCredentialAccount = credentialPlan &&
+      (credentialPlan.accounts.taobao || credentialPlan.accounts.xiaohongshu);
+    const account = selectedCredentialAccount
+      ? Object.assign({}, selectedCredentialAccount, {
+        storeId,
+        storeName,
+        storeGroupId: baseStatus.storeGroupId,
+        storeGroupName: baseStatus.storeGroupName,
+      })
+      : {
+        id: 'current-session',
+        label: '当前登录账号',
+        name: '当前登录账号',
+        platform: 'taobao',
+        storeId,
+        storeName,
+        username: '',
+        roleKeyword: '',
+        accountGroupId: '',
+        accountGroupName: '',
+        storeGroupId: baseStatus.storeGroupId,
+        storeGroupName: baseStatus.storeGroupName,
+      };
+    const archive = await archiveAccountRun(
+      account,
+      taskId,
+      startedAt,
+      loginResult,
+      null,
+      reportResult,
+      failureMessage,
+      { taskType, runMode: 'current', signal }
+    );
+    committedArchive = archive;
+    throwIfProjectTaskCancelled(signal);
+    const finishedAt = Date.now();
+    await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+      running: false,
+      cancelling: false,
+      cancelled: false,
+      finishedAt,
+      phase: archive.status === 'failed'
+        ? '任务失败'
+        : (archive.status === 'partial' ? '任务部分完成' : '任务已完成'),
+      status: archive.status,
+      archiveRunId: archive.runId,
+      failureCount: archive.failureCount,
+      error: failureMessage,
+    }), taskId);
+    throwIfProjectTaskCancelled(signal);
+    execution.completed = true;
+    return {
+      ok: archive.status !== 'failed',
+      partial: archive.status === 'partial',
+      taskId,
+      runId: archive.runId,
+      status: archive.status,
+      message: failureMessage || (archive.status === 'failed'
+        ? '本次所选平台均未成功返回，请根据任务记录修复后重试。'
+        : '一键取数结果已归档。'),
+    };
+  } catch (error) {
+    if (!isProjectTaskCancellation(error, signal)) throw error;
+    if (committedArchive && committedArchive.runId) {
+      await rollbackAccountRunArchive(committedArchive.runId);
+      committedArchive = null;
+    }
+    await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+      running: true,
+      cancelling: true,
+      cancelled: false,
+      finishedAt: null,
+      phase: '安全停止中',
+      status: 'cancelling',
+      error: '',
+    }), taskId);
+    try {
+      await execution.drainPromise;
+    } catch (drainError) {}
+    const finishedAt = Date.now();
+    await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+      running: false,
+      cancelling: false,
+      cancelled: true,
+      finishedAt,
+      phase: '任务已取消',
+      status: 'cancelled',
+      error: '',
+    }), taskId);
+    return {
+      ok: false,
+      cancelled: true,
+      taskId,
+      status: 'cancelled',
+      message: '任务已取消，本次结果未归档。',
+    };
+  }
 }
 
 function ensureBusinessDefenseAutoCollectTask(options) {
@@ -5157,14 +7413,18 @@ function ensureContentDiagnosisReportTask(options) {
   const lifecycle = task.catch(async (error) => {
     const stored = await chrome.storage.local.get(CONTENT_DIAGNOSIS_STATUS_KEY);
     const previous = stored && stored[CONTENT_DIAGNOSIS_STATUS_KEY] || {};
+    const cancelled = isProjectTaskCancellation(error, options && options.signal);
     await chrome.storage.local.set({
       [CONTENT_DIAGNOSIS_STATUS_KEY]: Object.assign({}, previous, {
         running: false,
+        cancelling: false,
+        cancelled,
+        status: cancelled ? 'cancelled' : (previous.status || 'failed'),
         updatedAt: Date.now(),
         finishedAt: Date.now(),
         currentStep: '',
         activeSteps: [],
-        error: error && error.message ? error.message : String(error),
+        error: cancelled ? '' : (error && error.message ? error.message : String(error)),
       }),
     });
   }).finally(() => {
@@ -5174,59 +7434,208 @@ function ensureContentDiagnosisReportTask(options) {
   return { promise: task, started: true };
 }
 
-function ensureAccountBatchTask(payload) {
+function ensureAccountBatchTask(payload, launchOptions) {
   if (accountBatchPromise) {
     return { promise: accountBatchPromise, started: false };
   }
-  const task = runAccountBatch(payload || {});
+  const controller = new AbortController();
+  const execution = {
+    controller,
+    credentialMode: 'vault',
+    assertFreshVaultAuthorization: launchOptions && launchOptions.assertFreshVaultAuthorization,
+  };
+  const task = runAccountBatch(payload || {}, {
+    signal: controller.signal,
+    assertFreshVaultAuthorization: execution.assertFreshVaultAuthorization,
+  });
+  execution.promise = task;
+  accountBatchExecution = execution;
   accountBatchPromise = task;
   const lifecycle = task.catch(async (error) => {
     const stored = await chrome.storage.local.get(ACCOUNT_BATCH_STATUS_KEY);
     const previous = stored && stored[ACCOUNT_BATCH_STATUS_KEY] || {};
+    const cancelled = isProjectTaskCancellation(error, controller.signal) || controller.signal.aborted;
     await saveAccountBatchStatus(Object.assign({}, previous, {
       running: false,
       paused: false,
+      cancelled,
       finishedAt: Date.now(),
-      phase: '批量任务失败',
-      error: error && error.message ? error.message : String(error),
+      phase: cancelled ? '批量任务已取消' : '批量任务失败',
+      error: cancelled ? '' : (error && error.message ? error.message : String(error)),
     }));
   }).finally(() => {
     if (accountBatchPromise === task) accountBatchPromise = null;
+    if (accountBatchExecution === execution) accountBatchExecution = null;
   });
   lifecycle.catch(() => {});
   return { promise: task, started: true };
 }
 
-function ensureProjectTask(payload) {
-  if (projectTaskPromise) return { promise: projectTaskPromise, started: false };
-  const task = runProjectTask(payload || {});
+function ensureProjectTask(payload, launchOptions) {
+  if (projectTaskExecution) {
+    return {
+      promise: projectTaskExecution.promise,
+      started: false,
+      taskId: projectTaskExecution.taskId,
+    };
+  }
+  const taskId = createProjectTaskId();
+  const controller = new AbortController();
+  const execution = {
+    taskId,
+    controller,
+    signal: controller.signal,
+    promise: null,
+    drainPromise: Promise.resolve(),
+    completed: false,
+    credentialMode: payload && payload.credentialMode,
+    credentialPlan: launchOptions && launchOptions.credentialPlan || null,
+    assertFreshVaultAuthorization: launchOptions && launchOptions.assertFreshVaultAuthorization,
+  };
+  const task = runProjectTask(payload || {}, execution);
+  execution.promise = task;
+  projectTaskExecution = execution;
   projectTaskPromise = task;
   const lifecycle = task.catch(async (error) => {
     const stored = await chrome.storage.local.get(PROJECT_TASK_STATUS_KEY);
     const previous = stored && stored[PROJECT_TASK_STATUS_KEY] || {};
+    if (batchText(previous.taskId, 120) !== taskId) return;
+    const cancelled = isProjectTaskCancellation(error, controller.signal) || controller.signal.aborted;
     await saveProjectTaskStatus(Object.assign({}, previous, {
       running: false,
+      paused: false,
+      waitingForVerification: false,
+      verificationPlatforms: [],
+      cancelling: false,
+      cancelled,
       finishedAt: Date.now(),
-      phase: '任务失败',
-      error: error && error.message ? error.message : String(error),
-    }));
-  }).finally(() => {
+      phase: cancelled ? '任务已取消' : '任务失败',
+      status: cancelled ? 'cancelled' : 'failed',
+      pauseReason: '',
+      error: cancelled ? '' : (error && error.message ? error.message : String(error)),
+    }), taskId);
+  }).finally(async () => {
+    try {
+      await execution.drainPromise;
+    } catch (error) {}
     if (projectTaskPromise === task) projectTaskPromise = null;
+    if (projectTaskExecution === execution) projectTaskExecution = null;
   });
   lifecycle.catch(() => {});
-  return { promise: task, started: true };
+  return { promise: task, started: true, taskId };
+}
+
+function isTrustedProjectTaskCancelSender(message, sender) {
+  return Boolean(
+    message && message.confirmedByExtension === true &&
+    sender && sender.id === chrome.runtime.id &&
+    isOneClickWebToolSender(message, sender)
+  );
+}
+
+async function requestProjectTaskCancel(message) {
+  const taskId = batchText(message && message.taskId, 120);
+  const execution = projectTaskExecution;
+  if (!taskId || !execution || execution.taskId !== taskId) {
+    return {
+      ok: false,
+      running: Boolean(execution),
+      cancelling: Boolean(execution && execution.controller.signal.aborted),
+      cancelled: false,
+      taskId: execution && execution.taskId || '',
+      message: execution
+        ? '任务已更新，旧任务编号不能取消当前任务。'
+        : '当前没有正在执行的任务。',
+    };
+  }
+  if (execution.completed) {
+    return {
+      ok: false,
+      running: false,
+      cancelling: false,
+      cancelled: false,
+      taskId,
+      message: '任务已完成，无需取消。',
+    };
+  }
+  if (!execution.controller.signal.aborted) {
+    execution.controller.abort(projectTaskCancellationError());
+  }
+  await projectTaskStatusWriteQueue.catch(() => {});
+  if (projectTaskExecution !== execution || execution.taskId !== taskId) {
+    return {
+      ok: false,
+      running: Boolean(projectTaskExecution),
+      cancelling: false,
+      cancelled: false,
+      taskId: projectTaskExecution && projectTaskExecution.taskId || '',
+      message: '任务状态已更新，请刷新后重试。',
+    };
+  }
+  const stored = await chrome.storage.local.get(PROJECT_TASK_STATUS_KEY);
+  const previous = stored && stored[PROJECT_TASK_STATUS_KEY] || {};
+  if (previous.cancelled === true || previous.status === 'cancelled') {
+    return {
+      ok: true,
+      running: false,
+      cancelling: false,
+      cancelled: true,
+      taskId,
+      message: '任务已取消。',
+    };
+  }
+  if (
+    projectTaskExecution !== execution ||
+    execution.taskId !== taskId ||
+    batchText(previous.taskId, 120) !== taskId
+  ) {
+    return {
+      ok: false,
+      running: true,
+      cancelling: false,
+      cancelled: false,
+      taskId,
+      message: '任务状态已更新，请刷新后重试。',
+    };
+  }
+  await saveProjectTaskStatus(Object.assign({}, previous, {
+    running: true,
+    cancelling: true,
+    cancelled: false,
+    phase: '安全停止中',
+    status: 'cancelling',
+    error: '',
+  }), taskId, { onlyWhileRunning: true });
+  return {
+    ok: true,
+    running: true,
+    cancelling: true,
+    cancelled: false,
+    taskId,
+    message: '正在取消当前任务…',
+  };
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== 'XHS_BINDING_RESET') return;
-  if (!isTrustedXhsBindingResetSender(message, sender)) {
-    sendResponse({ ok: false, message: '仅允许当前扩展在可见的一键取数页确认后解除绑定。' });
+  if (!message || message.type !== 'PROJECT_TASK_CANCEL') return;
+  if (!isTrustedProjectTaskCancelSender(message, sender)) {
+    sendResponse({
+      ok: false,
+      running: Boolean(projectTaskExecution),
+      cancelling: false,
+      cancelled: false,
+      message: '仅允许当前扩展在可见的一键取数页确认后取消任务。',
+    });
     return;
   }
-  requestXhsBindingReset(message).then((summary) => {
-    sendResponse({ ok: true, summary });
-  }).catch((error) => {
-    sendResponse({ ok: false, message: error && error.message ? error.message : String(error) });
+  requestProjectTaskCancel(message).then(sendResponse).catch((error) => {
+    sendResponse({
+      ok: false,
+      running: Boolean(projectTaskExecution),
+      cancelling: Boolean(projectTaskExecution && projectTaskExecution.controller.signal.aborted),
+      cancelled: false,
+      message: error && error.message ? error.message : String(error),
+    });
   });
   return true;
 });
@@ -5238,24 +7647,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
   (async () => {
-    if (xhsBindingMutationPending) {
-      sendResponse({ ok: false, message: '小红书店铺绑定正在更新，请完成后再启动当前账号任务。' });
-      return;
+    await Promise.all([
+      contentDiagnosisStartupRecoveryPromise,
+      projectTaskStartupRecoveryPromise,
+    ]);
+    const requestedCredentialMode = String(message.payload && message.payload.credentialMode || '');
+    let assertFreshVaultAuthorization = null;
+    if (requestedCredentialMode === 'vault') {
+      const vaultScopeId = sanitizeVaultScopeId(message.payload && message.payload.vaultScopeId);
+      await enforceFreshVaultTaskAuthorization(message, sender, vaultScopeId);
+      assertFreshVaultAuthorization = () => (
+        enforceFreshVaultTaskAuthorization(message, sender, vaultScopeId)
+      );
     }
     if (accountBatchPromise) {
       sendResponse({ ok: false, message: '分组批量任务正在执行，请完成后再执行当前账号任务。' });
       return;
     }
     if (projectTaskPromise) {
-      sendResponse({ ok: true, started: false, running: true });
+      sendResponse({
+        ok: true,
+        started: false,
+        running: true,
+        taskId: projectTaskExecution && projectTaskExecution.taskId || '',
+      });
       return;
     }
     if (businessDefenseAutoCollectPromise || contentDiagnosisReportPromise) {
       sendResponse({ ok: false, message: '当前有其他取数或报告任务在执行。' });
       return;
     }
-    const launch = ensureProjectTask(message.payload || {});
-    sendResponse({ ok: true, started: launch.started, running: true });
+    const credentialPlan = await preflightProjectTaskCredentials(message.payload || {});
+    const launch = ensureProjectTask(message.payload || {}, {
+      credentialPlan,
+      assertFreshVaultAuthorization,
+    });
+    sendResponse({
+      ok: true,
+      started: launch.started,
+      running: true,
+      taskId: launch.taskId,
+    });
   })().catch((error) => {
     sendResponse({ ok: false, message: error && error.message ? error.message : String(error) });
   });
@@ -5274,12 +7706,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
+const ACCOUNT_SESSION_MUTATION_TYPES = new Set([
+  'ACCOUNT_SESSION_SET',
+  'ACCOUNT_SESSION_CLEAR',
+  'ACCOUNT_BATCH_TEST_DINGTALK',
+]);
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const allowedTypes = [
     'ACCOUNT_SESSION_SET',
-    'ACCOUNT_SESSION_GET_SUMMARY',
     'ACCOUNT_SESSION_GET_MANAGEMENT',
+    'ACCOUNT_SESSION_GET_SUMMARY',
     'ACCOUNT_SESSION_CLEAR',
+    'ACCOUNT_SESSION_LOCK',
     'ACCOUNT_BATCH_START_FROM_SESSION',
     'ACCOUNT_BATCH_CANCEL',
     'ACCOUNT_BATCH_TEST_DINGTALK',
@@ -5289,40 +7728,68 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: false, message: '请从淘宝全链路网页工具管理批量任务。' });
     return;
   }
+  if (ACCOUNT_SESSION_MUTATION_TYPES.has(message.type) && !isAccountManagementWebToolSender(sender)) {
+    sendResponse({ ok: false, message: '请从顶层账号库管理页面修改账号会话。' });
+    return;
+  }
+  if (message.type === 'ACCOUNT_SESSION_GET_MANAGEMENT' && !isAccountManagementWebToolSender(sender)) {
+    sendResponse({ ok: false, message: '请从顶层账号库管理页面恢复账号会话。' });
+    return;
+  }
   if (message.type === 'ACCOUNT_BATCH_START_FROM_SESSION' && !isOneClickWebToolSender(message, sender)) {
     sendResponse({ ok: false, message: '请从淘宝全链路网页工具的“一键取数”页面发起批量任务。' });
     return;
   }
   (async () => {
+    let assertFreshVaultAuthorization = null;
+    if (message.type === 'ACCOUNT_SESSION_LOCK') {
+      const vaultLockEpoch = await lockAccountManagementSession(message.vaultLockEpoch);
+      sendResponse({ ok: true, locked: true, vaultLockEpoch });
+      return;
+    }
     if (message.type === 'ACCOUNT_SESSION_SET') {
-      const session = sanitizeAccountManagementSession(message);
-      await chrome.storage.session.set({ [ACCOUNT_VAULT_SESSION_KEY]: session });
+      const vaultScopeId = sanitizeVaultScopeId(message.vaultScopeId);
+      await enforceFreshVaultTaskAuthorization(message, sender, vaultScopeId);
+      const session = await setAccountManagementSession(message);
       sendResponse({ ok: true, summary: summarizeAccountSession(session) });
       return;
     }
-    if (message.type === 'ACCOUNT_SESSION_GET_SUMMARY') {
-      const stored = await chrome.storage.session.get(ACCOUNT_VAULT_SESSION_KEY);
-      sendResponse({ ok: true, summary: summarizeAccountSession(stored[ACCOUNT_VAULT_SESSION_KEY]) });
-      return;
-    }
     if (message.type === 'ACCOUNT_SESSION_GET_MANAGEMENT') {
-      if (!isAccountManagementWebToolSender(sender)) {
-        sendResponse({ ok: false, message: '仅账号库管理页可恢复管理会话。' });
+      const expectedVaultScopeId = sanitizeVaultScopeId(message.expectedVaultScopeId);
+      await enforceFreshVaultTaskAuthorization(message, sender, expectedVaultScopeId);
+      const session = await readValidatedAccountSession(expectedVaultScopeId);
+      const management = accountManagementSession(
+        session,
+        expectedVaultScopeId,
+        message.expectedVaultFingerprint
+      );
+      if (session && !management) {
+        const vaultLockEpoch = await lockAccountManagementSession();
+        sendResponse({ ok: true, management: null, locked: true, vaultLockEpoch });
         return;
       }
-      const stored = await chrome.storage.session.get(ACCOUNT_VAULT_SESSION_KEY);
+      sendResponse({ ok: true, management });
+      return;
+    }
+    if (message.type === 'ACCOUNT_SESSION_GET_SUMMARY') {
+      const expectedVaultScopeId = sanitizeVaultScopeId(message.expectedVaultScopeId);
+      const session = await readValidatedAccountSession(expectedVaultScopeId);
       sendResponse({
         ok: true,
-        session: accountManagementSession(stored[ACCOUNT_VAULT_SESSION_KEY]),
+        summary: summarizeAccountSession(session, expectedVaultScopeId),
       });
       return;
     }
     if (message.type === 'ACCOUNT_SESSION_CLEAR') {
-      await chrome.storage.session.remove(ACCOUNT_VAULT_SESSION_KEY);
-      sendResponse({ ok: true, cleared: true });
+      const vaultLockEpoch = await clearAccountManagementSession();
+      sendResponse({ ok: true, cleared: true, vaultLockEpoch });
       return;
     }
     if (message.type === 'ACCOUNT_BATCH_TEST_DINGTALK') {
+      const vaultScopeId = webToolSenderOrigin(sender) === 'https://tbdata.aizicheng.com'
+        ? TEAM_VAULT_SCOPE_ID
+        : LOCAL_VAULT_SCOPE_ID;
+      await enforceFreshVaultTaskAuthorization(message, sender, vaultScopeId);
       const result = await sendDingTalkNotification(
         message.notification,
         '【淘宝全链路取数】钉钉机器人连接测试成功。'
@@ -5350,6 +7817,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
       accountBatchCancelRequested = true;
+      if (accountBatchExecution && !accountBatchExecution.controller.signal.aborted) {
+        accountBatchExecution.controller.abort(
+          projectTaskCancellationError('批量任务已取消。')
+        );
+      }
       const stored = await chrome.storage.local.get(ACCOUNT_BATCH_STATUS_KEY);
       const previous = stored && stored[ACCOUNT_BATCH_STATUS_KEY] || {};
       await saveAccountBatchStatus(Object.assign({}, previous, {
@@ -5359,28 +7831,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: true, running: true, cancelling: true });
       return;
     }
+    if (message.type === 'ACCOUNT_BATCH_START_FROM_SESSION') {
+      const vaultScopeId = sanitizeVaultScopeId(message.payload && message.payload.vaultScopeId);
+      await enforceFreshVaultTaskAuthorization(message, sender, vaultScopeId);
+      assertFreshVaultAuthorization = () => (
+        enforceFreshVaultTaskAuthorization(message, sender, vaultScopeId)
+      );
+    }
     if (businessDefenseAutoCollectPromise || contentDiagnosisReportPromise || projectTaskPromise) {
       sendResponse({ ok: false, message: '当前有单店取数或报告任务正在执行，请完成后再启动批量任务。' });
       return;
     }
-    if (xhsBindingMutationPending) {
-      sendResponse({ ok: false, message: '小红书店铺绑定正在更新，请完成后再启动批量任务。' });
-      return;
-    }
     let payload = message.payload || {};
     if (message.type === 'ACCOUNT_BATCH_START_FROM_SESSION') {
-      const sessionStored = await chrome.storage.session.get(ACCOUNT_VAULT_SESSION_KEY);
-      const vault = accountVaultFromSession(sessionStored[ACCOUNT_VAULT_SESSION_KEY]);
+      const vaultScopeId = sanitizeVaultScopeId(payload.vaultScopeId);
+      const session = await readValidatedAccountSession(vaultScopeId);
+      const vault = accountVaultFromSession(session, vaultScopeId);
       const statusStored = payload.resume
         ? await chrome.storage.local.get(ACCOUNT_BATCH_STATUS_KEY)
         : {};
       payload = prepareAccountBatchFromSession(vault, payload, statusStored[ACCOUNT_BATCH_STATUS_KEY]);
+      payload.vaultLockEpoch = Number(session && session.vaultLockEpoch);
     }
-    if (xhsBindingMutationPending) {
-      sendResponse({ ok: false, message: '小红书店铺绑定正在更新，请完成后再启动批量任务。' });
-      return;
-    }
-    const launch = ensureAccountBatchTask(payload);
+    const launch = ensureAccountBatchTask(payload, { assertFreshVaultAuthorization });
     sendResponse({ ok: true, started: launch.started, running: true });
   })().catch((error) => {
     sendResponse({ ok: false, message: error && error.message ? error.message : String(error) });
@@ -5390,9 +7863,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 function isMissingContentReceiver(error) {
   const message = String(error && error.message || error || '');
-  return message.includes('Receiving end does not exist') ||
-    message.includes('Could not establish connection') ||
-    message.includes('message port closed');
+  return /Receiving end does not exist|Could not establish connection|message port closed|No document with id|No frame with id|Invalid frame ID|(?:frame|document).*(?:removed|not found)/i.test(message);
 }
 
 function normalizeGuangheTargetGroups(values) {
@@ -5440,19 +7911,91 @@ function normalizeGuangheTargetGroups(values) {
   return Array.from(groups.values()).slice(0, 5000);
 }
 
-async function requestGuangheAutomaticSync(tabId, requestId, targetVideoGroups) {
+async function restoreGuangheAutomaticSyncBridge(tabId, frameId, documentId) {
+  const target = documentId
+    ? { tabId, documentIds: [documentId] }
+    : { tabId, frameIds: [Number(frameId)] };
+  await chrome.scripting.executeScript({
+    target,
+    func: () => {
+      try { delete window.__ghContentScriptV2250; } catch (error) {
+        window.__ghContentScriptV2250 = false;
+      }
+    },
+  });
+  await injectScripts(tabId, [
+    {
+      files: ['vendor/xlsx.full.min.js', 'rules.js', 'content-script.js'],
+      ...(documentId
+        ? { documentIds: [documentId] }
+        : { frameIds: [Number(frameId)] }),
+    },
+  ]);
+}
+
+async function guangheAutomaticSyncBridgeReady(tabId, frameId, documentId) {
+  const options = { frameId: Number(frameId) };
+  if (documentId) options.documentId = documentId;
+  try {
+    const response = await chrome.tabs.sendMessage(
+      tabId,
+      { type: 'GH_SYNC_BRIDGE_READY' },
+      options
+    );
+    return Boolean(response && response.ok);
+  } catch (error) {
+    if (isMissingContentReceiver(error)) return false;
+    throw error;
+  }
+}
+
+async function requestGuangheAutomaticSync(
+  tabId,
+  frameId,
+  documentId,
+  requestId,
+  targetVideoGroups
+) {
   let lastError = null;
+  const restoredTargets = new Set();
+  let targetFrameId = Number(frameId);
+  let targetDocumentId = String(documentId || '');
   for (let attempt = 0; attempt < 120; attempt += 1) {
     try {
+      const messageOptions = { frameId: targetFrameId };
+      if (targetDocumentId) messageOptions.documentId = targetDocumentId;
       const response = await chrome.tabs.sendMessage(tabId, {
         type: 'GH_SYNC_ALL_CONTENT',
         requestId,
         targetVideoGroups,
-      });
+      }, messageOptions);
       if (response) return response;
     } catch (error) {
       lastError = error;
       if (!isMissingContentReceiver(error)) throw error;
+      try {
+        const currentTarget = await findGuangheAutomaticSyncFrame(tabId, targetFrameId) ||
+          await waitForGuangheAutomaticSyncFrame(tabId, targetFrameId, 60000);
+        targetFrameId = currentTarget.frameId;
+        targetDocumentId = String(currentTarget.documentId || '');
+        const targetKey = targetDocumentId || 'frame:' + targetFrameId;
+        const bridgeReady = await guangheAutomaticSyncBridgeReady(
+          tabId,
+          targetFrameId,
+          targetDocumentId
+        );
+        if (!bridgeReady && !restoredTargets.has(targetKey)) {
+          await restoreGuangheAutomaticSyncBridge(
+            tabId,
+            targetFrameId,
+            targetDocumentId
+          );
+          restoredTargets.add(targetKey);
+        }
+      } catch (recoveryError) {
+        lastError = recoveryError;
+        if (!isMissingContentReceiver(recoveryError)) throw recoveryError;
+      }
     }
     await waitMilliseconds(500);
   }
@@ -5468,7 +8011,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   (async () => {
-    let guangheTab = null;
+    let guangheTarget = null;
     try {
       const targetVideoGroups = normalizeGuangheTargetGroups(message.targetVideoGroups);
       if (!targetVideoGroups.length) {
@@ -5484,31 +8027,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         return;
       }
-      const createOptions = {
-        url: GH_AUTOMATIC_SYNC_URL,
-        active: false,
-      };
-      if (sender.tab && Number.isFinite(sender.tab.windowId)) {
-        createOptions.windowId = sender.tab.windowId;
-      }
-      guangheTab = await chrome.tabs.create(createOptions);
       const requestId = 'gh-sync-' + Date.now().toString(36) + '-' +
         Math.random().toString(36).slice(2, 12);
-      const result = await requestGuangheAutomaticSync(
-        guangheTab.id,
-        requestId,
-        targetVideoGroups
-      );
+      const result = await withGuangheWorkflow(async () => {
+        guangheTarget = await prepareGuangheAutomaticSyncTarget(
+          sender.tab && sender.tab.windowId
+        );
+        return requestGuangheAutomaticSync(
+          guangheTarget.tabId,
+          guangheTarget.frameId,
+          guangheTarget.documentId,
+          requestId,
+          targetVideoGroups
+        );
+      });
       if (!result || !result.ok) {
-        throw new Error(result && result.message
+        const syncError = new Error(result && result.message
           ? result.message
           : '光合页面没有返回定向匹配数据。');
+        if (result && result.code) syncError.code = result.code;
+        throw syncError;
       }
       const matchedCount = Number(result.matchedCount) || 0;
       const identityCheckRequired = targetVideoGroups.length > 0 && matchedCount === 0;
-      if (!identityCheckRequired) {
-        await chrome.tabs.remove(guangheTab.id);
-      }
       sendResponse({
         ok: true,
         requestId,
@@ -5526,6 +8067,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         directLookupUsed: result.directLookupUsed === true,
         directLookupMatched: result.directLookupMatched || 0,
         mappingPairs: Array.isArray(result.mappingPairs) ? result.mappingPairs : [],
+        storageKey: String(result.storageKey || ''),
+        reusedGuangheTab: Boolean(guangheTarget && guangheTarget.reused),
+        guangheFrameRole: guangheTarget && guangheTarget.role || '',
         identityCheckRequired,
         accountCheckRequired: identityCheckRequired,
         fetchedAt: result.fetchedAt || Date.now(),
@@ -5534,8 +8078,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.warn(TAG, '万相台触发光合定向同步失败:', error);
       sendResponse({
         ok: false,
+        code: String(error && error.code || 'GUANGHE_SYNC_FAILED'),
         message: (error && error.message ? error.message : '光合定向同步失败。') +
-          ' 已保留光合页面，请确认登录状态后重试。',
+          ' 已保留可复用的光合页面，请确认登录状态后重试。',
       });
     }
   })();

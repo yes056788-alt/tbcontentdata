@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "淘宝内容诊断插件",
-  "version": "2.37.11",
+  "version": "2.37.34",
   "description": "为全链路取数网页提供淘宝经营及星河、蒲公英、聚光后台取数能力",
   "permissions": ["storage", "unlimitedStorage", "webRequest", "downloads", "tabs", "scripting", "webNavigation"],
   "action": {
@@ -18,6 +18,8 @@
     "https://pgy.xiaohongshu.com/*",
     "https://ad.xiaohongshu.com/*",
     "https://mcc.xiaohongshu.com/*",
+    "https://customer.xiaohongshu.com/*",
+    "https://passport.xiaohongshu.com/*",
     "https://xstore.insights.1688.com/*",
     "https://oapi.dingtalk.com/*",
     "http://localhost:3400/*",
@@ -45,6 +47,19 @@
       "js": ["juguang-page-hook.js"],
       "run_at": "document_start",
       "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://pgy.xiaohongshu.com/*",
+        "https://ad.xiaohongshu.com/*",
+        "https://customer.xiaohongshu.com/*",
+        "https://passport.xiaohongshu.com/*"
+      ],
+      "js": ["xiaohongshu-login-content.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
     },
     {
       "matches": [

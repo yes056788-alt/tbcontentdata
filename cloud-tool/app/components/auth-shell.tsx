@@ -26,7 +26,7 @@ export function AuthShell({
         <div className="auth-story__content">
           <span className="eyebrow"><ShieldIcon /> 团队私有空间</span>
           <h1>让经营数据协作<br /><span>简单，也更安全</span></h1>
-          <p>共享账号库只保存加密密文，登录凭据经过安全哈希处理；每位成员按角色访问工作台与历史报告。</p>
+          <p>团队账号库只保存加密密文，登录凭据经过安全哈希处理；成员按角色共享账号库与历史报告。</p>
           <ul className="auth-benefits">
             <li><CheckIcon /><span><strong>独立成员账号</strong><small>不再共享管理员密码</small></span></li>
             <li><CheckIcon /><span><strong>分级权限控制</strong><small>首版开放所有者与管理员，更多角色后续提供</small></span></li>

@@ -27,11 +27,6 @@ const runXhsSource = block(
   'const XHS_TERMINAL_COLLECTION_ERROR_CODES',
   '\nasync function runContentDiagnosisReport'
 );
-const bindingObservabilitySource = block(
-  backgroundSource,
-  'const XHS_BINDING_PLATFORM_NAMES',
-  '\nfunction xhsCollectionFailureRetryable'
-);
 const reportSource = block(
   backgroundSource,
   'async function runContentDiagnosisReport',
@@ -52,25 +47,18 @@ function jsonCopy(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
 function createRunXhsHarness(options = {}) {
   const storageReads = [];
   const storageWrites = [];
+  const storageRemovals = [];
   const analysisInputs = [];
-  const bindingInputs = [];
   const collections = options.collections || {};
-  const registry = options.registry || {
-    schema: 'xhsStoreAccountBindingsV1',
-    schemaVersion: 1,
-    stores: {},
-  };
-  const bindingResult = options.bindingResult || {
-    registry,
-    bindings: {},
-    actualIdentities: {},
-    issues: [],
-    ready: true,
-    changed: false,
-  };
   const snapshot = options.snapshot || {
     schema: 'xhsAnalysisSnapshotV1',
     notes: [],
@@ -79,9 +67,6 @@ function createRunXhsHarness(options = {}) {
   const context = vm.createContext({
     XHS_PLATFORM_TASK_IDS: ['adstar', 'pgy', 'juguang'],
     XhsContract,
-    XHS_STORE_BINDINGS_KEY: 'xhsStoreAccountBindingsV1',
-    XHS_STORE_ACCOUNT_BINDINGS_KEY: 'xhsStoreAccountBindingsV1',
-    XHS_BINDINGS_STORAGE_KEY: 'xhsStoreAccountBindingsV1',
     normalizeProjectPlatformTaskIds(value) {
       return Array.isArray(value) ? value.slice() : [];
     },
@@ -92,17 +77,12 @@ function createRunXhsHarness(options = {}) {
       return String(value == null ? '' : value).trim().slice(0, Number(maxLength) || 160);
     },
     xhsRuntime: {
-      async run() {
+      run(input) {
+        if (typeof options.runtimeRun === 'function') return options.runtimeRun(jsonCopy(input));
         return {
           status: options.collectionStatus || 'partial',
           platforms: collections,
         };
-      },
-    },
-    XhsBindings: {
-      reconcileStoreBindings(input) {
-        bindingInputs.push(jsonCopy(input));
-        return jsonCopy(bindingResult);
       },
     },
     XhsAnalysis: {
@@ -111,18 +91,22 @@ function createRunXhsHarness(options = {}) {
         return jsonCopy(snapshot);
       },
     },
-    XhsMetrics: {
+    XhsMetrics: options.metrics || {
       assertSnapshotWithinLimit() {},
+      analysisDetailKeys() { return []; },
     },
     chrome: {
       storage: {
         local: {
           async get(key) {
             storageReads.push(jsonCopy(key));
-            return { xhsStoreAccountBindingsV1: jsonCopy(registry) };
+            return {};
           },
           async set(value) {
             storageWrites.push(jsonCopy(value));
+          },
+          async remove(keys) {
+            storageRemovals.push(jsonCopy(keys));
           },
         },
       },
@@ -133,8 +117,8 @@ function createRunXhsHarness(options = {}) {
     run: context.testRunXhs,
     storageReads,
     storageWrites,
+    storageRemovals,
     analysisInputs,
-    bindingInputs,
   };
 }
 
@@ -191,10 +175,45 @@ test('background one-click report runs selected XHS sources, creates a gated ana
   assert.match(projectTask, /ensureContentDiagnosisReportTask\s*\(\s*\{[^}]*dateRange/s);
 });
 
-test('report progress treats the serial three-source XHS pipeline as one top-level step', () => {
+test('runXhsAnalysisTask waits for all three sources before analysis', async () => {
+  const collectionReady = deferred();
+  const collections = {
+    adstar: { status: 'complete', identity: { memberId: 'fixture-star' } },
+    pgy: { status: 'complete', identity: { brandUserId: 'fixture-pgy' } },
+    juguang: {
+      status: 'complete',
+      accounts: [{ account: { advertiserId: 1001, accountType: 4 } }],
+    },
+  };
+  const harness = createRunXhsHarness({
+    runtimeRun() {
+      return collectionReady.promise;
+    },
+  });
+  const pending = harness.run({
+    runId: 'fixture-parallel-join',
+    storeId: 'fixture-store',
+    dateRange: { from: '2030-01-01', to: '2030-01-07', timezone: 'Asia/Shanghai' },
+    platforms: ['adstar', 'pgy', 'juguang'],
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.analysisInputs.length, 0);
+
+  collectionReady.resolve({ status: 'complete', platforms: collections });
+  await pending;
+
+  assert.equal(harness.analysisInputs.length, 1);
+  assert.deepEqual(
+    Object.keys(harness.analysisInputs[0].collections),
+    ['adstar', 'pgy', 'juguang'],
+  );
+});
+
+test('report progress treats the parallel three-source XHS pipeline as one top-level step', () => {
   const source = read('web-tool/report.js');
   assert.match(source, /key:\s*['"]xiaohongshu['"]\s*,\s*name:\s*['"][^'"]*小红书/);
-  assert.match(source, /section\s*===\s*['"]xiaohongshu['"]\)\s*return\s*['"]xiaohongshu['"]/);
+  assert.match(source, /XHS_REPORT_SECTION_KEYS\.includes\(section\)[^\n]*return\s*['"]xiaohongshu['"]/);
 });
 
 test('runXhsAnalysisTask returns ok false when every requested source failed or was cancelled', async () => {
@@ -282,7 +301,7 @@ test('runXhsAnalysisTask keeps a purely transient all-failed collection retryabl
   assert.equal(result.retryable, true);
 });
 
-test('runXhsAnalysisTask keeps two successful sources when the failed or cancelled source only lacks identity', async () => {
+test('runXhsAnalysisTask keeps two successful sources when the third source failed or was cancelled', async () => {
   for (const unavailableStatus of ['failed', 'cancelled']) {
     const snapshot = {
       schema: 'xhsAnalysisSnapshotV1',
@@ -303,27 +322,6 @@ test('runXhsAnalysisTask keeps two successful sources when the failed or cancell
         adstar: { status: 'complete', identity: { memberId: 'fictional-star-mixed' } },
         pgy: { status: 'complete', identity: { brandUserId: 'fictional-pgy-mixed' } },
         juguang: { status: unavailableStatus, errors: [{ code: 'fictional-juguang-unavailable' }] },
-      },
-      bindingResult: {
-        registry: { schema: 'xhsStoreAccountBindingsV1', schemaVersion: 1, stores: {} },
-        bindings: {
-          adstar: ['adstar:fictional-star-mixed'],
-          pgy: ['pgy:fictional-pgy-mixed'],
-          juguang: [],
-        },
-        actualIdentities: {
-          adstar: ['adstar:fictional-star-mixed'],
-          pgy: ['pgy:fictional-pgy-mixed'],
-          juguang: [],
-        },
-        issues: [{
-          severity: 'critical',
-          code: 'account_identity_missing',
-          platform: 'juguang',
-          message: 'fictional unavailable source has no identity',
-        }],
-        ready: false,
-        changed: false,
       },
       snapshot,
     });
@@ -346,7 +344,7 @@ test('runXhsAnalysisTask keeps two successful sources when the failed or cancell
   }
 });
 
-test('runXhsAnalysisTask keeps two successful sources when a partial source identity is missing or ambiguous', async () => {
+test('runXhsAnalysisTask keeps two successful sources when the third source is partial', async () => {
   for (const code of ['account_identity_missing', 'account_identity_ambiguous']) {
     const snapshot = {
       schema: 'xhsAnalysisSnapshotV1',
@@ -374,24 +372,6 @@ test('runXhsAnalysisTask keeps two successful sources when a partial source iden
           ],
         },
       },
-      bindingResult: {
-        registry: { schema: 'xhsStoreAccountBindingsV1', schemaVersion: 2, stores: {} },
-        bindings: {
-          adstar: ['adstar:fictional-star-partial'],
-          pgy: ['pgy:fictional-pgy-partial'],
-          juguang: [],
-        },
-        actualIdentities: {
-          adstar: ['adstar:fictional-star-partial'],
-          pgy: ['pgy:fictional-pgy-partial'],
-          juguang: [],
-        },
-        issues: [{
-          severity: 'critical', code, platform: 'juguang', message: `fictional ${code}`,
-        }],
-        ready: false,
-        changed: false,
-      },
       snapshot,
     });
 
@@ -413,124 +393,38 @@ test('runXhsAnalysisTask keeps two successful sources when a partial source iden
   }
 });
 
-test('runXhsAnalysisTask still blocks real identity mismatches and cross-store collisions', async () => {
-  for (const code of ['account_binding_mismatch', 'account_identity_bound_to_other_store']) {
-    const harness = createRunXhsHarness({
-      collectionStatus: 'complete',
-      collections: {
-        adstar: { status: 'complete', identity: { memberId: 'fictional-star-blocked' } },
-        pgy: { status: 'complete', identity: { brandUserId: 'fictional-pgy-blocked' } },
-        juguang: { status: 'complete', accounts: [{ account: { advertiserId: 'fictional-ad-blocked' } }] },
-      },
-      bindingResult: {
-        registry: { schema: 'xhsStoreAccountBindingsV1', schemaVersion: 1, stores: {} },
-        bindings: {},
-        actualIdentities: {},
-        issues: [{ severity: 'critical', code, platform: 'adstar', message: `fictional ${code}` }],
-        ready: false,
-        changed: false,
-      },
-      snapshot: {
-        schema: 'xhsAnalysisSnapshotV1',
-        notes: [],
-        quality: { decisionReady: false, issues: [{ severity: 'critical', code, platform: 'adstar' }] },
-      },
-    });
-
-    const result = await harness.run({
-      runId: `fictional-xhs-blocked-${code}`,
-      storeId: 'fictional-store-blocked',
-      platforms: ['adstar', 'pgy', 'juguang'],
-      dateRange: { from: '2030-03-01', to: '2030-03-07', timezone: 'Asia/Shanghai' },
-    });
-
-    assert.equal(result.ok, false, `${code} must remain blocking`);
-    assert.equal(result.code, 'XHS_ACCOUNT_BINDING_FAILED');
-    assert.equal(result.snapshot, null);
-    assert.equal(
-      harness.storageWrites.some((value) => value.xhsAnalysisSnapshotV1),
-      false,
-      'a true account conflict must never save the analysis snapshot',
-    );
-  }
-});
-
-test('runXhsAnalysisTask exposes only redacted binding code, platform, and message', async () => {
-  const expectedToken = 'pgy:fictional-expected-account-token';
-  const actualToken = 'pgy:fictional-actual-account-token';
+test('runXhsAnalysisTask archives successful collections without a store identity binding gate', async () => {
+  const snapshot = {
+    schema: 'xhsAnalysisSnapshotV1',
+    notes: [{ noteId: 'fictional-note-unbound' }],
+    quality: { decisionReady: true, issues: [] },
+  };
   const harness = createRunXhsHarness({
     collectionStatus: 'complete',
     collections: {
-      pgy: { status: 'complete', identity: { brandUserId: 'fictional-actual-account-token' } },
+      adstar: { status: 'complete', identity: { memberId: 'fictional-star-unbound' } },
+      pgy: { status: 'complete', identity: { brandUserId: 'fictional-pgy-unbound' } },
+      juguang: {
+        status: 'complete',
+        accounts: [{ account: { advertiserId: 'fictional-juguang-unbound', accountType: 4 } }],
+      },
     },
-    bindingResult: {
-      registry: { schema: 'xhsStoreAccountBindingsV1', schemaVersion: 2, stores: {} },
-      bindings: { pgy: [expectedToken] },
-      actualIdentities: { pgy: [actualToken] },
-      issues: [{
-        severity: 'critical',
-        code: 'account_binding_mismatch',
-        platform: 'pgy',
-        message: 'advertiserId=fictional-advertiser-id; memberId=fictional-member-id; ' +
-          'brandUserId=fictional-brand-user-id; otherStoreId=fictional-other-store-id; ' +
-          'Authorization: Bearer fictional-binding-credential',
-        expected: [expectedToken],
-        actual: [actualToken],
-        otherStoreId: 'fictional-other-store-id',
-      }, {
-        severity: 'critical',
-        code: 'memberId=fictional-sensitive-code-id',
-        platform: 'pgy',
-        message: 'brandUserId=fictional-sensitive-message-id',
-      }],
-      ready: false,
-      changed: false,
-    },
-    snapshot: {
-      schema: 'xhsAnalysisSnapshotV1',
-      notes: [],
-      quality: { decisionReady: false, issues: [] },
-    },
+    snapshot,
   });
 
   const result = await harness.run({
-    runId: 'fictional-xhs-redacted-binding-issue',
-    storeId: 'fictional-store-redacted-binding-issue',
-    platforms: ['pgy'],
+    runId: 'fictional-xhs-unbound-run',
+    storeId: 'fictional-store-unbound',
+    platforms: ['adstar', 'pgy', 'juguang'],
     dateRange: { from: '2030-03-08', to: '2030-03-14', timezone: 'Asia/Shanghai' },
   });
 
-  assert.equal(result.ok, false, 'the binding mismatch must remain blocking');
-  assert.equal(result.code, 'XHS_ACCOUNT_BINDING_FAILED');
-  assert.deepEqual(JSON.parse(JSON.stringify(result.bindingIssues)), [{
-    code: 'account_binding_mismatch',
-    platform: 'pgy',
-    message: '当前蒲公英登录账号与所选店铺绑定不一致。',
-  }, {
-    code: 'account_binding_issue',
-    platform: 'pgy',
-    message: '账号绑定校验未通过。',
-  }]);
-  assert.deepEqual(harness.analysisInputs[0].bindingIssues, [{
-    severity: 'critical',
-    code: 'account_binding_mismatch',
-    platform: 'pgy',
-    message: '当前蒲公英登录账号与所选店铺绑定不一致。',
-  }, {
-    severity: 'critical',
-    code: 'account_binding_issue',
-    platform: 'pgy',
-    message: '账号绑定校验未通过。',
-  }]);
-  const serialized = JSON.stringify({ result, analysisInput: harness.analysisInputs[0].bindingIssues });
-  for (const forbidden of [
-    expectedToken, actualToken, 'fictional-binding-credential', 'fictional-other-store-id',
-    'fictional-advertiser-id', 'fictional-member-id', 'fictional-brand-user-id',
-    'fictional-sensitive-code-id', 'fictional-sensitive-message-id',
-    '"expected"', '"actual"', '"otherStoreId"',
-  ]) {
-    assert.equal(serialized.includes(forbidden), false, `binding observability leaked ${forbidden}`);
-  }
+  assert.equal(result.ok, true);
+  assert.equal(result.code, '');
+  assert.deepEqual(result.snapshot, snapshot);
+  assert.ok(harness.storageWrites.some((value) => value.xhsAnalysisSnapshotV1));
+  assert.equal(Object.hasOwn(harness.analysisInputs[0], 'accountBindings'), false);
+  assert.equal(Object.hasOwn(harness.analysisInputs[0], 'bindingIssues'), false);
 });
 
 test('runXhsAnalysisTask anchors analysis asOf to the requested dateRange.to', async () => {
@@ -556,6 +450,68 @@ test('runXhsAnalysisTask anchors analysis asOf to the requested dateRange.to', a
 
   assert.equal(harness.analysisInputs.length, 1);
   assert.equal(harness.analysisInputs[0].asOf, dateRange.to);
+});
+
+test('runXhsAnalysisTask falls back to detail shards when the full analysis exceeds 8 MiB', async () => {
+  const fullSnapshot = {
+    schema: 'xhsAnalysisSnapshotV1',
+    notes: [{ noteId: 'fictional-large-note' }],
+    quality: { decisionReady: true, issues: [] },
+  };
+  const compactSnapshot = {
+    schema: 'xhsAnalysisSnapshotV1',
+    notes: [{ noteId: 'fictional-large-note' }],
+    quality: { decisionReady: true, issues: [] },
+    detailArchive: {
+      schema: 'xhsAnalysisDetailManifestV1',
+      complete: true,
+      sections: { notes: { sourceCount: 501 } },
+      chunks: [{ key: 'xhsAnalysisDetailChunkV1:0000' }],
+    },
+  };
+  const detailChunk = {
+    schema: 'xhsAnalysisDetailChunkV1',
+    kind: 'notes',
+    items: [{ noteId: 'fictional-large-note' }],
+  };
+  let gateCalls = 0;
+  const harness = createRunXhsHarness({
+    collectionStatus: 'complete',
+    collections: { adstar: { status: 'complete' } },
+    snapshot: fullSnapshot,
+    metrics: {
+      assertSnapshotWithinLimit(value) {
+        gateCalls += 1;
+        if (value === value && gateCalls === 1) {
+          const error = new Error('fictional 8 MiB overflow');
+          error.code = 'XHS_SNAPSHOT_SIZE_LIMIT';
+          throw error;
+        }
+      },
+      createXhsAnalysisArchiveBundle() {
+        return {
+          snapshot: compactSnapshot,
+          chunks: { 'xhsAnalysisDetailChunkV1:0000': detailChunk },
+        };
+      },
+      analysisDetailKeys() { return []; },
+    },
+  });
+
+  const result = await harness.run({
+    runId: 'fictional-large-sharded-run',
+    storeId: 'fictional-large-sharded-store',
+    platforms: ['adstar'],
+    dateRange: { from: '2030-01-01', to: '2030-01-31', timezone: 'Asia/Shanghai' },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.noteCount, 501);
+  assert.deepEqual(result.snapshot, compactSnapshot);
+  assert.ok(harness.storageWrites.some((write) => (
+    write.xhsAnalysisSnapshotV1 && write['xhsAnalysisDetailChunkV1:0000']
+  )));
+  assert.equal(gateCalls, 2, 'the compact summary is checked again before storage');
 });
 
 test('report executeStep preserves a returned detail.ok false instead of manufacturing success', async () => {
@@ -585,16 +541,9 @@ test('report executeStep preserves a returned detail.ok false instead of manufac
     async runXhsAnalysisTask() {
       return {
         ok: false,
+        code: 'XHS_COLLECTION_FAILED',
         partial: true,
         message: '三个虚构来源均未完成',
-        bindingIssues: [{
-          code: 'account_binding_mismatch',
-          platform: 'pgy',
-          message: 'advertiserId=fictional-report-advertiser; otherStoreId=fictional-report-store; ' +
-            'Authorization: Bearer fictional-report-token',
-          expected: ['pgy:fictional-report-expected'],
-          actual: ['pgy:fictional-report-actual'],
-        }],
         snapshot: null,
       };
     },
@@ -606,7 +555,7 @@ test('report executeStep preserves a returned detail.ok false instead of manufac
     async waitMilliseconds() {},
   });
   vm.runInContext(
-    platformHelpers + '\n' + bindingObservabilitySource + '\n' + reportSource +
+    platformHelpers + '\n' + reportSource +
       '\nglobalThis.testRunReport = runContentDiagnosisReport;',
     context
   );
@@ -620,27 +569,13 @@ test('report executeStep preserves a returned detail.ok false instead of manufac
   const finalStatus = storageWrites.at(-1)['fictional-report-status'];
 
   assert.equal(xhsResult.ok, false);
-  assert.deepEqual(JSON.parse(JSON.stringify(xhsResult.bindingIssues)), [{
-    code: 'account_binding_mismatch',
-    platform: 'pgy',
-    message: '当前蒲公英登录账号与所选店铺绑定不一致。',
-  }]);
+  assert.equal(xhsResult.code, 'XHS_COLLECTION_FAILED');
+  assert.equal(Object.hasOwn(xhsResult, 'bindingIssues'), false);
   assert.equal(result.ok, false, 'a report with no successful selected step must return ok false');
   const archivedResult = finalStatus.results.find((item) => item.key === 'xiaohongshu');
   assert.equal(archivedResult.ok, false);
-  assert.deepEqual(JSON.parse(JSON.stringify(archivedResult.bindingIssues)), [{
-    code: 'account_binding_mismatch',
-    platform: 'pgy',
-    message: '当前蒲公英登录账号与所选店铺绑定不一致。',
-  }]);
-  const archivedSerialized = JSON.stringify(archivedResult);
-  for (const forbidden of [
-    'fictional-report-token', 'fictional-report-expected', 'fictional-report-actual',
-    'fictional-report-advertiser', 'fictional-report-store',
-    '"expected"', '"actual"',
-  ]) {
-    assert.equal(archivedSerialized.includes(forbidden), false, `archived report leaked ${forbidden}`);
-  }
+  assert.equal(archivedResult.code, 'XHS_COLLECTION_FAILED');
+  assert.equal(Object.hasOwn(archivedResult, 'bindingIssues'), false);
 });
 
 test('archive status is failed when every selected step failed without an outer exception', async () => {
@@ -651,6 +586,9 @@ test('archive status is failed when every selected step failed without an outer 
     STORE_RUN_KEY_PREFIX: 'fictional-store-run:',
     safeBatchAccount(account) {
       return jsonCopy(account);
+    },
+    XhsMetrics: {
+      analysisDetailKeys() { return []; },
     },
     chrome: {
       storage: {
@@ -691,24 +629,75 @@ test('archive status is failed when every selected step failed without an outer 
   assert.equal(storedRecord.status, 'failed');
 });
 
-test('background reconciles and persists real XHS identities instead of trusting collection.accountKey', async () => {
-  const bindingResult = {
-    registry: {
-      schema: 'xhsStoreAccountBindingsV1',
-      schemaVersion: 1,
-      stores: {
-        'fictional-store-binding': {
-          platforms: { adstar: ['adstar:fictional-real-member'] },
-          updatedAt: '2033-03-31T16:00:00.000Z',
+test('local history archive keeps every XHS detail shard instead of applying the cloud size gate', async () => {
+  const detailKeys = ['xhsAnalysisDetailChunkV1:0000', 'xhsAnalysisDetailChunkV1:0001'];
+  const analysis = {
+    schema: 'xhsAnalysisSnapshotV1',
+    runId: 'fictional-complete-local-history-run',
+    quality: { decisionReady: true, issues: [] },
+    detailArchive: {
+      schema: 'xhsAnalysisDetailManifestV1',
+      complete: true,
+      chunks: detailKeys.map((key, index) => ({ key, index, kind: index ? 'notes' : 'pgyFacts' })),
+    },
+  };
+  const storageWrites = [];
+  const stored = {
+    xhsAnalysisSnapshotV1: analysis,
+    xhsCollectionStatusV1: { status: 'complete' },
+    [detailKeys[0]]: {
+      schema: 'xhsAnalysisDetailChunkV1',
+      items: [{ id: 'pgy-complete', padding: 'x'.repeat(2048) }],
+    },
+    [detailKeys[1]]: {
+      schema: 'xhsAnalysisDetailChunkV1',
+      items: [{ id: 'note-complete', padding: 'y'.repeat(2048) }],
+    },
+    'fictional-store-run-index': [],
+  };
+  const context = vm.createContext({
+    ACCOUNT_RUN_SNAPSHOT_KEYS: ['xhsAnalysisSnapshotV1', 'xhsCollectionStatusV1'],
+    STORE_RUN_INDEX_KEY: 'fictional-store-run-index',
+    STORE_RUN_KEY_PREFIX: 'fictional-store-run:',
+    safeBatchAccount(account) { return jsonCopy(account); },
+    XhsMetrics: { analysisDetailKeys() { return detailKeys; } },
+    chrome: {
+      storage: {
+        local: {
+          async get(keys) {
+            return Object.fromEntries(keys.filter((key) => Object.hasOwn(stored, key))
+              .map((key) => [key, jsonCopy(stored[key])]));
+          },
+          async set(value) { storageWrites.push(jsonCopy(value)); },
         },
       },
     },
-    bindings: { adstar: ['adstar:fictional-real-member'] },
-    actualIdentities: { adstar: ['adstar:fictional-real-member'] },
-    issues: [],
-    ready: true,
-    changed: true,
-  };
+  });
+  vm.runInContext(
+    resultFailuresSource + '\n' + archiveSource +
+      '\nglobalThis.testArchive = archiveAccountRun;',
+    context
+  );
+
+  const entry = await context.testArchive(
+    { id: 'fictional-account', name: '虚构账号', storeId: 'fictional-store', storeName: '虚构店铺' },
+    'fictional-batch',
+    1_900_000_000_000,
+    { state: 'currentSession', noPermission: false },
+    { ok: true, results: [] },
+    { ok: true, results: [] },
+    '',
+    { taskType: 'both', runMode: 'current', maxArchiveBytes: 1024 }
+  );
+  const record = storageWrites.at(-1)['fictional-store-run:' + entry.runId];
+
+  assert.equal(record.status, 'success');
+  assert.equal(record.snapshots.xhsAnalysisSnapshotV1.detailArchive.complete, true);
+  assert.deepEqual(Object.keys(record.snapshots).filter((key) => key.startsWith('xhsAnalysisDetailChunkV1:')),
+    detailKeys);
+});
+
+test('background does not read, write, or pass legacy store identity bindings', async () => {
   const harness = createRunXhsHarness({
     collectionStatus: 'complete',
     collections: {
@@ -718,7 +707,6 @@ test('background reconciles and persists real XHS identities instead of trusting
         identity: { memberId: 'fictional-real-member' },
       },
     },
-    bindingResult,
     snapshot: {
       schema: 'xhsAnalysisSnapshotV1',
       notes: [],
@@ -733,30 +721,23 @@ test('background reconciles and persists real XHS identities instead of trusting
     dateRange: { from: '2033-03-01', to: '2033-03-31', timezone: 'Asia/Shanghai' },
   });
 
-  assert.equal(harness.bindingInputs.length, 1, 'must call XhsBindings.reconcileStoreBindings');
-  assert.ok(harness.storageReads.some((key) => JSON.stringify(key).includes('xhsStoreAccountBindingsV1')));
-  assert.ok(harness.storageWrites.some((value) => value.xhsStoreAccountBindingsV1));
-  assert.deepEqual(harness.analysisInputs[0].accountBindings, bindingResult.bindings);
-  assert.doesNotMatch(
-    JSON.stringify(harness.analysisInputs[0].accountBindings),
-    /fictional-self-asserted-account-key/,
-  );
+  assert.equal(harness.storageReads.length, 1,
+    'the previous compact snapshot is read only to remove stale detail shards');
+  assert.ok(harness.storageWrites.some((value) => value.xhsAnalysisSnapshotV1));
+  assert.equal(Object.hasOwn(harness.analysisInputs[0], 'accountBindings'), false);
+  assert.equal(Object.hasOwn(harness.analysisInputs[0], 'bindingIssues'), false);
 });
 
-test('background and cloud ZIP load XhsBindings before analysis', () => {
+test('background and cloud ZIP load XhsIdentity before analysis', () => {
   const imports = block(backgroundSource, 'importScripts(', ');');
   const sync = read('cloud-tool/scripts/sync-web-tool.mjs');
 
-  assert.match(imports, /['"]xhs\/bindings\.js['"]/);
+  assert.match(imports, /['"]xhs\/identity\.js['"]/);
   assert.ok(
-    imports.indexOf('xhs/bindings.js') < imports.indexOf('xhs/analysis.js'),
-    'XhsBindings must load before XhsAnalysis',
+    imports.indexOf('xhs/identity.js') < imports.indexOf('xhs/analysis.js'),
+    'XhsIdentity must load before XhsAnalysis',
   );
-  assert.match(sync, /['"]xhs\/bindings\.js['"]/);
-  assert.match(backgroundSource, /['"]xhsStoreAccountBindingsV1['"]/);
-  assert.match(runXhsSource, /XhsBindings\.reconcileStoreBindings\s*\(/);
-  assert.doesNotMatch(
-    runXhsSource,
-    /accountBindings\s*\[\s*platform\s*\]\s*=\s*collections\s*\[\s*platform\s*\]\.accountKey/,
-  );
+  assert.match(sync, /['"]xhs\/identity\.js['"]/);
+  assert.doesNotMatch(backgroundSource, /xhsStoreAccountBindingsV1|XhsBindings/);
+  assert.doesNotMatch(runXhsSource, /accountBindings|bindingIssues/);
 });

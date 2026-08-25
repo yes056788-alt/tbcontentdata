@@ -1463,7 +1463,6 @@
     shadow.addEventListener('click', onClick);
     restore().then(render);
     render();
-    console.log(TAG, '批量画像面板已注入');
   }
 
   if (document.documentElement) mount();

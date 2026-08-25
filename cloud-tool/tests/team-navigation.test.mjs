@@ -14,6 +14,23 @@ const adminSource = await readFile(
   new URL("../app/components/admin-client.tsx", import.meta.url),
   "utf8",
 );
+const logoutSource = await readFile(
+  new URL("../app/components/logout-button.tsx", import.meta.url),
+  "utf8",
+);
+const legacyNavigationSource = await readFile(
+  new URL("../public/cloud-team-navigation.js", import.meta.url),
+  "utf8",
+);
+const authRedirectSources = await Promise.all([
+  "admin-client.tsx",
+  "dashboard-client.tsx",
+  "migration-client.tsx",
+  "change-password-client.tsx",
+].map((name) => readFile(
+  new URL(`../app/components/${name}`, import.meta.url),
+  "utf8",
+)));
 const localWorkspaceSource = await readFile(
   new URL("../../web-tool/index.html", import.meta.url),
   "utf8",
@@ -42,4 +59,24 @@ test("home and team pages share one complete account navigation", () => {
 test("cloud navigation stays out of the local legacy workspace source", () => {
   assert.doesNotMatch(localWorkspaceSource, /cloud-team-navigation\.css/);
   assert.doesNotMatch(localWorkspaceSource, /href="\/admin">团队管理/);
+});
+
+test("every cloud logout locks the active account vault before leaving the session", () => {
+  assert.match(
+    legacyNavigationSource,
+    /TaobaoCloudSync[\s\S]*?lockAccountVault[\s\S]*?\/api\/auth\/logout/,
+  );
+  assert.match(
+    logoutSource,
+    /lockAccountVaultSession[\s\S]*?\/api\/auth\/logout/,
+  );
+  assert.match(legacyNavigationSource, /finally[\s\S]*?location\.replace\('\/login'\)/);
+  assert.match(logoutSource, /finally[\s\S]*?window\.location\.replace\("\/login"\)/);
+});
+
+test("Next management pages lock the vault before auth redirects", () => {
+  for (const source of authRedirectSources) {
+    assert.match(source, /lockVaultAndRedirect/);
+    assert.match(source, /status\s*===\s*401|status\s*===\s*403/);
+  }
 });

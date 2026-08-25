@@ -64,7 +64,10 @@ export function fixtureRun(index = 1, overrides = {}) {
 }
 
 export async function createFixtureMigration(options = {}) {
-  const header = createMigrationHeader(new Date("2026-08-09T00:00:00.000Z"));
+  const header = createMigrationHeader(
+    new Date("2026-08-09T00:00:00.000Z"),
+    options.version,
+  );
   const key = await deriveMigrationKey(options.passphrase || FIXTURE_PASSPHRASE, header);
   const envelopes = [];
   let catalogSha256 = BUSINESS_MIGRATION_CATALOG_SEED;
@@ -76,8 +79,16 @@ export async function createFixtureMigration(options = {}) {
     index += 1;
   };
 
+  const vaultDeleted = options.deletedVault === true;
+  const vaultAbsent = options.emptyVault === true;
+  const vaultRevision = vaultDeleted ? 11 : vaultAbsent ? 0 : 4;
+  const vaultUpdatedAt = vaultDeleted
+    ? "2026-08-09T00:00:11.000Z"
+    : vaultAbsent
+      ? null
+      : "2026-08-09T00:00:00.000Z";
   await append("vault", "vault.json", {
-    vault: options.emptyVault ? null : {
+    vault: vaultDeleted || vaultAbsent ? null : {
       schema: 1,
       kdf: {
         name: "PBKDF2",
@@ -92,8 +103,9 @@ export async function createFixtureMigration(options = {}) {
       },
       updatedAt: 1_786_291_200_000,
     },
-    revision: options.emptyVault ? 0 : 4,
-    updatedAt: options.emptyVault ? null : "2026-08-09T00:00:00.000Z",
+    ...(header.version >= 4 ? { deleted: vaultDeleted } : {}),
+    revision: vaultRevision,
+    updatedAt: vaultUpdatedAt,
   });
   await append("directory", "directory.json", {
     directory: options.emptyDirectory ? null : {
@@ -125,12 +137,13 @@ export async function createFixtureMigration(options = {}) {
     },
     catalogSha256,
     totals: {
-      vault: options.emptyVault ? 0 : 1,
+      vault: vaultDeleted || vaultAbsent ? 0 : 1,
       directory: options.emptyDirectory ? 0 : 1,
       runs: runs.length,
+      runDeletions: 0,
     },
     sourceRevisions: {
-      vault: options.emptyVault ? 0 : 4,
+      vault: vaultRevision,
       directory: options.emptyDirectory ? 0 : 6,
     },
   };

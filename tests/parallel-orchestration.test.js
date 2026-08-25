@@ -87,7 +87,6 @@ async function verifyAutoCollectParallelism() {
     ['dmp:start', 'guanghe:start', 'sycm:start', 'wxt:start']
   );
   assert.equal(events.some((event) => event.endsWith(':end')), false);
-  assert.equal(events[0], 'sycm:start');
   releaseRunners();
   await running;
   const finalStatus = storageWrites.at(-1)['auto-status'];
@@ -134,6 +133,12 @@ async function verifyReportParallelism() {
       events.push('dmp:end');
       return { source: 'dmp', snapshot: { schema: 2, results: [] } };
     },
+    async runXhsAnalysisTask() {
+      events.push('xhs:start');
+      await initialStepsStarted;
+      events.push('xhs:end');
+      return { ok: true, snapshot: { schema: 'xhsAnalysisSnapshotV1' } };
+    },
     async prepareContentDiagnosisWxtTab(section) {
       events.push('wxt:' + section + ':prepare');
       return 1;
@@ -158,17 +163,23 @@ async function verifyReportParallelism() {
     '\nfunction batchText'
   );
   vm.runInContext(platformHelpers + '\n' + source + '\nglobalThis.testRun = runContentDiagnosisReport;', context);
-  const running = context.testRun();
+  const running = context.testRun({
+    platforms: ['sycm', 'guanghe', 'wxt', 'dmp', 'adstar', 'pgy', 'juguang'],
+    storeId: 'fixture-store',
+    dateRange: { from: '2030-01-01', to: '2030-01-31', timezone: 'Asia/Shanghai' },
+  });
   await waitFor(() => (
     events.includes('sycm:start') &&
     events.includes('guanghe:start') &&
     events.includes('dmp:start') &&
-    events.includes('wxt:marketing:start')
+    events.includes('wxt:marketing:start') &&
+    events.includes('xhs:start')
   ), 500);
   assert.ok(events.includes('sycm:start'));
   assert.ok(events.includes('guanghe:start'));
   assert.ok(events.includes('dmp:start'));
   assert.ok(events.includes('wxt:marketing:start'));
+  assert.ok(events.includes('xhs:start'));
   assert.equal(events.some((event) => event.endsWith(':end')), false);
   releaseInitialSteps();
   assert.equal(events.some((event) => event.endsWith(':end')), false);

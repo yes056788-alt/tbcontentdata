@@ -7,10 +7,47 @@
     operator: '操作员',
     viewer: '只读成员',
   };
+  const BRIDGE_CHANNEL = 'taobao-full-chain-tool-v1';
 
   function cleanText(value, fallback) {
     const text = String(value == null ? '' : value).trim();
     return text || fallback;
+  }
+
+  async function lockAccountVault() {
+    const cloudSync = window.TaobaoCloudSync;
+    if (cloudSync && typeof cloudSync.lockAccountVault === 'function') {
+      await cloudSync.lockAccountVault();
+      return;
+    }
+    await new Promise((resolve) => {
+      const requestId = 'vault-lock-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+      let settled = false;
+      let timer = 0;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('message', onMessage);
+        clearTimeout(timer);
+        resolve();
+      };
+      const onMessage = (event) => {
+        const message = event.data;
+        if (event.source !== window || event.origin !== location.origin || !message ||
+            message.channel !== BRIDGE_CHANNEL || message.type !== 'response' ||
+            message.requestId !== requestId) return;
+        finish();
+      };
+      timer = setTimeout(finish, 1200);
+      window.addEventListener('message', onMessage);
+      window.postMessage({
+        channel: BRIDGE_CHANNEL,
+        type: 'request',
+        requestId,
+        action: 'lockAccountVault',
+        payload: {},
+      }, location.origin);
+    });
   }
 
   async function loadAccount() {
@@ -25,6 +62,7 @@
         headers: { Accept: 'application/json' },
       });
       if (response.status === 401 || response.status === 403) {
+        try { await lockAccountVault(); } catch {}
         const next = location.pathname + location.search;
         location.replace('/login?next=' + encodeURIComponent(next));
         return;
@@ -54,6 +92,7 @@
       button.disabled = true;
       if (label) label.textContent = '正在退出…';
       try {
+        try { await lockAccountVault(); } catch {}
         await fetch('/api/auth/logout', {
           method: 'POST',
           credentials: 'same-origin',

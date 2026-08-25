@@ -29,6 +29,7 @@ const routes = new Map([
   ['/diagnosis-spec.js', { path: join(extensionRoot, 'diagnosis-spec.js'), type: 'text/javascript; charset=utf-8' }],
   ['/xhs-contract.js', { path: join(extensionRoot, 'xhs', 'contract.js'), type: 'text/javascript; charset=utf-8' }],
   ['/xhs-metrics.js', { path: join(extensionRoot, 'xhs', 'metrics.js'), type: 'text/javascript; charset=utf-8' }],
+  ['/xhs-report-model.js', { path: join(extensionRoot, 'xhs', 'report-model.js'), type: 'text/javascript; charset=utf-8' }],
   ['/xlsx.full.min.js', { path: join(extensionRoot, 'vendor', 'xlsx.full.min.js'), type: 'text/javascript; charset=utf-8' }],
 ]);
 

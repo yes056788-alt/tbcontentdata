@@ -220,6 +220,55 @@ test('page-client times out a page request whose sender never settles', async ()
   );
 });
 
+test('page-client classifies an undefined receiver response without obscuring platform API errors', async () => {
+  const { BRIDGE_UNAVAILABLE_CODE, createPageClient } = loadPageClient();
+  const missingReceiver = createPageClient({
+    async sendMessage() {
+      return undefined;
+    },
+  });
+  await assert.rejects(
+    missingReceiver.request(pageRequest()),
+    (error) => error && error.code === BRIDGE_UNAVAILABLE_CODE && error.retryable === true,
+  );
+
+  const apiFailure = createPageClient({
+    async sendMessage(tabId, message) {
+      return responseFor(message, {
+        ok: false,
+        code: 'FICTIONAL_PLATFORM_API_ERROR',
+        message: 'fictional platform no response',
+        retryable: true,
+      });
+    },
+  });
+  await assert.rejects(
+    apiFailure.request(pageRequest()),
+    (error) => error && error.code === 'FICTIONAL_PLATFORM_API_ERROR',
+  );
+});
+
+test('page-client classifies Chrome stale-receiver rejection for one runtime-owned recovery', async () => {
+  const { BRIDGE_UNAVAILABLE_CODE, createPageClient } = loadPageClient();
+  for (const message of [
+    'Could not establish connection. Receiving end does not exist.',
+    'No tab with id: 17.',
+    'A listener indicated an asynchronous response, but the message channel closed before a response was received.',
+  ]) {
+    const client = createPageClient({
+      async sendMessage() {
+        throw new Error(message);
+      },
+    });
+
+    await assert.rejects(
+      client.request(pageRequest()),
+      (error) => error && error.code === BRIDGE_UNAVAILABLE_CODE && error.retryable === true,
+      message,
+    );
+  }
+});
+
 test('platform content bridge does not register outside a top-level exact origin', () => {
   const childFrame = evaluatePlatformContent({ topFrame: false });
   assert.equal(childFrame.runtimeListeners.length, 0);

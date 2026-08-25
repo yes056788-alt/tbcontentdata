@@ -12,6 +12,7 @@ import {
 } from "./icons";
 import { isLocalPreview, loginPath } from "./auth-api";
 import { TeamTopbar } from "./team-topbar";
+import { lockVaultAndRedirect } from "./vault-session-lock";
 
 const CHANNEL = "taobao-full-chain-tool-v1";
 
@@ -107,7 +108,7 @@ export function DashboardClient() {
       const sessionPayload = await getJson("/api/session");
       const nextSession = normalizeSession(sessionPayload);
       if (nextSession.mustChangePassword) {
-        window.location.replace("/change-password");
+        await lockVaultAndRedirect("/change-password");
         return;
       }
       let vaultReady = nextSession.vaultReady;
@@ -116,7 +117,8 @@ export function DashboardClient() {
           const vaultRoot = pickRecord(await getJson("/api/vault"));
           vaultReady = vaultRoot.vault !== null && isRecord(vaultRoot.vault);
         } catch (vaultError) {
-          if (vaultError instanceof ApiError && vaultError.status === 401) throw vaultError;
+          if (vaultError instanceof ApiError &&
+              (vaultError.status === 401 || vaultError.status === 403)) throw vaultError;
           setSession({ ...nextSession, vaultReady: false });
           setError(vaultError instanceof Error ? vaultError.message : "账号库状态暂时无法读取。");
           return;
@@ -127,12 +129,13 @@ export function DashboardClient() {
         vaultReady,
       });
     } catch (loadError) {
-      if (loadError instanceof ApiError && loadError.status === 401) {
+      if (loadError instanceof ApiError &&
+          (loadError.status === 401 || loadError.status === 403)) {
         if (isLocalPreview()) {
           setAuthRequired(true);
           setSession(null);
         } else {
-          window.location.replace(loginPath(`${window.location.pathname}${window.location.search}`));
+          await lockVaultAndRedirect(loginPath(`${window.location.pathname}${window.location.search}`));
         }
       } else {
         setError(loadError instanceof Error ? loadError.message : "工作台加载失败，请稍后重试。");
@@ -199,8 +202,8 @@ export function DashboardClient() {
         <div className="hero__glow hero__glow--two" />
         <div className="hero__content">
           <div className="eyebrow"><ShieldIcon /> 团队安全空间</div>
-          <h1 id="hero-title">一个账号库，协同完成<br /><span>全链路经营取数</span></h1>
-          <p>账号密文、运行历史和诊断结果统一保存。团队成员按权限使用，每一次操作都有清晰边界。</p>
+          <h1 id="hero-title">团队密码库，协同完成<br /><span>全链路经营取数</span></h1>
+          <p>账号密文绑定团队工作区，运行历史和诊断结果统一保存。成员按权限共享，每一次操作都有清晰边界。</p>
           <div className="hero-install" role="group" aria-labelledby="extension-install-title">
             <span className="hero-install__icon"><DownloadIcon /></span>
             <span className="hero-install__copy">
@@ -242,8 +245,8 @@ export function DashboardClient() {
           <div className="status-item">
             <span className={`status-icon ${error ? "is-warn" : session?.vaultReady ? "is-ok" : "is-neutral"}`}><DatabaseIcon /></span>
             <span>
-              <strong>共享加密账号库</strong>
-              <small>{error ? "暂时无法确认账号库状态" : session?.vaultReady ? "已建立，可按权限同步" : "等待管理员首次上传"}</small>
+              <strong>团队共享加密密码库</strong>
+              <small>{error ? "暂时无法确认账号库状态" : session?.vaultReady ? "已建立，团队成员可按权限同步" : "等待管理员首次上传"}</small>
             </span>
             <i className={`signal ${error ? "is-warn" : session?.vaultReady ? "is-ok" : "is-neutral"}`} aria-label={error ? "异常" : session?.vaultReady ? "已就绪" : "待初始化"} />
           </div>

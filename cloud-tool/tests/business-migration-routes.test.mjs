@@ -26,6 +26,13 @@ test("migration package is encrypted, manifested, and explicitly excludes sensit
   assert.match(exportSource, /for await \(const row of pagedRunRows\(\)\)/);
   assert.match(exportSource, /const consistent =/);
   assert.match(exportSource, /assertMigrationSafeRun/);
+  assert.match(exportSource, /isSharedVaultTombstonePayload/);
+  assert.match(exportSource, /vaultDeleted/);
+  assert.match(
+    exportSource,
+    /deleted:\s*sourceVaultDeleted/,
+  );
+  assert.doesNotMatch(exportSource, /vault:\s*isSharedVaultTombstonePayload[\s\S]*?\?\s*undefined/);
   assert.doesNotMatch(exportSource, /summaries\s*=\s*\[|runRows\s*[:,=]/);
   assert.doesNotMatch(exportSource, /authSessions|localAccounts|members|process\.env/);
 });
@@ -60,4 +67,8 @@ test("CLI accepts migration secrets only from environment variables", async () =
   assert.match(cli, /process\.env\.RUN_DATA_KEY/);
   assert.doesNotMatch(cli, /--passphrase|--run-data-key/);
   assert.match(cli, /dryRun: true/);
+  assert.match(cli, /--recreate-vault/);
+  assert.match(cli, /recreateVault: options\.recreateVault/);
+  assert.match(cli, /accepts v2\/v3\/v4 packages/);
+  assert.match(cli, /formatVersion: (verified|result)\.manifest\.version/);
 });

@@ -32,9 +32,9 @@
 
     <section id="vaultGate" class="vault-gate" aria-labelledby="vaultTitle">
       <div class="vault-panel">
-        <span class="section-kicker">LOCAL VAULT</span>
+        <span class="section-kicker">TEAM VAULT</span>
         <h1 id="vaultTitle">解锁账号库</h1>
-        <p id="vaultCopy">账号密码使用主密码加密保存在本机。</p>
+        <p id="vaultCopy">账号密码使用团队主密码加密；在线版绑定当前团队工作区，云端只同步密文。</p>
         <form id="vaultForm">
           <label for="masterPassword">主密码</label>
           <input id="masterPassword" name="masterPassword" type="password" autocomplete="current-password" minlength="8" required>
@@ -97,10 +97,13 @@
         <div><label for="accountPlatform">账号平台</label><select id="accountPlatform"><option value="taobao">淘宝</option><option value="xiaohongshu">小红书</option></select></div>
         <div><label for="accountStoreGroupSelect">店铺分组</label><select id="accountStoreGroupSelect"></select></div>
         <div><label for="accountStoreName">店铺名称</label><input id="accountStoreName" type="text" maxlength="80" list="knownStoreNames" required><datalist id="knownStoreNames"></datalist></div>
+        <div><label for="loginLabel">账号备注</label><input id="loginLabel" type="text" maxlength="80" autocomplete="off" placeholder="例如：品牌主账号"></div>
         <div><label for="loginUsername">登录账号</label><input id="loginUsername" type="text" maxlength="160" autocomplete="off" required></div>
         <div><label for="loginPassword">登录密码</label><input id="loginPassword" type="password" maxlength="240" autocomplete="new-password" required><label class="check-row"><input id="showAccountPassword" type="checkbox">显示密码</label></div>
         <div id="roleKeywordField"><label for="roleKeyword">淘宝登录身份</label><input id="roleKeyword" type="text" maxlength="50" value="品牌" placeholder="例如：品牌"></div>
-        <label id="accountEnabledField" class="check-row account-enabled"><input id="accountEnabled" type="checkbox" checked>参与淘宝批量任务</label>
+        <label id="accountEnabledField" class="check-row account-enabled"><input id="accountEnabled" type="checkbox" checked><span id="accountEnabledLabel">用于一键登录并参与淘宝批量任务</span></label>
+        <label id="defaultCredentialField" class="check-row account-enabled"><input id="defaultCredential" type="checkbox" checked><span id="defaultCredentialLabel">设为该店铺默认登录账号</span></label>
+        <p class="form-hint">小红书默认账号由蒲公英 + 聚光共用；不会分别保存两套密码。</p>
       </div>
       <div class="form-actions end"><button id="cancelAccountBtn" class="button" type="button">取消</button><button class="button primary" type="submit">保存账号</button></div>
     </form>

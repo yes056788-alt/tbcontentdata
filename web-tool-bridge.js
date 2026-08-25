@@ -16,7 +16,6 @@
     'parallelPlatformRuns',
     'accountVault',
     'accountSessionUnlock',
-    'accountSessionManagement',
     'accountBatch',
     'accountBatchMultiSelect',
     'storeRunArchive',
@@ -24,17 +23,26 @@
     'cloudSync',
     'projectDirectory',
     'projectTasks',
+    'projectTaskCancel',
     'xhsAnalysis',
-    'xhsBindingManagement',
   ];
   const ACCOUNT_VAULT_KEY = 'taobaoAccountVaultV1';
+  const ACCOUNT_VAULT_SCOPE_KEY = 'taobaoAccountVaultScopeV1';
+  const ACCOUNT_VAULT_SCOPED_PREFIX = 'taobaoAccountVaultScopedV1:';
+  const ACCOUNT_VAULT_REMOTE_STATE_PREFIX = 'taobaoAccountVaultRemoteStateV1:';
+  // Migration-only marker used by an intermediate build which kept one
+  // shared active key. New reads and writes never trust it as an authority.
+  const ACCOUNT_VAULT_ACTIVE_SCOPE_KEY = 'taobaoAccountVaultActiveScopeV1';
+  const ACCOUNT_VAULT_LOCK_EPOCH_KEY = 'taobaoAccountVaultLockEpochV1';
+  const ACCOUNT_VAULT_LEGACY_KEY = 'taobaoAccountVaultLegacyV1';
+  const ACCOUNT_VAULT_QUARANTINE_PREFIX = 'taobaoAccountVaultQuarantineV1:';
   const ACCOUNT_BATCH_STATUS_KEY = 'taobaoAccountBatchStatusV1';
   const PROJECT_DIRECTORY_KEY = 'taobaoProjectDirectoryV1';
   const PROJECT_TASK_STATUS_KEY = 'taobaoProjectTaskStatusV1';
-  const XHS_STORE_BINDINGS_KEY = 'xhsStoreAccountBindingsV1';
   const STORE_RUN_INDEX_KEY = 'taobaoStoreRunIndexV1';
   const STORE_RUN_KEY_PREFIX = 'taobaoStoreRunV1:';
   const MAX_IMPORTED_RUN_BYTES = 24 * 1024 * 1024;
+  const XHS_DETAIL_KEY_PREFIX = 'xhsAnalysisDetailChunkV1:';
   const ARCHIVE_SNAPSHOT_KEYS = new Set([
     'businessDefenseSycmTrafficSnapshotV1',
     'gh_channel_snapshot',
@@ -51,6 +59,9 @@
   const TEAM_DASHBOARD_ORIGINS = new Set([
     'https://tbdata.aizicheng.com',
   ]);
+  const TEAM_VAULT_START_AUTH_CHALLENGE_TYPE = 'TEAM_VAULT_START_AUTH_CHALLENGE';
+  const TEAM_VAULT_START_AUTH_TIMEOUT_MS = 8000;
+  const TEAM_VAULT_OPERATOR_ROLES = new Set(['owner', 'admin', 'operator']);
   const ALLOWED_ORIGINS = new Set([
     'http://localhost:3400',
     'http://127.0.0.1:3400',
@@ -65,7 +76,15 @@
     '/data.html',
     '/report-view.html',
   ]);
-  if (TEAM_DASHBOARD_ORIGINS.has(location.origin) && !TEAM_WORKBENCH_PATHS.has(location.pathname)) return;
+  const TEAM_LOCK_ONLY_PATHS = new Set([
+    '/admin', '/admin/', '/change-password', '/change-password/', '/migration', '/migration/',
+    '/login', '/login/',
+  ]);
+  const lockOnlyPage = TEAM_DASHBOARD_ORIGINS.has(location.origin) && TEAM_LOCK_ONLY_PATHS.has(location.pathname);
+  const autoLockPage = TEAM_DASHBOARD_ORIGINS.has(location.origin) &&
+    (location.pathname === '/login' || location.pathname === '/login/');
+  if (TEAM_DASHBOARD_ORIGINS.has(location.origin) &&
+      !TEAM_WORKBENCH_PATHS.has(location.pathname) && !lockOnlyPage) return;
   window.__taobaoFullChainBridgeV1 = true;
 
   const READABLE_KEYS = new Set([
@@ -102,6 +121,35 @@
     'sycmContentDiagnosisSnapshotV1',
     'wxtReportApiTraceV1',
   ]);
+
+  function isXhsDetailStorageKey(value) {
+    const key = String(value == null ? '' : value);
+    return key.startsWith(XHS_DETAIL_KEY_PREFIX) && /^\d{4,6}$/.test(
+      key.slice(XHS_DETAIL_KEY_PREFIX.length)
+    );
+  }
+
+  function xhsDetailKeysFromSnapshot(value) {
+    const manifest = value && typeof value === 'object' && !Array.isArray(value)
+      ? value.detailArchive
+      : null;
+    if (!manifest || manifest.schema !== 'xhsAnalysisDetailManifestV1' ||
+        !Array.isArray(manifest.chunks)) return [];
+    return manifest.chunks.slice(0, 4096).map((chunk) => String(chunk && chunk.key || ''))
+      .filter((key, index, keys) => isXhsDetailStorageKey(key) && keys.indexOf(key) === index);
+  }
+
+  function isArchiveSnapshotKey(key) {
+    return ARCHIVE_SNAPSHOT_KEYS.has(key) || isXhsDetailStorageKey(key);
+  }
+
+  function isReadableStorageKey(key) {
+    return READABLE_KEYS.has(key) || isXhsDetailStorageKey(key);
+  }
+
+  function isClearableStorageKey(key) {
+    return CLEARABLE_KEYS.has(key) || isXhsDetailStorageKey(key);
+  }
   const MANUAL_KEYS = new Set([
     'xhs_kolSpend',
     'xhs_juguangSpend',
@@ -137,18 +185,236 @@
   const VERSION = chrome.runtime.getManifest().version;
   const PLATFORM_TASK_IDS = ['sycm', 'guanghe', 'wxt', 'dmp'];
   const XHS_PLATFORM_TASK_IDS = ['adstar', 'pgy', 'juguang'];
-  const XHS_BINDING_PLATFORM_NAMES = Object.freeze({
-    adstar: '淘宝星河',
-    pgy: '蒲公英',
-    juguang: '聚光',
-  });
 
   function cleanText(value, maxLength) {
     return String(value == null ? '' : value).trim().slice(0, Number(maxLength) || 160);
   }
 
-  function normalizeAccountPlatform(value) {
-    return value === 'xiaohongshu' ? 'xiaohongshu' : 'taobao';
+  function currentVaultScopeId() {
+    if (TEAM_DASHBOARD_ORIGINS.has(location.origin)) return 'team:' + location.origin;
+    if (location.origin === 'http://localhost:3400' || location.origin === 'http://127.0.0.1:3400') {
+      return 'local:tbcontentdata';
+    }
+    throw new Error('当前站点不属于允许的账号库工作区。');
+  }
+
+  function validVaultScopeId(value) {
+    const scopeId = cleanText(value, 220);
+    return scopeId === 'local:tbcontentdata' || scopeId === 'team:https://tbdata.aizicheng.com'
+      ? scopeId
+      : '';
+  }
+
+  function isVaultLikeRecord(value) {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value) &&
+      Number(value.schema) === 1 && value.cipher && typeof value.cipher === 'object');
+  }
+
+  function scopedVaultStorageKey(vaultScopeId) {
+    const safeScopeId = validVaultScopeId(vaultScopeId);
+    if (!safeScopeId) throw new Error('账号库工作区范围无效。');
+    return ACCOUNT_VAULT_SCOPED_PREFIX + encodeURIComponent(safeScopeId);
+  }
+
+  function vaultRemoteStateStorageKey(vaultScopeId) {
+    const safeScopeId = validVaultScopeId(vaultScopeId);
+    if (!safeScopeId) throw new Error('账号库工作区范围无效。');
+    return ACCOUNT_VAULT_REMOTE_STATE_PREFIX + encodeURIComponent(safeScopeId);
+  }
+
+  function vaultRemoteState(value, expectedVaultScopeId) {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const vaultScopeId = validVaultScopeId(source.vaultScopeId);
+    const revision = Number(source.revision);
+    const vaultLockEpoch = Number(source.vaultLockEpoch);
+    if (Number(source.schema) !== 1 || !vaultScopeId ||
+        !Number.isSafeInteger(revision) || revision < 1 ||
+        source.deleted !== true || !Number.isSafeInteger(vaultLockEpoch) ||
+        vaultLockEpoch < 1) return null;
+    if (expectedVaultScopeId && vaultScopeId !== expectedVaultScopeId) return null;
+    return { schema: 1, vaultScopeId, revision, deleted: true, vaultLockEpoch };
+  }
+
+  function makeVaultRemoteState(vaultScopeId, revision, vaultLockEpoch) {
+    const safeScopeId = validVaultScopeId(vaultScopeId);
+    const safeRevision = Number(revision);
+    const safeEpoch = Number(vaultLockEpoch);
+    if (!safeScopeId || !Number.isSafeInteger(safeRevision) || safeRevision < 1) {
+      throw new Error('云端账号库版本无效。');
+    }
+    if (!Number.isSafeInteger(safeEpoch) || safeEpoch < 1) {
+      throw new Error('账号库删除锁定版本无效。');
+    }
+    return {
+      schema: 1,
+      vaultScopeId: safeScopeId,
+      revision: safeRevision,
+      deleted: true,
+      vaultLockEpoch: safeEpoch,
+    };
+  }
+
+  function scopedVaultEnvelope(value, expectedVaultScopeId) {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const vaultScopeId = validVaultScopeId(source.vaultScopeId);
+    if (Number(source.schema) !== 1 || !vaultScopeId || !isVaultLikeRecord(source.vault)) return null;
+    if (expectedVaultScopeId && vaultScopeId !== expectedVaultScopeId) return null;
+    const remoteRevision = Number(source.remoteRevision);
+    const vaultLockEpoch = Number(source.vaultLockEpoch);
+    return {
+      schema: 1,
+      vaultScopeId,
+      vault: source.vault,
+      remoteRevision: Number.isSafeInteger(remoteRevision) && remoteRevision >= 1 ? remoteRevision : 0,
+      vaultLockEpoch: Number.isSafeInteger(vaultLockEpoch) && vaultLockEpoch >= 0 ? vaultLockEpoch : 0,
+    };
+  }
+
+  function makeScopedVaultEnvelope(vaultScopeId, vault, remoteRevision, vaultLockEpoch) {
+    const safeScopeId = validVaultScopeId(vaultScopeId);
+    if (!safeScopeId) throw new Error('账号库工作区范围无效。');
+    const safeRemoteRevision = Number(remoteRevision);
+    const safeEpoch = Number(vaultLockEpoch);
+    const envelope = {
+      schema: 1,
+      vaultScopeId: safeScopeId,
+      vault,
+    };
+    if (Number.isSafeInteger(safeRemoteRevision) && safeRemoteRevision >= 1) {
+      envelope.remoteRevision = safeRemoteRevision;
+    }
+    if (Number.isSafeInteger(safeEpoch) && safeEpoch >= 0) {
+      envelope.vaultLockEpoch = safeEpoch;
+    }
+    return envelope;
+  }
+
+  async function currentVaultLockEpoch() {
+    const stored = await chrome.storage.local.get([ACCOUNT_VAULT_LOCK_EPOCH_KEY]);
+    return Math.max(0, Number(stored[ACCOUNT_VAULT_LOCK_EPOCH_KEY]) || 0);
+  }
+
+  function requestedVaultLockEpoch(value) {
+    const epoch = Number(value);
+    if (!Number.isSafeInteger(epoch) || epoch < 0) {
+      throw new Error('账号库锁定版本无效，请刷新页面后重试。');
+    }
+    return epoch;
+  }
+
+  async function lockAccountVaultSession() {
+    const nextEpoch = await currentVaultLockEpoch() + 1;
+    await chrome.storage.local.set({ [ACCOUNT_VAULT_LOCK_EPOCH_KEY]: nextEpoch });
+    const response = await runtimeMessage({
+      type: 'ACCOUNT_SESSION_LOCK',
+      source: 'business-defense-web-tool',
+      vaultLockEpoch: nextEpoch,
+    });
+    if (!response || response.ok === false) {
+      throw new Error(response && response.message || '账号库会话锁定失败。');
+    }
+    const vaultLockEpoch = Math.max(nextEpoch, Number(response.vaultLockEpoch) || 0);
+    if (vaultLockEpoch !== nextEpoch) {
+      await chrome.storage.local.set({ [ACCOUNT_VAULT_LOCK_EPOCH_KEY]: vaultLockEpoch });
+    }
+    return { ok: true, locked: true, vaultLockEpoch };
+  }
+
+  async function bindAccountVaultScope() {
+    const vaultScopeId = currentVaultScopeId();
+    const scopedKey = scopedVaultStorageKey(vaultScopeId);
+    const returningKey = ACCOUNT_VAULT_QUARANTINE_PREFIX + encodeURIComponent(vaultScopeId);
+    const stored = await chrome.storage.local.get([
+      scopedKey,
+      ACCOUNT_VAULT_KEY,
+      ACCOUNT_VAULT_SCOPE_KEY,
+      ACCOUNT_VAULT_ACTIVE_SCOPE_KEY,
+      ACCOUNT_VAULT_LEGACY_KEY,
+      returningKey,
+    ]);
+    const currentScopeId = validVaultScopeId(stored[ACCOUNT_VAULT_SCOPE_KEY]);
+    const activeVault = stored[ACCOUNT_VAULT_KEY];
+    const activeScopeId = validVaultScopeId(stored[ACCOUNT_VAULT_ACTIVE_SCOPE_KEY]);
+    const returningVault = stored[returningKey];
+    let targetEnvelope = scopedVaultEnvelope(stored[scopedKey], vaultScopeId);
+    let lock = null;
+    const ensureLocked = async () => {
+      if (!lock) lock = await lockAccountVaultSession();
+      return lock;
+    };
+    let isolated = false;
+    let claimedLegacy = false;
+    let migrated = false;
+
+    // Migrate the old shared active key into a scope-specific key. A tagged
+    // record can be routed without trusting the current page. An untagged
+    // record is claimable only by the explicit local-development scope;
+    // production preserves it for an authenticated recovery flow.
+    if (isVaultLikeRecord(activeVault)) {
+      await ensureLocked();
+      const sourceScopeId = activeScopeId;
+      if (sourceScopeId) {
+        const sourceKey = scopedVaultStorageKey(sourceScopeId);
+        const existingSource = sourceKey === scopedKey
+          ? targetEnvelope
+          : scopedVaultEnvelope((await chrome.storage.local.get([sourceKey]))[sourceKey], sourceScopeId);
+        if (!existingSource) {
+          const envelope = makeScopedVaultEnvelope(sourceScopeId, activeVault);
+          await chrome.storage.local.set({ [sourceKey]: envelope });
+          if (sourceScopeId === vaultScopeId) targetEnvelope = envelope;
+        }
+        migrated = true;
+      } else if (vaultScopeId === 'local:tbcontentdata') {
+        if (!targetEnvelope) {
+          targetEnvelope = makeScopedVaultEnvelope(vaultScopeId, activeVault);
+          await chrome.storage.local.set({ [scopedKey]: targetEnvelope });
+        }
+        claimedLegacy = true;
+      } else if (!isVaultLikeRecord(stored[ACCOUNT_VAULT_LEGACY_KEY])) {
+        await chrome.storage.local.set({ [ACCOUNT_VAULT_LEGACY_KEY]: activeVault });
+        isolated = true;
+      }
+      await chrome.storage.local.remove([ACCOUNT_VAULT_KEY, ACCOUNT_VAULT_ACTIVE_SCOPE_KEY]);
+    }
+
+    // Recover quarantines written by the preceding scoped implementation.
+    const restore = Boolean(!targetEnvelope && isVaultLikeRecord(returningVault));
+    if (restore) {
+      targetEnvelope = makeScopedVaultEnvelope(vaultScopeId, returningVault);
+      await chrome.storage.local.set({ [scopedKey]: targetEnvelope });
+      await chrome.storage.local.remove(returningKey);
+    }
+
+    if (currentScopeId !== vaultScopeId) await ensureLocked();
+    await chrome.storage.local.set({ [ACCOUNT_VAULT_SCOPE_KEY]: vaultScopeId });
+    const vaultLockEpoch = lock ? lock.vaultLockEpoch : await currentVaultLockEpoch();
+    return {
+      bound: true,
+      changed: currentScopeId !== vaultScopeId || isolated || claimedLegacy || migrated || restore,
+      isolated,
+      restored: restore,
+      claimedLegacy,
+      migrated,
+      legacyAvailable: TEAM_DASHBOARD_ORIGINS.has(location.origin) &&
+        (isValidEncryptedVault(stored[ACCOUNT_VAULT_LEGACY_KEY]) || isolated),
+      vaultScopeId,
+      vaultLockEpoch,
+    };
+  }
+
+  async function requireBoundVaultScope() {
+    const vaultScopeId = currentVaultScopeId();
+    const stored = await chrome.storage.local.get([ACCOUNT_VAULT_SCOPE_KEY]);
+    if (validVaultScopeId(stored[ACCOUNT_VAULT_SCOPE_KEY]) === vaultScopeId) {
+      return { vaultScopeId, vaultLockEpoch: await currentVaultLockEpoch() };
+    }
+    const binding = await bindAccountVaultScope();
+    return { vaultScopeId: binding.vaultScopeId, vaultLockEpoch: binding.vaultLockEpoch };
+  }
+
+  function normalizeAccountPlatform(value, allowLegacyDefault) {
+    if (value === 'taobao' || value === 'xiaohongshu') return value;
+    return allowLegacyDefault && (value === undefined || value === null || value === '') ? 'taobao' : '';
   }
 
   function validBase64(value, maxLength) {
@@ -175,6 +441,92 @@
       cipher: { name: 'AES-GCM', iv, data },
       updatedAt: Number(source.updatedAt) || Date.now(),
     };
+  }
+
+  function isValidEncryptedVault(value) {
+    try {
+      sanitizeEncryptedVault(value);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function sanitizeVaultSessionKey(value) {
+    const encoded = validBase64(value, 100);
+    if (!encoded) throw new Error('账号库会话密钥无效，请重新解锁。');
+    try {
+      if (atob(encoded).length !== 32) throw new Error('invalid key length');
+    } catch (error) {
+      throw new Error('账号库会话密钥无效，请重新解锁。');
+    }
+    return encoded;
+  }
+
+  function base64Bytes(value) {
+    const binary = atob(String(value || ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+
+  function encodeBase64Bytes(bytes) {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    }
+    return btoa(binary);
+  }
+
+  async function encryptVaultWithSessionKey(value, encryptedRecord, encodedSessionKey) {
+    const record = sanitizeEncryptedVault(encryptedRecord);
+    const sessionKey = sanitizeVaultSessionKey(encodedSessionKey);
+    const key = await crypto.subtle.importKey(
+      'raw',
+      base64Bytes(sessionKey),
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt']
+    );
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const plaintext = new TextEncoder().encode(JSON.stringify(sanitizeAccountSessionVault(value)));
+    const ciphertext = await crypto.subtle.encrypt({
+      name: 'AES-GCM',
+      iv,
+      additionalData: new TextEncoder().encode('taobao-account-vault-v1'),
+    }, key, plaintext);
+    return {
+      schema: 1,
+      kdf: Object.assign({}, record.kdf),
+      cipher: {
+        name: 'AES-GCM',
+        iv: encodeBase64Bytes(iv),
+        data: encodeBase64Bytes(new Uint8Array(ciphertext)),
+      },
+      updatedAt: Date.now(),
+    };
+  }
+
+  async function encryptedVaultFingerprint(value) {
+    const vault = sanitizeEncryptedVault(value);
+    const bytes = new TextEncoder().encode(JSON.stringify(vault));
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest)).map((byte) => (
+      byte.toString(16).padStart(2, '0')
+    )).join('');
+  }
+
+  async function activeVaultRecord(vaultContext) {
+    const scopedKey = scopedVaultStorageKey(vaultContext.vaultScopeId);
+    const remoteStateKey = vaultRemoteStateStorageKey(vaultContext.vaultScopeId);
+    const stored = await chrome.storage.local.get([scopedKey, remoteStateKey]);
+    const envelope = scopedVaultEnvelope(stored[scopedKey], vaultContext.vaultScopeId);
+    const remoteState = vaultRemoteState(stored[remoteStateKey], vaultContext.vaultScopeId);
+    const survivesTombstone = !remoteState || (envelope &&
+      envelope.remoteRevision > remoteState.revision &&
+      envelope.vaultLockEpoch >= remoteState.vaultLockEpoch);
+    return envelope && survivesTombstone ? sanitizeEncryptedVault(envelope.vault) : null;
   }
 
   function sanitizeProjectDirectory(value) {
@@ -305,7 +657,15 @@
       const name = cleanText(item.name, 120);
       if (!id || !name || storeIds.has(id)) return null;
       storeIds.add(id);
-      return { id, name, groupId: storeGroupIds.has(item.groupId) ? item.groupId : '' };
+      return {
+        id,
+        name,
+        groupId: storeGroupIds.has(item.groupId) ? item.groupId : '',
+        credentialBindings: {
+          taobaoAccountId: cleanText(item.credentialBindings && item.credentialBindings.taobaoAccountId, 100),
+          xiaohongshuAccountId: cleanText(item.credentialBindings && item.credentialBindings.xiaohongshuAccountId, 100),
+        },
+      };
     }).filter(Boolean);
     const accountIds = new Set();
     const accounts = (Array.isArray(source.accounts) ? source.accounts : []).slice(0, 500).map((value) => {
@@ -315,11 +675,12 @@
       const username = cleanText(item.username, 240);
       const password = String(item.password == null ? '' : item.password).slice(0, 360);
       const platform = normalizeAccountPlatform(item.platform);
-      if (!id || accountIds.has(id) || !storeIds.has(storeId) || !username || !password) return null;
+      if (!id || accountIds.has(id) || !storeIds.has(storeId) || !platform || !username || !password) return null;
       accountIds.add(id);
       return {
         id,
-        name: cleanText(item.name, 100) || username,
+        label: cleanText(item.label || item.name, 100) || (platform === 'xiaohongshu' ? '小红书账号' : '淘宝账号'),
+        name: cleanText(item.label || item.name, 100) || (platform === 'xiaohongshu' ? '小红书账号' : '淘宝账号'),
         platform,
         storeId,
         username,
@@ -329,8 +690,18 @@
         enabled: item.enabled !== false,
       };
     }).filter(Boolean);
+    const accountsById = new Map(accounts.map((account) => [account.id, account]));
+    stores.forEach((store) => {
+      const bindings = store.credentialBindings;
+      [['taobaoAccountId', 'taobao'], ['xiaohongshuAccountId', 'xiaohongshu']].forEach(([key, platform]) => {
+        const account = accountsById.get(bindings[key]);
+        if (!account || account.storeId !== store.id || account.platform !== platform || account.enabled === false) {
+          bindings[key] = '';
+        }
+      });
+    });
     return {
-      schema: 3,
+      schema: 4,
       accountGroups,
       storeGroups,
       stores,
@@ -342,7 +713,7 @@
     };
   }
 
-  function sanitizeSessionBatchRequest(value) {
+  function sanitizeSessionBatchRequest(value, vaultScopeId) {
     const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     const rawSelection = source.selection && typeof source.selection === 'object' ? source.selection : {};
     const accountIds = Array.from(new Set((Array.isArray(rawSelection.accountIds)
@@ -359,6 +730,7 @@
       resume: source.resume === true,
       taskType: 'report',
       platforms: sanitizePlatformTasks(source.platforms),
+      vaultScopeId,
     };
   }
 
@@ -370,10 +742,20 @@
     if (!storeId || !storeName) throw new Error('请先选择本次任务归属的店铺。');
     const platforms = sanitizeProjectPlatformTasks(source.platforms);
     const hasXhs = platforms.some((platform) => XHS_PLATFORM_TASK_IDS.includes(platform));
+    const credentialMode = cleanText(source.credentialMode, 32);
+    if (!['vault', 'currentSession'].includes(credentialMode)) {
+      throw new Error('请选择有效的登录方式。');
+    }
+    const concurrentAccountTabs = Number(source.concurrentAccountTabs);
     return {
       taskType: 'report',
       platforms,
+      credentialMode,
       dateRange: hasXhs ? sanitizeXhsDateRange(source.dateRange) : null,
+      concurrentAccountTabs: platforms.includes('juguang') &&
+        [2, 3].includes(concurrentAccountTabs)
+        ? concurrentAccountTabs
+        : undefined,
       store: {
         id: storeId,
         name: storeName,
@@ -389,102 +771,49 @@
     }
   }
 
-  function isPlainObject(value) {
-    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-  }
-
-  function sanitizeXhsBindingPlatform(value) {
-    const platform = cleanText(value, 24);
-    if (!XHS_PLATFORM_TASK_IDS.includes(platform)) {
-      throw new Error('小红书绑定平台不在允许范围内。');
+  function requireAccountManagementPage() {
+    if (location.pathname !== '/accounts.html' || window.top !== window) {
+      throw new Error('请从顶层“账号库管理”页面修改账号会话。');
     }
-    return platform;
   }
 
-  function safeXhsBindingUpdatedAt(value) {
-    const updatedAt = cleanText(value, 80);
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(updatedAt) ||
-        !Number.isFinite(Date.parse(updatedAt))) return '';
-    return updatedAt;
+  function requireTeamLegacyRecoveryPage() {
+    requireAccountManagementPage();
+    if (!TEAM_DASHBOARD_ORIGINS.has(location.origin)) {
+      throw new Error('仅在已登录的在线团队账号库页面迁移旧账号库。');
+    }
+    if (currentVaultScopeId() !== 'team:https://tbdata.aizicheng.com') {
+      throw new Error('当前页面不属于可迁移的团队工作区。');
+    }
   }
 
-  function xhsBindingSummary(registry, storeId) {
-    const stores = isPlainObject(registry && registry.stores) ? registry.stores : {};
-    const store = isPlainObject(stores[storeId]) ? stores[storeId] : {};
-    const platforms = isPlainObject(store.platforms) ? store.platforms : {};
-    const updatedAt = safeXhsBindingUpdatedAt(store.updatedAt);
-    return {
-      platforms: Object.fromEntries(XHS_PLATFORM_TASK_IDS.map((platform) => [platform, {
-        bound: Array.isArray(platforms[platform]) && platforms[platform].some((token) => (
-          typeof token === 'string' && token.trim().length > 0
-        )),
-        updatedAt,
-      }])),
-    };
+  function requireTeamVaultSyncPage() {
+    if (!TEAM_DASHBOARD_ORIGINS.has(location.origin) || window.top !== window ||
+        !TEAM_WORKBENCH_PATHS.has(location.pathname)) {
+      throw new Error('仅允许已登录的顶层团队工作台应用账号库删除标记。');
+    }
+    if (currentVaultScopeId() !== 'team:https://tbdata.aizicheng.com') {
+      throw new Error('当前页面不属于可同步的团队工作区。');
+    }
   }
 
-  function sanitizeXhsBindingSummary(value) {
-    const source = isPlainObject(value) ? value : {};
-    const platforms = isPlainObject(source.platforms) ? source.platforms : {};
-    return {
-      platforms: Object.fromEntries(XHS_PLATFORM_TASK_IDS.map((platform) => {
-        const record = isPlainObject(platforms[platform]) ? platforms[platform] : {};
-        return [platform, {
-          bound: record.bound === true,
-          updatedAt: safeXhsBindingUpdatedAt(record.updatedAt),
-        }];
-      })),
-    };
-  }
-
-  function requireInteractiveXhsBindingReset() {
+  function requireInteractiveProjectTaskCancel() {
     requireOneClickTaskPage();
     if (window.top !== window) {
-      throw new Error('仅允许在顶层一键取数页面解除小红书绑定。');
+      throw new Error('仅允许在顶层一键取数页取消任务。');
     }
     if (document.visibilityState !== 'visible') {
-      throw new Error('请切换到可见的一键取数页面后再解除小红书绑定。');
+      throw new Error('请切换到可见的一键取数页后再取消任务。');
     }
     if (typeof document.hasFocus !== 'function' || !document.hasFocus()) {
-      throw new Error('请先聚焦一键取数页面，再解除小红书绑定。');
+      throw new Error('请先聚焦一键取数页，再取消任务。');
     }
   }
 
-  async function loadXhsBindingManagementContext(payload, options) {
-    requireOneClickTaskPage();
-    const settings = options && typeof options === 'object' ? options : {};
-    const storeId = cleanText(payload && payload.storeId, 100);
-    if (!storeId) throw new Error('请先选择项目目录中的店铺。');
-    const platform = settings.platform ? sanitizeXhsBindingPlatform(payload && payload.platform) : '';
-    const stored = await chrome.storage.local.get([
-      PROJECT_DIRECTORY_KEY,
-      PROJECT_TASK_STATUS_KEY,
-      ACCOUNT_BATCH_STATUS_KEY,
-      XHS_STORE_BINDINGS_KEY,
-    ]);
-    const directory = isPlainObject(stored[PROJECT_DIRECTORY_KEY]) ? stored[PROJECT_DIRECTORY_KEY] : {};
-    const knownStore = (Array.isArray(directory.stores) ? directory.stores : []).find((store) => (
-      isPlainObject(store) && cleanText(store.id, 100) === storeId
-    ));
-    if (!knownStore) throw new Error('所选店铺不在当前项目目录中。');
-    const storeName = cleanText(knownStore.name, 120);
-    if (!storeName) throw new Error('项目目录中的店铺名称无效。');
-    const batchStatus = stored[ACCOUNT_BATCH_STATUS_KEY];
-    if (batchStatus && (batchStatus.running || batchStatus.paused)) {
-      throw new Error('批量任务执行或暂停期间不能管理小红书店铺绑定。');
-    }
-    const taskStatus = stored[PROJECT_TASK_STATUS_KEY];
-    if (taskStatus && taskStatus.running) {
-      throw new Error('当前账号任务执行期间不能管理小红书店铺绑定。');
-    }
-    return {
-      platform,
-      registry: isPlainObject(stored[XHS_STORE_BINDINGS_KEY])
-        ? stored[XHS_STORE_BINDINGS_KEY]
-        : {},
-      storeId,
-      storeName,
-    };
+  function sanitizeProjectTaskId(value) {
+    const taskId = cleanText(value, 120);
+    if (!/^project-task-[a-z0-9-]+$/i.test(taskId)) throw new Error('项目任务编号无效。');
+    return taskId;
   }
 
   function sanitizeRunId(value) {
@@ -596,9 +925,8 @@
     const snapshots = run && typeof run.snapshots === 'object' && !Array.isArray(run.snapshots)
       ? run.snapshots
       : {};
-    for (const key of IMPORTED_XHS_SNAPSHOT_KEYS) {
-      if (!Object.prototype.hasOwnProperty.call(snapshots, key)) continue;
-      const snapshot = snapshots[key];
+    for (const [key, snapshot] of Object.entries(snapshots)) {
+      if (!IMPORTED_XHS_SNAPSHOT_KEYS.has(key) && !isXhsDetailStorageKey(key)) continue;
       let serialized = '';
       try {
         serialized = JSON.stringify(snapshot);
@@ -678,7 +1006,7 @@
       : {};
     const snapshots = {};
     for (const [key, snapshot] of Object.entries(rawSnapshots)) {
-      if (ARCHIVE_SNAPSHOT_KEYS.has(key)) snapshots[key] = snapshot;
+      if (isArchiveSnapshotKey(key)) snapshots[key] = snapshot;
     }
     const taskType = ['collect', 'report', 'both'].includes(cloned.taskType) ? cloned.taskType : '';
     const runMode = ['current', 'batch'].includes(cloned.runMode) ? cloned.runMode : '';
@@ -735,7 +1063,7 @@
     window.postMessage(Object.assign({
       channel: CHANNEL,
       version: VERSION,
-      capabilities: CAPABILITIES.slice(),
+      capabilities: lockOnlyPage ? ['accountVaultLock'] : CAPABILITIES.slice(),
     }, message), location.origin);
   }
 
@@ -749,6 +1077,78 @@
         }
         resolve(response || { ok: false, message: '扩展后台未返回结果。' });
       });
+    });
+  }
+
+  function teamSessionAllowsVaultTasks(value) {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const member = source.member && typeof source.member === 'object' && !Array.isArray(source.member)
+      ? source.member
+      : {};
+    const permissions = source.permissions && typeof source.permissions === 'object' &&
+      !Array.isArray(source.permissions) ? source.permissions : {};
+    const role = cleanText(source.role, 30).toLowerCase();
+    const memberRole = cleanText(member.role, 30).toLowerCase();
+    const canReadVault = permissions.canReadVault === true || permissions.readVault === true;
+    const canWriteRuns = permissions.canWriteRuns === true || permissions.writeRuns === true;
+    return member.status === 'active' && TEAM_VAULT_OPERATOR_ROLES.has(role) &&
+      memberRole === role && source.mustChangePassword === false && canReadVault && canWriteRuns;
+  }
+
+  async function answerTeamVaultStartAuthorizationChallenge(message) {
+    const nonce = cleanText(message && message.nonce, 180);
+    const requestedScopeId = validVaultScopeId(message && message.vaultScopeId);
+    const allowedPage = window.top === window &&
+      (location.pathname === '/report.html' || location.pathname === '/accounts.html');
+    const base = { ok: false, nonce, vaultScopeId: requestedScopeId || '' };
+    if (!/^[A-Za-z0-9._:-]{16,180}$/.test(nonce) ||
+        requestedScopeId !== 'team:https://tbdata.aizicheng.com' ||
+        !TEAM_DASHBOARD_ORIGINS.has(location.origin) || !allowedPage) {
+      return base;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TEAM_VAULT_START_AUTH_TIMEOUT_MS);
+    try {
+      const sessionResponse = await fetch(location.origin + '/api/session', {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        redirect: 'error',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      if (!sessionResponse || !sessionResponse.ok) return base;
+      const session = await sessionResponse.json().catch(() => null);
+      if (!teamSessionAllowsVaultTasks(session)) return base;
+      return {
+        ok: true,
+        nonce,
+        vaultScopeId: requestedScopeId,
+        checkedAt: Date.now(),
+      };
+    } catch (error) {
+      return base;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  if (chrome.runtime.onMessage && typeof chrome.runtime.onMessage.addListener === 'function') {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!message || message.type !== TEAM_VAULT_START_AUTH_CHALLENGE_TYPE) return;
+      if (sender && sender.id && chrome.runtime.id && sender.id !== chrome.runtime.id) {
+        sendResponse({ ok: false, nonce: '', vaultScopeId: '' });
+        return false;
+      }
+      answerTeamVaultStartAuthorizationChallenge(message).then(sendResponse).catch(() => {
+        sendResponse({
+          ok: false,
+          nonce: cleanText(message && message.nonce, 180),
+          vaultScopeId: '',
+        });
+      });
+      return true;
     });
   }
 
@@ -814,12 +1214,41 @@
 
   async function handleRequest(action, payload) {
     if (action === 'ping') {
-      return { version: VERSION, connected: true, capabilities: CAPABILITIES.slice() };
+      return {
+        version: VERSION,
+        connected: true,
+        capabilities: lockOnlyPage ? ['accountVaultLock'] : CAPABILITIES.slice(),
+      };
+    }
+    if (action === 'lockAccountVault') {
+      return lockAccountVaultSession();
+    }
+    if (lockOnlyPage) {
+      throw new Error('当前页面仅允许锁定账号库会话。');
     }
     if (action === 'getStorage') {
       const keys = Array.from(new Set((Array.isArray(payload && payload.keys) ? payload.keys : [])
-        .filter((key) => READABLE_KEYS.has(key))));
-      return chrome.storage.local.get(keys);
+        .filter((key) => isReadableStorageKey(key))));
+      const wantsVault = keys.includes(ACCOUNT_VAULT_KEY);
+      const regularKeys = keys.filter((key) => key !== ACCOUNT_VAULT_KEY);
+      if (!wantsVault) return chrome.storage.local.get(regularKeys);
+      const vaultScopeId = currentVaultScopeId();
+      const scopedKey = scopedVaultStorageKey(vaultScopeId);
+      const remoteStateKey = vaultRemoteStateStorageKey(vaultScopeId);
+      const stored = await chrome.storage.local.get(regularKeys.concat(scopedKey, remoteStateKey));
+      const result = Object.fromEntries(regularKeys.filter((key) => (
+        Object.prototype.hasOwnProperty.call(stored, key)
+      )).map((key) => [key, stored[key]]));
+      const envelope = scopedVaultEnvelope(stored[scopedKey], vaultScopeId);
+      const remoteState = vaultRemoteState(stored[remoteStateKey], vaultScopeId);
+      const survivesTombstone = !remoteState || (envelope &&
+        envelope.remoteRevision > remoteState.revision &&
+        envelope.vaultLockEpoch >= remoteState.vaultLockEpoch);
+      if (envelope && survivesTombstone) result[ACCOUNT_VAULT_KEY] = envelope.vault;
+      return result;
+    }
+    if (action === 'bindAccountVaultScope') {
+      return bindAccountVaultScope();
     }
     if (action === 'setManualInputs') {
       const manualInputs = sanitizeManualInputs(payload && payload.manualInputs, true);
@@ -867,7 +1296,7 @@
     }
     if (action === 'clearStorage') {
       const requested = Array.isArray(payload && payload.keys) ? payload.keys : [];
-      const keys = Array.from(new Set(requested.filter((key) => CLEARABLE_KEYS.has(key))));
+      const keys = Array.from(new Set(requested.filter((key) => isClearableStorageKey(key))));
       const batchStored = await chrome.storage.local.get([ACCOUNT_BATCH_STATUS_KEY, PROJECT_TASK_STATUS_KEY]);
       if (batchStored[ACCOUNT_BATCH_STATUS_KEY] && batchStored[ACCOUNT_BATCH_STATUS_KEY].running && keys.length) {
         throw new Error('批量任务执行期间不能清空当前店铺数据。');
@@ -875,68 +1304,412 @@
       if (batchStored[PROJECT_TASK_STATUS_KEY] && batchStored[PROJECT_TASK_STATUS_KEY].running && keys.length) {
         throw new Error('当前账号任务执行期间不能清空店铺数据。');
       }
+      if (keys.includes('xhsAnalysisSnapshotV1')) {
+        const xhsStored = await chrome.storage.local.get('xhsAnalysisSnapshotV1');
+        xhsDetailKeysFromSnapshot(xhsStored.xhsAnalysisSnapshotV1).forEach((key) => {
+          if (!keys.includes(key)) keys.push(key);
+        });
+      }
       await chrome.storage.local.remove(keys);
       return { cleared: keys };
     }
-    if (action === 'getXhsBindingSummary') {
-      const context = await loadXhsBindingManagementContext(payload);
-      return xhsBindingSummary(context.registry, context.storeId);
+    if (action === 'getLegacyAccountVault') {
+      requireTeamLegacyRecoveryPage();
+      const vaultContext = await requireBoundVaultScope();
+      const legacyStored = await chrome.storage.local.get([
+        ACCOUNT_VAULT_LEGACY_KEY,
+        ACCOUNT_VAULT_LOCK_EPOCH_KEY,
+      ]);
+      if (!isValidEncryptedVault(legacyStored[ACCOUNT_VAULT_LEGACY_KEY])) {
+        return {
+          legacyAvailable: false,
+          vaultScopeId: vaultContext.vaultScopeId,
+          vaultLockEpoch: vaultContext.vaultLockEpoch,
+        };
+      }
+      const vaultLockEpoch = Math.max(
+        0,
+        Number(legacyStored[ACCOUNT_VAULT_LOCK_EPOCH_KEY]) || 0,
+      );
+      if (vaultLockEpoch !== vaultContext.vaultLockEpoch) {
+        throw new Error('账号库已在其他页面锁定，请刷新后重试。');
+      }
+      const legacyVault = sanitizeEncryptedVault(legacyStored[ACCOUNT_VAULT_LEGACY_KEY]);
+      return {
+        legacyAvailable: true,
+        legacyVault,
+        fingerprint: await encryptedVaultFingerprint(legacyVault),
+        vaultScopeId: vaultContext.vaultScopeId,
+        vaultLockEpoch,
+      };
     }
-    if (action === 'resetXhsBinding') {
-      requireInteractiveXhsBindingReset();
-      const context = await loadXhsBindingManagementContext(payload, {
-        platform: true,
-      });
-      const platformName = XHS_BINDING_PLATFORM_NAMES[context.platform];
-      const confirmation = '请先确认：当前“' + platformName + '”平台登录账号属于所选店铺“' +
-        context.storeName + '”。本操作只解除该店铺的' + platformName +
-        '旧绑定，不会立即重绑；下次该平台 READY 采集成功后才会建立新绑定。是否继续？';
-      if (!window.confirm(confirmation)) {
-        return Object.assign({ cancelled: true }, xhsBindingSummary(context.registry, context.storeId));
+    if (action === 'commitLegacyAccountVault') {
+      requireTeamLegacyRecoveryPage();
+      const expectedFingerprint = cleanText(payload && payload.fingerprint, 64).toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(expectedFingerprint)) {
+        throw new Error('旧账号库校验标识无效。');
       }
-      const response = await runtimeMessage({
-        type: 'XHS_BINDING_RESET',
-        source: 'business-defense-web-tool',
-        storeId: context.storeId,
-        platform: context.platform,
-        confirmedByExtension: true,
-      });
-      if (!response || response.ok !== true) {
-        throw new Error(response && response.message || '小红书旧绑定解除失败。');
+      const expectedEpoch = requestedVaultLockEpoch(payload && payload.vaultLockEpoch);
+      const remoteRevision = Number(payload && payload.remoteRevision);
+      if (payload && payload.serverConfirmed !== true ||
+          !Number.isSafeInteger(remoteRevision) || remoteRevision < 1) {
+        throw new Error('云端账号库版本无效，不能提交旧库迁移。');
       }
-      return sanitizeXhsBindingSummary(response.summary);
+      const vaultContext = await requireBoundVaultScope();
+      const scopedKey = scopedVaultStorageKey(vaultContext.vaultScopeId);
+      const remoteStateKey = vaultRemoteStateStorageKey(vaultContext.vaultScopeId);
+      const stored = await chrome.storage.local.get([
+        ACCOUNT_VAULT_LEGACY_KEY,
+        ACCOUNT_VAULT_SCOPE_KEY,
+        ACCOUNT_VAULT_LOCK_EPOCH_KEY,
+        scopedKey,
+        remoteStateKey,
+      ]);
+      const currentEpoch = Math.max(0, Number(stored[ACCOUNT_VAULT_LOCK_EPOCH_KEY]) || 0);
+      if (vaultContext.vaultLockEpoch !== expectedEpoch || currentEpoch !== expectedEpoch ||
+          validVaultScopeId(stored[ACCOUNT_VAULT_SCOPE_KEY]) !== vaultContext.vaultScopeId) {
+        throw new Error('账号库已在其他页面锁定，迁移已停止。');
+      }
+      if (scopedVaultEnvelope(stored[scopedKey], vaultContext.vaultScopeId)) {
+        throw new Error('当前团队账号库已存在，不能用旧账号库覆盖。');
+      }
+      const existingRemoteState = vaultRemoteState(
+        stored[remoteStateKey],
+        vaultContext.vaultScopeId,
+      );
+      if (existingRemoteState && existingRemoteState.revision >= remoteRevision) {
+        throw new Error('云端账号库状态已变化，旧库迁移已停止。');
+      }
+      if (!isValidEncryptedVault(stored[ACCOUNT_VAULT_LEGACY_KEY])) {
+        throw new Error('未找到可迁移的旧账号库密文。');
+      }
+      const legacyVault = sanitizeEncryptedVault(stored[ACCOUNT_VAULT_LEGACY_KEY]);
+      if (await encryptedVaultFingerprint(legacyVault) !== expectedFingerprint) {
+        throw new Error('旧账号库已变化，请重新验证主密码。');
+      }
+      await chrome.storage.local.set({
+        [scopedKey]: makeScopedVaultEnvelope(
+          vaultContext.vaultScopeId,
+          legacyVault,
+          remoteRevision,
+          expectedEpoch,
+        ),
+      });
+      const latest = await chrome.storage.local.get([
+        ACCOUNT_VAULT_LEGACY_KEY,
+        ACCOUNT_VAULT_SCOPE_KEY,
+        ACCOUNT_VAULT_LOCK_EPOCH_KEY,
+        scopedKey,
+        remoteStateKey,
+      ]);
+      const latestLegacy = isValidEncryptedVault(latest[ACCOUNT_VAULT_LEGACY_KEY])
+        ? sanitizeEncryptedVault(latest[ACCOUNT_VAULT_LEGACY_KEY])
+        : null;
+      const latestEnvelope = scopedVaultEnvelope(latest[scopedKey], vaultContext.vaultScopeId);
+      const latestRemoteState = vaultRemoteState(
+        latest[remoteStateKey],
+        vaultContext.vaultScopeId,
+      );
+      const unchanged = latestLegacy &&
+        await encryptedVaultFingerprint(latestLegacy) === expectedFingerprint;
+      if (Math.max(0, Number(latest[ACCOUNT_VAULT_LOCK_EPOCH_KEY]) || 0) !== expectedEpoch ||
+          validVaultScopeId(latest[ACCOUNT_VAULT_SCOPE_KEY]) !== vaultContext.vaultScopeId ||
+          !latestEnvelope || latestEnvelope.remoteRevision !== remoteRevision ||
+          latestEnvelope.vaultLockEpoch !== expectedEpoch ||
+          (latestRemoteState && latestRemoteState.revision >= remoteRevision) || !unchanged) {
+        throw new Error('旧账号库状态已变化，迁移已停止。');
+      }
+      await chrome.storage.local.remove(ACCOUNT_VAULT_LEGACY_KEY);
+      return {
+        committed: true,
+        vaultScopeId: vaultContext.vaultScopeId,
+        vaultLockEpoch: expectedEpoch,
+        updatedAt: legacyVault.updatedAt,
+      };
     }
     if (action === 'setAccountVault') {
+      const expectedEpoch = requestedVaultLockEpoch(payload && payload.vaultLockEpoch);
+      const vaultContext = await requireBoundVaultScope();
+      if (vaultContext.vaultLockEpoch !== expectedEpoch || await currentVaultLockEpoch() !== expectedEpoch) {
+        throw new Error('账号库已在其他页面锁定，请重新登录并解锁。');
+      }
       const vault = sanitizeEncryptedVault(payload && payload.vault);
-      await chrome.storage.local.set({ [ACCOUNT_VAULT_KEY]: vault });
-      return { saved: true, updatedAt: vault.updatedAt };
+      const scopedKey = scopedVaultStorageKey(vaultContext.vaultScopeId);
+      const remoteStateKey = vaultRemoteStateStorageKey(vaultContext.vaultScopeId);
+      const requestedRemoteRevision = Number(payload && payload.remoteRevision);
+      const serverConfirmed = payload && payload.serverConfirmed === true &&
+        Number.isSafeInteger(requestedRemoteRevision) && requestedRemoteRevision >= 1;
+      const before = await chrome.storage.local.get([scopedKey, remoteStateKey]);
+      const beforeRemoteState = vaultRemoteState(
+        before[remoteStateKey],
+        vaultContext.vaultScopeId,
+      );
+      const beforeEnvelope = scopedVaultEnvelope(
+        before[scopedKey],
+        vaultContext.vaultScopeId,
+      );
+      const confirmedAfterTombstone = serverConfirmed && beforeRemoteState &&
+        requestedRemoteRevision > beforeRemoteState.revision;
+      const existingAfterTombstone = beforeEnvelope && beforeRemoteState &&
+        beforeEnvelope.remoteRevision > beforeRemoteState.revision &&
+        beforeEnvelope.vaultLockEpoch >= beforeRemoteState.vaultLockEpoch;
+      if (beforeRemoteState && !confirmedAfterTombstone && !existingAfterTombstone) {
+        throw new Error('团队账号库已删除，只有服务器确认的更新版本才能重建。');
+      }
+      if (beforeRemoteState && serverConfirmed &&
+          requestedRemoteRevision < beforeRemoteState.revision) {
+        throw new Error('云端账号库版本已更新，拒绝写入过期密文。');
+      }
+      const envelopeRemoteRevision = serverConfirmed
+        ? requestedRemoteRevision
+        : (beforeEnvelope && beforeEnvelope.remoteRevision || 0);
+      const envelope = makeScopedVaultEnvelope(
+        vaultContext.vaultScopeId,
+        vault,
+        envelopeRemoteRevision,
+        expectedEpoch,
+      );
+      // Each trusted workspace owns a distinct storage key. Concurrent bridge
+      // instances can interleave, but can never replace or expose another
+      // scope's ciphertext.
+      await chrome.storage.local.set({ [scopedKey]: envelope });
+      const latest = await chrome.storage.local.get([
+        scopedKey,
+        remoteStateKey,
+        ACCOUNT_VAULT_SCOPE_KEY,
+        ACCOUNT_VAULT_LOCK_EPOCH_KEY,
+      ]);
+      const latestEpoch = Math.max(0, Number(latest[ACCOUNT_VAULT_LOCK_EPOCH_KEY]) || 0);
+      const scopeChanged = validVaultScopeId(latest[ACCOUNT_VAULT_SCOPE_KEY]) !==
+        vaultContext.vaultScopeId;
+      const latestEnvelope = scopedVaultEnvelope(latest[scopedKey], vaultContext.vaultScopeId);
+      const latestRemoteState = vaultRemoteState(
+        latest[remoteStateKey],
+        vaultContext.vaultScopeId,
+      );
+      const remoteStateRejected = latestRemoteState && !(
+        latestEnvelope && latestEnvelope.remoteRevision > latestRemoteState.revision &&
+        latestEnvelope.vaultLockEpoch >= latestRemoteState.vaultLockEpoch
+      );
+      if (latestEpoch !== expectedEpoch || scopeChanged || !latestEnvelope || remoteStateRejected) {
+        // A lock/tombstone may win while this write is in flight. Remove only
+        // the ciphertext written by this stale operation; a later writer with
+        // a different ciphertext remains untouched.
+        if (latestEnvelope && JSON.stringify(latestEnvelope.vault) === JSON.stringify(vault)) {
+          await chrome.storage.local.remove(scopedKey);
+        }
+        throw new Error('账号库已在其他页面锁定，本次保存已停止。');
+      }
+      return { saved: true, vaultScopeId: vaultContext.vaultScopeId, updatedAt: vault.updatedAt };
+    }
+
+    if (action === 'applyAccountVaultTombstone') {
+      requireTeamVaultSyncPage();
+      const expectedEpoch = requestedVaultLockEpoch(payload && payload.vaultLockEpoch);
+      const tombstoneRevision = Number(payload && payload.revision);
+      if (!Number.isSafeInteger(tombstoneRevision) || tombstoneRevision < 1) {
+        throw new Error('云端账号库删除版本无效。');
+      }
+      const vaultContext = await requireBoundVaultScope();
+      if (vaultContext.vaultScopeId !== 'team:https://tbdata.aizicheng.com' ||
+          vaultContext.vaultLockEpoch !== expectedEpoch ||
+          await currentVaultLockEpoch() !== expectedEpoch) {
+        throw new Error('账号库已在其他页面锁定，请重新同步删除标记。');
+      }
+      const scopedKey = scopedVaultStorageKey(vaultContext.vaultScopeId);
+      const remoteStateKey = vaultRemoteStateStorageKey(vaultContext.vaultScopeId);
+      const stored = await chrome.storage.local.get([scopedKey, remoteStateKey]);
+      const existingRemoteState = vaultRemoteState(
+        stored[remoteStateKey],
+        vaultContext.vaultScopeId,
+      );
+      const existingEnvelope = scopedVaultEnvelope(
+        stored[scopedKey],
+        vaultContext.vaultScopeId,
+      );
+      if ((existingRemoteState && existingRemoteState.revision > tombstoneRevision) ||
+          (existingEnvelope && existingEnvelope.remoteRevision > tombstoneRevision)) {
+        return {
+          applied: false,
+          stale: true,
+          revision: Math.max(
+            existingRemoteState && existingRemoteState.revision || 0,
+            existingEnvelope && existingEnvelope.remoteRevision || 0,
+          ),
+          vaultScopeId: vaultContext.vaultScopeId,
+          vaultLockEpoch: expectedEpoch,
+        };
+      }
+      await chrome.storage.local.set({
+        [remoteStateKey]: makeVaultRemoteState(
+          vaultContext.vaultScopeId,
+          tombstoneRevision,
+          expectedEpoch + 1,
+        ),
+      });
+      const beforeLock = await chrome.storage.local.get([remoteStateKey]);
+      const beforeLockState = vaultRemoteState(
+        beforeLock[remoteStateKey],
+        vaultContext.vaultScopeId,
+      );
+      if (!beforeLockState || !beforeLockState.deleted ||
+          beforeLockState.revision !== tombstoneRevision) {
+        return {
+          applied: false,
+          stale: true,
+          revision: beforeLockState && beforeLockState.revision || tombstoneRevision,
+          vaultScopeId: vaultContext.vaultScopeId,
+          vaultLockEpoch: expectedEpoch,
+        };
+      }
+      const lock = await lockAccountVaultSession();
+      const afterLock = await chrome.storage.local.get([remoteStateKey]);
+      const afterLockState = vaultRemoteState(
+        afterLock[remoteStateKey],
+        vaultContext.vaultScopeId,
+      );
+      if (!afterLockState || !afterLockState.deleted ||
+          afterLockState.revision !== tombstoneRevision) {
+        return {
+          applied: false,
+          stale: true,
+          revision: afterLockState && afterLockState.revision || tombstoneRevision,
+          vaultScopeId: vaultContext.vaultScopeId,
+          vaultLockEpoch: lock.vaultLockEpoch,
+        };
+      }
+      if (afterLockState.vaultLockEpoch !== lock.vaultLockEpoch) {
+        await chrome.storage.local.set({
+          [remoteStateKey]: makeVaultRemoteState(
+            vaultContext.vaultScopeId,
+            tombstoneRevision,
+            lock.vaultLockEpoch,
+          ),
+        });
+      }
+      await chrome.storage.local.remove(scopedKey);
+      return {
+        applied: true,
+        revision: tombstoneRevision,
+        vaultScopeId: vaultContext.vaultScopeId,
+        vaultLockEpoch: lock.vaultLockEpoch,
+      };
     }
     if (action === 'setAccountSession') {
-      const masterPassword = String(payload && payload.masterPassword || '').slice(0, 512);
-      if (masterPassword.length < 8) throw new Error('账号库主密码无效。');
+      requireAccountManagementPage();
+      const expectedEpoch = requestedVaultLockEpoch(payload && payload.vaultLockEpoch);
+      const vaultContext = await requireBoundVaultScope();
+      if (vaultContext.vaultLockEpoch !== expectedEpoch || await currentVaultLockEpoch() !== expectedEpoch) {
+        throw new Error('账号库已在其他页面锁定，请重新登录并解锁。');
+      }
+      const remoteStateKey = vaultRemoteStateStorageKey(vaultContext.vaultScopeId);
+      const scopedKey = scopedVaultStorageKey(vaultContext.vaultScopeId);
+      const remoteStateStored = await chrome.storage.local.get([remoteStateKey, scopedKey]);
+      const remoteState = vaultRemoteState(
+        remoteStateStored[remoteStateKey],
+        vaultContext.vaultScopeId,
+      );
+      const activeEnvelope = scopedVaultEnvelope(
+        remoteStateStored[scopedKey],
+        vaultContext.vaultScopeId,
+      );
+      if (remoteState && !(activeEnvelope &&
+          activeEnvelope.remoteRevision > remoteState.revision &&
+          activeEnvelope.vaultLockEpoch >= remoteState.vaultLockEpoch)) {
+        throw new Error('团队账号库已删除，不能恢复旧的明文会话。');
+      }
+      if (!activeEnvelope) throw new Error('未找到当前账号库密文，请重新解锁。');
+      const vaultSessionKey = payload && payload.vaultSessionKey
+        ? sanitizeVaultSessionKey(payload.vaultSessionKey)
+        : '';
       return runtimeMessage({
         type: 'ACCOUNT_SESSION_SET',
         source: 'business-defense-web-tool',
+        vaultScopeId: vaultContext.vaultScopeId,
+        vaultLockEpoch: expectedEpoch,
+        vaultFingerprint: await encryptedVaultFingerprint(activeEnvelope.vault),
+        ...(vaultSessionKey ? { vaultSessionKey } : {}),
         vault: sanitizeAccountSessionVault(payload && payload.vault),
-        masterPassword,
-      });
-    }
-    if (action === 'getAccountSessionSummary') {
-      return runtimeMessage({
-        type: 'ACCOUNT_SESSION_GET_SUMMARY',
-        source: 'business-defense-web-tool',
       });
     }
     if (action === 'getAccountManagementSession') {
-      if (location.pathname !== '/accounts.html') {
-        throw new Error('仅账号库管理页可恢复管理会话。');
+      requireAccountManagementPage();
+      const vaultContext = await requireBoundVaultScope();
+      const record = await activeVaultRecord(vaultContext);
+      if (!record) {
+        return {
+          unlocked: false,
+          vaultScopeId: vaultContext.vaultScopeId,
+          vaultLockEpoch: vaultContext.vaultLockEpoch,
+        };
       }
-      return runtimeMessage({
+      const response = await runtimeMessage({
         type: 'ACCOUNT_SESSION_GET_MANAGEMENT',
         source: 'business-defense-web-tool',
+        expectedVaultScopeId: vaultContext.vaultScopeId,
+        expectedVaultFingerprint: await encryptedVaultFingerprint(record),
+      });
+      if (!response || response.ok === false) {
+        throw new Error(response && response.message || '账号库会话恢复失败。');
+      }
+      const management = response.management && typeof response.management === 'object'
+        ? response.management
+        : null;
+      return management ? {
+        unlocked: true,
+        vaultScopeId: management.vaultScopeId,
+        vaultLockEpoch: management.vaultLockEpoch,
+        unlockedAt: management.unlockedAt,
+        vault: sanitizeAccountSessionVault(management.vault),
+      } : {
+        unlocked: false,
+        vaultScopeId: vaultContext.vaultScopeId,
+        vaultLockEpoch: Number.isSafeInteger(Number(response.vaultLockEpoch))
+          ? Number(response.vaultLockEpoch)
+          : vaultContext.vaultLockEpoch,
+      };
+    }
+    if (action === 'encryptAccountVaultFromSession') {
+      requireAccountManagementPage();
+      const expectedEpoch = requestedVaultLockEpoch(payload && payload.vaultLockEpoch);
+      const vaultContext = await requireBoundVaultScope();
+      if (vaultContext.vaultLockEpoch !== expectedEpoch || await currentVaultLockEpoch() !== expectedEpoch) {
+        throw new Error('账号库已在其他页面锁定，请重新登录并解锁。');
+      }
+      const record = await activeVaultRecord(vaultContext);
+      if (!record) throw new Error('未找到当前账号库密文，请重新解锁。');
+      const fingerprint = await encryptedVaultFingerprint(record);
+      const response = await runtimeMessage({
+        type: 'ACCOUNT_SESSION_GET_MANAGEMENT',
+        source: 'business-defense-web-tool',
+        expectedVaultScopeId: vaultContext.vaultScopeId,
+        expectedVaultFingerprint: fingerprint,
+      });
+      if (!response || response.ok === false || !response.management) {
+        throw new Error(response && response.message || '账号库会话已失效，请重新解锁。');
+      }
+      const encrypted = await encryptVaultWithSessionKey(
+        payload && payload.vault,
+        record,
+        response.management.vaultSessionKey
+      );
+      return {
+        vault: encrypted,
+        vaultScopeId: vaultContext.vaultScopeId,
+        vaultLockEpoch: expectedEpoch,
+        baseFingerprint: fingerprint,
+      };
+    }
+    if (action === 'getAccountSessionSummary') {
+      const vaultContext = await requireBoundVaultScope();
+      return runtimeMessage({
+        type: 'ACCOUNT_SESSION_GET_SUMMARY',
+        source: 'business-defense-web-tool',
+        expectedVaultScopeId: vaultContext.vaultScopeId,
       });
     }
     if (action === 'clearAccountSession') {
+      requireAccountManagementPage();
       return runtimeMessage({
         type: 'ACCOUNT_SESSION_CLEAR',
         source: 'business-defense-web-tool',
@@ -948,33 +1721,61 @@
       return { saved: true, updatedAt: directory.updatedAt };
     }
     if (action === 'clearAccountVault') {
+      requireAccountManagementPage();
+      const expectedEpoch = requestedVaultLockEpoch(payload && payload.vaultLockEpoch);
+      const vaultContext = await requireBoundVaultScope();
+      if (vaultContext.vaultLockEpoch !== expectedEpoch || await currentVaultLockEpoch() !== expectedEpoch) {
+        throw new Error('账号库已在其他页面锁定，请重新登录并解锁。');
+      }
+      if (vaultContext.vaultScopeId.startsWith('team:')) {
+        throw new Error('在线团队账号库必须先在服务器生成删除标记，不能只清除本机密文。');
+      }
       const stored = await chrome.storage.local.get([ACCOUNT_BATCH_STATUS_KEY]);
       const status = stored[ACCOUNT_BATCH_STATUS_KEY];
       if (status && (status.running || status.paused)) {
         throw new Error('请先完成或取消暂停的批量任务，再重置账号库。');
       }
-      await runtimeMessage({
-        type: 'ACCOUNT_SESSION_CLEAR',
-        source: 'business-defense-web-tool',
-      });
-      await chrome.storage.local.remove([ACCOUNT_VAULT_KEY, PROJECT_DIRECTORY_KEY]);
-      return { cleared: true };
+      const lock = await lockAccountVaultSession();
+      await chrome.storage.local.remove(scopedVaultStorageKey(vaultContext.vaultScopeId));
+      return { cleared: true, vaultLockEpoch: lock.vaultLockEpoch };
     }
     if (action === 'startAccountBatchFromSession') {
       requireOneClickTaskPage();
+      const vaultContext = await requireBoundVaultScope();
       return runtimeMessage({
         type: 'ACCOUNT_BATCH_START_FROM_SESSION',
         source: 'business-defense-web-tool',
-        payload: sanitizeSessionBatchRequest(payload),
+        payload: sanitizeSessionBatchRequest(payload, vaultContext.vaultScopeId),
       });
     }
     if (action === 'startProjectTask') {
       requireOneClickTaskPage();
+      const task = sanitizeProjectTask(payload);
+      if (task.credentialMode === 'vault') {
+        task.vaultScopeId = (await requireBoundVaultScope()).vaultScopeId;
+      }
       return runtimeMessage({
         type: 'PROJECT_TASK_START',
         source: 'business-defense-web-tool',
-        payload: sanitizeProjectTask(payload),
+        payload: task,
       });
+    }
+    if (action === 'cancelProjectTask') {
+      requireInteractiveProjectTaskCancel();
+      const taskId = sanitizeProjectTaskId(payload && payload.taskId);
+      if (!window.confirm('取消当前登录账号的一键取数任务？已完成的数据会保留，当前步骤将尽快停止。')) {
+        return { cancelled: false };
+      }
+      const response = await runtimeMessage({
+        type: 'PROJECT_TASK_CANCEL',
+        source: 'business-defense-web-tool',
+        taskId,
+        confirmedByExtension: true,
+      });
+      if (!response || response.ok !== true) {
+        throw new Error(response && response.message || '当前账号任务取消失败。');
+      }
+      return response;
     }
     if (action === 'cancelAccountBatch') {
       return runtimeMessage({
@@ -983,6 +1784,7 @@
       });
     }
     if (action === 'testDingTalk') {
+      requireAccountManagementPage();
       const notification = sanitizeBatchPayload({ notification: payload && payload.notification }).notification;
       return runtimeMessage({
         type: 'ACCOUNT_BATCH_TEST_DINGTALK',
@@ -1048,6 +1850,7 @@
         STORE_RUN_KEY_PREFIX + runId,
         ACCOUNT_BATCH_STATUS_KEY,
         PROJECT_TASK_STATUS_KEY,
+        'xhsAnalysisSnapshotV1',
       ]);
       if (stored[ACCOUNT_BATCH_STATUS_KEY] && stored[ACCOUNT_BATCH_STATUS_KEY].running) {
         throw new Error('批量任务执行期间不能切换店铺历史报告。');
@@ -1060,9 +1863,11 @@
       const snapshots = run.snapshots && typeof run.snapshots === 'object' ? run.snapshots : {};
       const restored = {};
       for (const [key, value] of Object.entries(snapshots)) {
-        if (ARCHIVE_SNAPSHOT_KEYS.has(key)) restored[key] = value;
+        if (isArchiveSnapshotKey(key)) restored[key] = value;
       }
-      await chrome.storage.local.remove(Array.from(ARCHIVE_SNAPSHOT_KEYS));
+      await chrome.storage.local.remove(Array.from(ARCHIVE_SNAPSHOT_KEYS).concat(
+        xhsDetailKeysFromSnapshot(stored.xhsAnalysisSnapshotV1)
+      ));
       if (Object.keys(restored).length) await chrome.storage.local.set(restored);
       return { restored: true, runId, storeName: run.account && run.account.storeName || '' };
     }
@@ -1087,11 +1892,24 @@
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
-    const keys = Object.keys(changes || {}).filter((key) => (
-      READABLE_KEYS.has(key) || key === XHS_STORE_BINDINGS_KEY
-    ));
+    const keys = Object.keys(changes || {}).filter((key) => isReadableStorageKey(key));
+    const currentScopedKey = scopedVaultStorageKey(currentVaultScopeId());
+    const currentRemoteStateKey = vaultRemoteStateStorageKey(currentVaultScopeId());
+    if (Object.prototype.hasOwnProperty.call(changes || {}, currentScopedKey) &&
+        !keys.includes(ACCOUNT_VAULT_KEY)) {
+      keys.push(ACCOUNT_VAULT_KEY);
+    }
+    if (Object.prototype.hasOwnProperty.call(changes || {}, currentRemoteStateKey) &&
+        !keys.includes(ACCOUNT_VAULT_KEY)) {
+      keys.push(ACCOUNT_VAULT_KEY);
+    }
     if (keys.length) post({ type: 'storageChanged', keys });
   });
 
+  if (autoLockPage) {
+    // Login is the final fail-safe for logout/401 paths whose original page
+    // disappeared before the runtime lock acknowledgement arrived.
+    lockAccountVaultSession().catch(() => {});
+  }
   post({ type: 'ready', connected: true });
 })();

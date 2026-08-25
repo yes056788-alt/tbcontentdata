@@ -2,7 +2,8 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
 
 export const BUSINESS_MIGRATION_FORMAT = "taobao-business-migration";
-export const BUSINESS_MIGRATION_VERSION = 2;
+export const BUSINESS_MIGRATION_VERSION = 4;
+export const BUSINESS_MIGRATION_SUPPORTED_VERSIONS = Object.freeze([2, 3, 4]);
 // Cloudflare Workers currently caps WebCrypto PBKDF2 at 100,000 iterations.
 // Migration passphrases are therefore deliberately much longer than login
 // passwords and every package also uses a fresh, random 128-bit salt.
@@ -73,10 +74,18 @@ function assertSafeRecordName(value) {
 }
 
 function assertRecordKind(value) {
-  if (!["vault", "directory", "run", "manifest"].includes(value)) {
+  if (!["vault", "directory", "run", "run-deletion", "manifest"].includes(value)) {
     throw new Error("Migration record kind is invalid.");
   }
   return value;
+}
+
+function assertMigrationVersion(value) {
+  const version = Number(value);
+  if (!BUSINESS_MIGRATION_SUPPORTED_VERSIONS.includes(version)) {
+    throw new Error("Migration version is unsupported.");
+  }
+  return version;
 }
 
 export function validateMigrationPassphrase(value) {
@@ -91,12 +100,13 @@ export function validateMigrationPassphrase(value) {
   return value;
 }
 
-export function createMigrationHeader(createdAt = new Date()) {
+export function createMigrationHeader(createdAt = new Date(), versionValue = BUSINESS_MIGRATION_VERSION) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
+  const version = assertMigrationVersion(versionValue);
   return {
     type: "header",
     format: BUSINESS_MIGRATION_FORMAT,
-    version: BUSINESS_MIGRATION_VERSION,
+    version,
     createdAt: createdAt.toISOString(),
     kdf: {
       name: "PBKDF2",
@@ -117,7 +127,7 @@ export function validateMigrationHeader(value) {
   const kdf = assertPlainObject(header.kdf, "Migration KDF");
   const cipher = assertPlainObject(header.cipher, "Migration cipher");
   if (header.type !== "header" || header.format !== BUSINESS_MIGRATION_FORMAT ||
-      header.version !== BUSINESS_MIGRATION_VERSION ||
+      !BUSINESS_MIGRATION_SUPPORTED_VERSIONS.includes(header.version) ||
       typeof header.createdAt !== "string" || !Number.isFinite(Date.parse(header.createdAt)) ||
       kdf.name !== "PBKDF2" || kdf.hash !== "SHA-256" ||
       kdf.iterations !== BUSINESS_MIGRATION_KDF_ITERATIONS ||
@@ -170,7 +180,10 @@ export async function encryptMigrationRecord(key, headerValue, descriptor, value
     kind: assertRecordKind(descriptor?.kind),
     name: assertSafeRecordName(descriptor?.name),
   };
-  if (!Number.isSafeInteger(record.index) || record.index < 0 || record.index > 1_000_002) {
+  if (record.kind === "run-deletion" && header.version < 3) {
+    throw new Error("Run deletion records require migration version 3.");
+  }
+  if (!Number.isSafeInteger(record.index) || record.index < 0 || record.index > 2_000_002) {
     throw new Error("Migration record index is invalid.");
   }
   const plaintext = textEncoder.encode(JSON.stringify(value));
@@ -211,6 +224,9 @@ export async function decryptMigrationRecord(key, headerValue, envelopeValue) {
     kind: assertRecordKind(envelope.kind),
     name: assertSafeRecordName(envelope.name),
   };
+  if (record.kind === "run-deletion" && header.version < 3) {
+    throw new Error("Run deletion records require migration version 3.");
+  }
   if (record.type !== "record" || !Number.isSafeInteger(record.index) || record.index < 0) {
     throw new Error("Migration record envelope is invalid.");
   }
@@ -272,8 +288,8 @@ function canonicalCatalogSummary(value) {
   const summary = assertPlainObject(value, "Migration catalog summary");
   const index = Number(summary.index);
   const bytes = Number(summary.bytes);
-  if (!Number.isSafeInteger(index) || index < 0 || index > 1_000_002 ||
-      !["vault", "directory", "run"].includes(summary.kind) ||
+  if (!Number.isSafeInteger(index) || index < 0 || index > 2_000_002 ||
+      !["vault", "directory", "run", "run-deletion"].includes(summary.kind) ||
       !Number.isSafeInteger(bytes) || bytes < 0 ||
       bytes > BUSINESS_MIGRATION_MAX_RECORD_BYTES ||
       typeof summary.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(summary.sha256)) {

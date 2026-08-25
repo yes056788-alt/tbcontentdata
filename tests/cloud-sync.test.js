@@ -84,7 +84,18 @@ function createEnvironment(options) {
   const listeners = [];
   const posted = [];
   const events = [];
-  const bridge = options.bridge || (() => ({}));
+  const configuredBridge = options.bridge || (() => ({}));
+  const bridge = (message) => {
+    if (!options.observeVaultScopeActions && message.action === 'bindAccountVaultScope') {
+      return {
+        bound: true, changed: false, vaultScopeId: 'team:https://tool.example.com', vaultLockEpoch: 0,
+      };
+    }
+    if (!options.observeVaultScopeActions && message.action === 'lockAccountVault') {
+      return { ok: true, locked: true };
+    }
+    return configuredBridge(message);
+  };
   const windowObject = {
     addEventListener(type, listener) {
       if (type === 'message') listeners.push(listener);
@@ -125,7 +136,7 @@ function createEnvironment(options) {
       }
     },
   };
-  windowObject.top = windowObject;
+  windowObject.top = options.topLevel === false ? {} : windowObject;
   const location = {
     origin: options.origin,
     hostname: new URL(options.origin).hostname,
@@ -151,13 +162,14 @@ function createEnvironment(options) {
   return { context, windowObject, posted, events };
 }
 
-async function testLocalNoop() {
+async function testEmbeddedNoop() {
   let fetchCount = 0;
   const environment = createEnvironment({
     origin: 'http://127.0.0.1:3400',
+    topLevel: false,
     fetch: async () => {
       fetchCount += 1;
-      throw new Error('localhost must not call fetch');
+      throw new Error('embedded viewers must not call fetch');
     },
   });
   const result = await environment.windowObject.TaobaoCloudSync.ready;
@@ -165,6 +177,33 @@ async function testLocalNoop() {
   assert.equal(environment.windowObject.TaobaoCloudSync.getState().enabled, false);
   assert.equal(fetchCount, 0);
   assert.equal(environment.posted.length, 0);
+}
+
+async function testLocalhostServerSyncEnabled() {
+  let fetchCount = 0;
+  const environment = createEnvironment({
+    origin: 'http://127.0.0.1:3400',
+    bridge: async (message) => {
+      if (message.action === 'ping') return { connected: true, capabilities: ['cloudSync'] };
+      if (message.action === 'getStorage') return {};
+      if (message.action === 'listStoreRuns') return { runs: [] };
+      throw new Error('unexpected bridge action: ' + message.action);
+    },
+    fetch: async (input) => {
+      fetchCount += 1;
+      const pathname = new URL(input).pathname;
+      if (pathname === '/api/session') return jsonResponse({ role: 'owner' });
+      if (pathname === '/api/vault') return jsonResponse({ vault: null, revision: 0 });
+      if (pathname === '/api/directory') return jsonResponse({ directory: null, revision: 0 });
+      if (pathname === '/api/runs') return jsonResponse({ runs: [] });
+      return jsonResponse({ error: { message: 'not found' } }, 404);
+    },
+  });
+  const result = await environment.windowObject.TaobaoCloudSync.ready;
+  assert.equal(result.ok, true);
+  assert.equal(environment.windowObject.TaobaoCloudSync.getState().enabled, true);
+  assert.ok(fetchCount >= 4);
+  environment.windowObject.TaobaoCloudSync.stop();
 }
 
 async function testInitialOwnerSync() {
@@ -335,10 +374,371 @@ async function testVaultRevisionConflictDoesNotOverwrite() {
   environment.windowObject.TaobaoCloudSync.stop();
 }
 
+async function testServerRunDeletionRemovesRemoteBeforeLocal() {
+  const now = Date.now();
+  const directory = makeDirectory(now - 1000, '同步店铺');
+  const run = makeRun('store-run-delete-1', now - 500, '同步店铺');
+  const storage = {
+    taobaoProjectDirectoryV1: directory,
+    taobaoStoreRunIndexV1: [{
+      runId: run.runId,
+      finishedAt: run.finishedAt,
+      updatedAt: run.updatedAt,
+    }],
+  };
+  const deletionOrder = [];
+  let remoteRunExists = true;
+
+  const environment = createEnvironment({
+    origin: 'https://tool.example.com',
+    bridge: async (message) => {
+      if (message.action === 'ping') return { connected: true, capabilities: ['cloudSync'] };
+      if (message.action === 'getStorage') {
+        return Object.fromEntries(message.payload.keys.filter((key) => (
+          Object.prototype.hasOwnProperty.call(storage, key)
+        )).map((key) => [key, storage[key]]));
+      }
+      if (message.action === 'listStoreRuns') {
+        return { runs: storage.taobaoStoreRunIndexV1 };
+      }
+      if (message.action === 'deleteStoreRun') {
+        deletionOrder.push('local');
+        storage.taobaoStoreRunIndexV1 = storage.taobaoStoreRunIndexV1.filter((item) => (
+          item.runId !== message.payload.runId
+        ));
+        return { deleted: true, runId: message.payload.runId };
+      }
+      throw new Error('unexpected bridge action: ' + message.action);
+    },
+    fetch: async (input, init) => {
+      const url = new URL(input);
+      const method = (init && init.method) || 'GET';
+      if (url.pathname === '/api/session') {
+        return jsonResponse({ role: 'owner', permissions: { deleteRuns: true } });
+      }
+      if (url.pathname === '/api/vault') return jsonResponse({ vault: null, revision: 0 });
+      if (url.pathname === '/api/directory') {
+        return jsonResponse({ directory, revision: 1 });
+      }
+      if (url.pathname === '/api/runs' && method === 'GET') {
+        return jsonResponse({
+          runs: remoteRunExists ? [{
+            runId: run.runId,
+            finishedAt: run.finishedAt,
+            updatedAt: run.updatedAt,
+          }] : [],
+        });
+      }
+      if (url.pathname === '/api/runs/' + run.runId && method === 'DELETE') {
+        deletionOrder.push('remote');
+        remoteRunExists = false;
+        return jsonResponse({ deleted: true, runId: run.runId });
+      }
+      return jsonResponse({ error: { message: 'not found' } }, 404);
+    },
+  });
+
+  const ready = await environment.windowObject.TaobaoCloudSync.ready;
+  assert.equal(ready.ok, true);
+  const result = await environment.windowObject.TaobaoCloudSync.deleteRun(run.runId);
+  assert.equal(result.deleted, true);
+  assert.deepEqual(deletionOrder, ['remote', 'local']);
+  assert.equal(remoteRunExists, false);
+  assert.deepEqual(storage.taobaoStoreRunIndexV1, []);
+  environment.windowObject.TaobaoCloudSync.stop();
+}
+
+async function testRemoteTombstoneClearsStaleLocalWithoutUpload() {
+  const now = Date.now();
+  const directory = makeDirectory(now - 1000, '同步店铺');
+  const run = makeRun('store-run-deleted-elsewhere', now - 500, '同步店铺');
+  const storage = {
+    taobaoProjectDirectoryV1: directory,
+    taobaoStoreRunIndexV1: [{
+      runId: run.runId,
+      finishedAt: run.finishedAt,
+      updatedAt: run.updatedAt,
+    }],
+  };
+  let uploadCount = 0;
+  let localDeleteCount = 0;
+  const environment = createEnvironment({
+    origin: 'https://tool.example.com',
+    bridge: async (message) => {
+      if (message.action === 'ping') return { connected: true, capabilities: ['cloudSync'] };
+      if (message.action === 'getStorage') {
+        return Object.fromEntries(message.payload.keys.filter((key) => (
+          Object.prototype.hasOwnProperty.call(storage, key)
+        )).map((key) => [key, storage[key]]));
+      }
+      if (message.action === 'listStoreRuns') return { runs: storage.taobaoStoreRunIndexV1 };
+      if (message.action === 'deleteStoreRun') {
+        localDeleteCount += 1;
+        storage.taobaoStoreRunIndexV1 = [];
+        return { deleted: true };
+      }
+      throw new Error('unexpected bridge action: ' + message.action);
+    },
+    fetch: async (input, init) => {
+      const url = new URL(input);
+      const method = (init && init.method) || 'GET';
+      if (url.pathname === '/api/session') return jsonResponse({ role: 'owner' });
+      if (url.pathname === '/api/vault') return jsonResponse({ vault: null, revision: 0 });
+      if (url.pathname === '/api/directory') return jsonResponse({ directory, revision: 1 });
+      if (url.pathname === '/api/runs' && method === 'GET') {
+        return jsonResponse({ runs: [], deletedRunIds: [run.runId] });
+      }
+      if (url.pathname === '/api/runs' && method === 'POST') {
+        uploadCount += 1;
+        return jsonResponse({ stored: true }, 201);
+      }
+      return jsonResponse({ error: { message: 'not found' } }, 404);
+    },
+  });
+
+  const ready = await environment.windowObject.TaobaoCloudSync.ready;
+  assert.equal(ready.ok, true);
+  assert.equal(ready.runs.deleted, 1);
+  assert.equal(localDeleteCount, 1);
+  assert.equal(uploadCount, 0);
+  assert.deepEqual(storage.taobaoStoreRunIndexV1, []);
+  environment.windowObject.TaobaoCloudSync.stop();
+}
+
+async function testServerRunDeletionFailureKeepsLocalCopy() {
+  const now = Date.now();
+  const directory = makeDirectory(now - 1000, '同步店铺');
+  const run = makeRun('store-run-delete-denied', now - 500, '同步店铺');
+  const localIndex = [{ runId: run.runId, finishedAt: run.finishedAt, updatedAt: run.updatedAt }];
+  let localDeleteCount = 0;
+  const environment = createEnvironment({
+    origin: 'https://tool.example.com',
+    bridge: async (message) => {
+      if (message.action === 'ping') return { connected: true, capabilities: ['cloudSync'] };
+      if (message.action === 'getStorage') {
+        return message.payload.keys.includes('taobaoProjectDirectoryV1')
+          ? { taobaoProjectDirectoryV1: directory }
+          : {};
+      }
+      if (message.action === 'listStoreRuns') return { runs: localIndex };
+      if (message.action === 'deleteStoreRun') {
+        localDeleteCount += 1;
+        return { deleted: true };
+      }
+      throw new Error('unexpected bridge action: ' + message.action);
+    },
+    fetch: async (input, init) => {
+      const url = new URL(input);
+      const method = (init && init.method) || 'GET';
+      if (url.pathname === '/api/session') return jsonResponse({ role: 'owner' });
+      if (url.pathname === '/api/vault') return jsonResponse({ vault: null, revision: 0 });
+      if (url.pathname === '/api/directory') return jsonResponse({ directory, revision: 1 });
+      if (url.pathname === '/api/runs' && method === 'GET') {
+        return jsonResponse({ runs: localIndex });
+      }
+      if (url.pathname === '/api/runs/' + run.runId && method === 'DELETE') {
+        return jsonResponse({ error: { code: 'INSUFFICIENT_ROLE', message: '当前角色无权执行此操作。' } }, 403);
+      }
+      return jsonResponse({ error: { message: 'not found' } }, 404);
+    },
+  });
+
+  const ready = await environment.windowObject.TaobaoCloudSync.ready;
+  assert.equal(ready.ok, true);
+  await assert.rejects(
+    environment.windowObject.TaobaoCloudSync.deleteRun(run.runId),
+    /当前角色无权执行此操作/
+  );
+  assert.equal(localDeleteCount, 0);
+  environment.windowObject.TaobaoCloudSync.stop();
+}
+
+async function testServerRunDeletionSurvivesLocalCleanupFailure() {
+  const now = Date.now();
+  const directory = makeDirectory(now - 1000, '同步店铺');
+  const run = makeRun('store-run-delete-local-failure', now - 500, '同步店铺');
+  let remoteDeleteCount = 0;
+  const environment = createEnvironment({
+    origin: 'https://tool.example.com',
+    bridge: async (message) => {
+      if (message.action === 'ping') return { connected: true, capabilities: ['cloudSync'] };
+      if (message.action === 'getStorage') {
+        return message.payload.keys.includes('taobaoProjectDirectoryV1')
+          ? { taobaoProjectDirectoryV1: directory }
+          : {};
+      }
+      if (message.action === 'listStoreRuns') return { runs: [] };
+      if (message.action === 'deleteStoreRun') throw new Error('bridge temporarily unavailable');
+      throw new Error('unexpected bridge action: ' + message.action);
+    },
+    fetch: async (input, init) => {
+      const url = new URL(input);
+      const method = (init && init.method) || 'GET';
+      if (url.pathname === '/api/session') {
+        return jsonResponse({ role: 'owner', permissions: { canDeleteRuns: true } });
+      }
+      if (url.pathname === '/api/vault') return jsonResponse({ vault: null, revision: 0 });
+      if (url.pathname === '/api/directory') return jsonResponse({ directory, revision: 1 });
+      if (url.pathname === '/api/runs' && method === 'GET') return jsonResponse({ runs: [] });
+      if (url.pathname === '/api/runs/' + run.runId && method === 'DELETE') {
+        remoteDeleteCount += 1;
+        return jsonResponse({ deleted: true, runId: run.runId, cleanupPending: false });
+      }
+      return jsonResponse({ error: { message: 'not found' } }, 404);
+    },
+  });
+
+  const ready = await environment.windowObject.TaobaoCloudSync.ready;
+  assert.equal(ready.ok, true);
+  const result = await environment.windowObject.TaobaoCloudSync.deleteRun(run.runId);
+  assert.equal(result.deleted, true);
+  assert.equal(result.runId, run.runId);
+  assert.equal(result.localDeleted, false);
+  assert.equal(remoteDeleteCount, 1);
+  environment.windowObject.TaobaoCloudSync.stop();
+}
+
+async function testServerRunDeletionBlockedWithoutPermission() {
+  const now = Date.now();
+  const directory = makeDirectory(now - 1000, '同步店铺');
+  const run = makeRun('store-run-delete-no-permission', now - 500, '同步店铺');
+  const localIndex = [{ runId: run.runId, finishedAt: run.finishedAt, updatedAt: run.updatedAt }];
+  let remoteDeleteCalled = false;
+  let localDeleteCount = 0;
+  const environment = createEnvironment({
+    origin: 'https://tool.example.com',
+    bridge: async (message) => {
+      if (message.action === 'ping') return { connected: true, capabilities: ['cloudSync'] };
+      if (message.action === 'getStorage') {
+        return message.payload.keys.includes('taobaoProjectDirectoryV1')
+          ? { taobaoProjectDirectoryV1: directory }
+          : {};
+      }
+      if (message.action === 'listStoreRuns') return { runs: localIndex };
+      if (message.action === 'deleteStoreRun') {
+        localDeleteCount += 1;
+        return { deleted: true };
+      }
+      throw new Error('unexpected bridge action: ' + message.action);
+    },
+    fetch: async (input, init) => {
+      const url = new URL(input);
+      const method = (init && init.method) || 'GET';
+      if (url.pathname === '/api/session') {
+        return jsonResponse({
+          role: 'operator',
+          permissions: { deleteRuns: false },
+        });
+      }
+      if (url.pathname === '/api/vault') return jsonResponse({ vault: null, revision: 0 });
+      if (url.pathname === '/api/directory') return jsonResponse({ directory, revision: 1 });
+      if (url.pathname === '/api/runs' && method === 'GET') {
+        return jsonResponse({ runs: localIndex });
+      }
+      if (url.pathname === '/api/runs/' + run.runId && method === 'DELETE') {
+        remoteDeleteCalled = true;
+        return jsonResponse({ deleted: true, runId: run.runId });
+      }
+      return jsonResponse({ error: { message: 'not found' } }, 404);
+    },
+  });
+
+  const ready = await environment.windowObject.TaobaoCloudSync.ready;
+  assert.equal(ready.ok, true);
+  await assert.rejects(
+    environment.windowObject.TaobaoCloudSync.deleteRun(run.runId),
+    /当前账号无权限删除运行记录/
+  );
+  assert.equal(remoteDeleteCalled, false);
+  assert.equal(localDeleteCount, 0);
+  environment.windowObject.TaobaoCloudSync.stop();
+}
+
+async function testTeamVaultScopeDownloadMemberSwitchAndUnauthorizedLock() {
+  const now = Date.now();
+  const remoteVault = makeVault(now - 1000, 'SUpLTA==');
+  const directory = makeDirectory(now - 1000, '共享项目目录');
+  const storage = {
+    taobaoProjectDirectoryV1: directory,
+    taobaoStoreRunIndexV1: [],
+  };
+  const actions = [];
+  let memberId = 'member-a';
+  let unauthorized = false;
+
+  const environment = createEnvironment({
+    origin: 'https://tool.example.com',
+    observeVaultScopeActions: true,
+    bridge: async (message) => {
+      actions.push(message.action);
+      if (message.action === 'ping') return { connected: true, capabilities: ['cloudSync'] };
+      if (message.action === 'bindAccountVaultScope') {
+        return {
+          bound: true, changed: false, vaultScopeId: 'team:https://tool.example.com', vaultLockEpoch: 7,
+        };
+      }
+      if (message.action === 'lockAccountVault') return { ok: true, locked: true };
+      if (message.action === 'getStorage') {
+        return Object.fromEntries(message.payload.keys.filter((key) => (
+          Object.prototype.hasOwnProperty.call(storage, key)
+        )).map((key) => [key, storage[key]]));
+      }
+      if (message.action === 'setAccountVault') {
+        assert.equal(message.payload.vaultLockEpoch, 7);
+        storage.taobaoAccountVaultV1 = message.payload.vault;
+        return { saved: true };
+      }
+      if (message.action === 'listStoreRuns') return { runs: [] };
+      throw new Error('unexpected bridge action: ' + message.action);
+    },
+    fetch: async (input) => {
+      const pathname = new URL(input).pathname;
+      if (pathname === '/api/session') {
+        if (unauthorized) return jsonResponse({ message: '请重新登录。' }, 401);
+        return jsonResponse({ role: 'owner', user: { id: memberId } });
+      }
+      if (pathname === '/api/vault') return jsonResponse({ vault: remoteVault, revision: 1 });
+      if (pathname === '/api/directory') return jsonResponse({ directory, revision: 1 });
+      if (pathname === '/api/runs') return jsonResponse({ runs: [] });
+      return jsonResponse({ message: 'not found' }, 404);
+    },
+  });
+
+  const ready = await environment.windowObject.TaobaoCloudSync.ready;
+  assert.equal(ready.ok, true);
+  assert.equal(environment.windowObject.TaobaoCloudSync.getState().vaultScopeId,
+    'team:https://tool.example.com');
+  assert.equal(storage.taobaoAccountVaultV1.cipher.data, remoteVault.cipher.data,
+    '空本机应下载同团队云端密文');
+  assert.ok(actions.indexOf('bindAccountVaultScope') < actions.indexOf('getStorage'));
+
+  const lockResult = await environment.windowObject.TaobaoCloudSync.lockAccountVault();
+  assert.equal(lockResult.locked, true);
+  assert.equal(storage.taobaoAccountVaultV1.cipher.data, remoteVault.cipher.data,
+    '成员 A 退出只锁明文，不删除团队密文');
+  memberId = 'member-b';
+  const switched = await environment.windowObject.TaobaoCloudSync.syncNow();
+  assert.equal(switched.ok, true);
+  assert.equal(storage.taobaoAccountVaultV1.cipher.data, remoteVault.cipher.data,
+    '同团队成员 B 登录应继续使用同一密文');
+
+  unauthorized = true;
+  await assert.rejects(environment.windowObject.TaobaoCloudSync.syncNow(), /重新登录/);
+  assert.equal(actions.at(-1), 'lockAccountVault', '401 必须清除后台明文账号库会话');
+  environment.windowObject.TaobaoCloudSync.stop();
+}
+
 async function run() {
-  await testLocalNoop();
+  await testEmbeddedNoop();
+  await testLocalhostServerSyncEnabled();
   await testInitialOwnerSync();
   await testVaultRevisionConflictDoesNotOverwrite();
+  await testServerRunDeletionRemovesRemoteBeforeLocal();
+  await testRemoteTombstoneClearsStaleLocalWithoutUpload();
+  await testServerRunDeletionFailureKeepsLocalCopy();
+  await testServerRunDeletionSurvivesLocalCleanupFailure();
+  await testServerRunDeletionBlockedWithoutPermission();
+  await testTeamVaultScopeDownloadMemberSwitchAndUnauthorizedLock();
   console.log('cloud sync guards passed');
 }
 

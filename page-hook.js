@@ -7,7 +7,15 @@
   const isGuangheDataPage = location.hostname === 'web.taobao.com' &&
     location.pathname.includes('/s-guanghe-creator/asset-overview');
   if (!isGuangheHost && !isSycmContentMirror && !isGuangheSettingsApp && !isGuangheDataPage) return;
+  const PAGE_HOOK_PROTOCOL = 2;
+  if (window.__ghPageHookProtocol === PAGE_HOOK_PROTOCOL &&
+      (window.__ghPageHookV2250 || typeof window.__ghFetchChannelDiagnosis === 'function')) {
+    return;
+  }
+  // An older MAIN-world hook cannot be safely stacked because it owns page listeners and MTop wrappers.
+  // The background probe will reject it and reload this same tab/document route once.
   if (window.__ghPageHookV2250 || typeof window.__ghFetchChannelDiagnosis === 'function') return;
+  window.__ghPageHookProtocol = PAGE_HOOK_PROTOCOL;
   window.__ghPageHookV2250 = true;
 
   const TAG = '[光合分析]';
@@ -25,7 +33,6 @@
   }
 
   waitForMtop(() => {
-    console.log(TAG, 'lib.mtop 就绪，API 抓取已启用');
 
     // ===== 筛选条件缓存：捕获一次后，两个视角的加载更多都复用它 =====
     // 结构：{ contentConditions, productConditions, timeRangeType, timeRangeBegin, timeRangeEnd }
@@ -140,6 +147,87 @@
       return context;
     }
 
+    function mtopBusinessStatus(value) {
+      const values = [];
+      const visited = new Set();
+      const append = (entry) => {
+        if (Array.isArray(entry)) {
+          entry.forEach(append);
+          return;
+        }
+        if (entry === undefined || entry === null || entry === '') return;
+        if (typeof entry === 'object') return;
+        values.push(String(entry));
+      };
+      const visit = (entry, depth) => {
+        if (depth > 3 || entry === undefined || entry === null) return;
+        if (Array.isArray(entry)) {
+          entry.forEach((item) => visit(item, depth + 1));
+          return;
+        }
+        if (typeof entry !== 'object') {
+          append(entry);
+          return;
+        }
+        if (visited.has(entry)) return;
+        visited.add(entry);
+        append(entry.ret);
+        ['code', 'errorCode', 'subCode', 'message', 'msg', 'subMsg'].forEach((key) => {
+          append(entry[key]);
+        });
+        ['error', 'response', 'responseJSON', 'data', 'cause'].forEach((key) => {
+          if (entry[key] !== undefined && entry[key] !== null) visit(entry[key], depth + 1);
+        });
+      };
+      visit(value, 0);
+      return Array.from(new Set(values)).join(' | ');
+    }
+
+    function assertMtopBusinessSuccess(response, label) {
+      const status = mtopBusinessStatus(response);
+      const failed = /FAIL|ERROR|EXPIRED|NEED_LOGIN|NO_PERMISSION|ACCESS_DENIED|FORBIDDEN|\u5931\u8d25|\u65e0\u6743|\u6743\u9650/i.test(status);
+      const hasModel = Boolean(response && response.data && response.data.model);
+      if ((!status && hasModel) ||
+          (!failed && /(?:^|\W)(?:SUCCESS|OK|0|200)(?:::|\W|$)/i.test(status))) {
+        return response;
+      }
+      const message = status
+        ? (label || '光合接口') + '返回失败：' + status.slice(0, 500)
+        : (label || '光合接口') + '未返回可识别的业务状态。';
+      const error = response instanceof Error ? response : new Error(message);
+      if (/SESSION_EXPIRED|TOKEN_EXPIRED|TOKEN_EXOIRED|TOKEN_EMPTY|NEED_LOGIN|LOGIN|\u4f1a\u8bdd.*\u5931\u6548|\u4ee4\u724c.*\u8fc7\u671f|\u8bf7.*\u767b\u5f55/i.test(status)) {
+        error.code = 'GUANGHE_LOGIN_REQUIRED';
+        error.message = '光合登录会话已失效，请重新登录后再试。';
+      } else if (/NO_PERMISSION|PERMISSION|ACCESS_DENIED|FORBIDDEN|\u65e0\u6743|\u6743\u9650/i.test(status)) {
+        error.code = 'GUANGHE_PERMISSION_DENIED';
+        error.message = '当前光合账号无权读取作品数据，已停止本次匹配。';
+      } else {
+        error.code = 'GUANGHE_API_FAILED';
+        if (!(response instanceof Error)) error.message = message;
+      }
+      throw error;
+    }
+
+    function normalizeMtopRejection(reason, label) {
+      try {
+        assertMtopBusinessSuccess(reason, label);
+      } catch (error) {
+        return error;
+      }
+      if (reason instanceof Error) return reason;
+      const status = mtopBusinessStatus(reason);
+      return new Error(status || String(reason || '光合接口请求失败。'));
+    }
+
+    function throwTerminalMtopAccessError(results) {
+      const rejected = (Array.isArray(results) ? results : []).find(result => (
+        result && result.status === 'rejected' &&
+        result.reason &&
+        ['GUANGHE_LOGIN_REQUIRED', 'GUANGHE_PERMISSION_DENIED'].includes(result.reason.code)
+      ));
+      if (rejected) throw rejected.reason;
+    }
+
     function fetchContentPage(pageNo, pageSize, conditions, timeRangeType, scene, requestTemplate, timeoutMs) {
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('请求超时')), timeoutMs || 20000);
@@ -178,8 +266,18 @@
           v: '1.0',
           data,
         }).then(
-          (res) => { clearTimeout(timer); resolve(res); },
-          (err) => { clearTimeout(timer); reject(err); }
+          (res) => {
+            clearTimeout(timer);
+            try {
+              resolve(assertMtopBusinessSuccess(res, '光合作品接口'));
+            } catch (error) {
+              reject(error);
+            }
+          },
+          (err) => {
+            clearTimeout(timer);
+            reject(normalizeMtopRejection(err, '光合作品接口'));
+          }
         );
       });
     }
@@ -288,10 +386,27 @@
       });
     }
 
+    function contentAnalysisViewReady() {
+      if (new URLSearchParams(location.search).get('tab') === 'singleEffect') return true;
+      const visible = (element) => {
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' &&
+          style.visibility !== 'hidden';
+      };
+      return Array.from(document.querySelectorAll('label,button,span,div')).some((element) => (
+        visible(element) &&
+        /^(近\s*30\s*天(?:的)?作品|所有作品|全部作品)$/.test(
+          String(element.textContent || '').trim()
+        )
+      ));
+    }
+
     async function waitForContentSearchReady(timeoutMs) {
       const deadline = Date.now() + (timeoutMs || 60000);
       while (Date.now() < deadline) {
-        if (document.querySelector('[class*="searchBtn"]')) return;
+        if (contentAnalysisViewReady() && document.querySelector('[class*="searchBtn"]')) return;
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       throw new Error('光合作品分析页未完成加载，找不到搜索按钮。');
@@ -455,9 +570,13 @@
       const base = parseConditions(contentConditions);
       if (base.ds) {
         try {
-          const r = await fetchContentPage(1, pageSize || 100, contentConditions, timeRangeType, scene, requestTemplate);
+          const r = await fetchContentPage(
+            1, pageSize || 100, contentConditions, timeRangeType, scene, requestTemplate, 8000
+          );
           if (pageRows(r).length > 0) return contentConditions;
-        } catch (e) {}
+        } catch (e) {
+          if (e && ['GUANGHE_LOGIN_REQUIRED', 'GUANGHE_PERMISSION_DENIED'].includes(e.code)) throw e;
+        }
       }
       const now = new Date();
       for (let i = 1; i <= 7; i++) {
@@ -466,9 +585,13 @@
         const ds = '' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
         try {
           const cond = stringifyConditionsLike(contentConditions, Object.assign({}, base, { ds }));
-          const r = await fetchContentPage(1, pageSize || 100, cond, timeRangeType, scene, requestTemplate);
+          const r = await fetchContentPage(
+            1, pageSize || 100, cond, timeRangeType, scene, requestTemplate, 8000
+          );
           if (pageRows(r).length > 0) return cond;
-        } catch (e) {}
+        } catch (e) {
+          if (e && ['GUANGHE_LOGIN_REQUIRED', 'GUANGHE_PERMISSION_DENIED'].includes(e.code)) throw e;
+        }
       }
       // 找不到就返回原条件（让上层照常处理空结果）
       return contentConditions;
@@ -1148,6 +1271,7 @@
         directLookupUsed = true;
         const matchedBefore = matchedGroups.size;
         const settled = await Promise.allSettled(requests);
+        throwTerminalMtopAccessError(settled);
         settled.forEach((result) => {
           if (result.status !== 'fulfilled') return;
           directPagesFetched += 1;
@@ -1176,6 +1300,7 @@
           capturedCtx.contentScene,
           capturedCtx.contentRequestTemplate
         )));
+        throwTerminalMtopAccessError(settled);
         state.nextPage += pageCount;
         state.pagesFetched += pageCount;
 
@@ -2292,75 +2417,126 @@
     }
 
     window.__ghFetchChannelDiagnosis = async function (opts) {
-      if (opts && opts.metricsOnly) {
-        await fetchBusinessDefenseMetrics(opts);
-        return;
-      }
-      const originalChannel = selectedChannel() || '全部';
-      const originalPeriod = selectedPeriod();
-      window.postMessage({ type: 'GH_CHANNEL_DIAGNOSIS_PROGRESS', channel: '', index: 0, total: CHANNEL_DIAGNOSIS_LIST.length }, '*');
+      let releaseContentWorkflow = null;
       try {
-        await selectPeriod('30日');
-        const rows = [];
-        let supplyRange = null;
-        // 展示口径取页面已确认的30天实际区间；接口中的 stat_date 可能是最新产出日。
-        let diagnosisDateRange = selectedDateRange();
-        for (let index = 0; index < CHANNEL_DIAGNOSIS_LIST.length; index += 1) {
-          const channel = CHANNEL_DIAGNOSIS_LIST[index];
-          window.postMessage({
-            type: 'GH_CHANNEL_DIAGNOSIS_PROGRESS',
-            channel,
-            index: index + 1,
-            total: CHANNEL_DIAGNOSIS_LIST.length,
-          }, '*');
-          await prepareChannelRequest(channel);
-          const channelResult = await captureChannelMetrics(channel);
-          rows.push.apply(rows, channelResult.rows);
-          if (!diagnosisDateRange && channelResult.dateRange) diagnosisDateRange = channelResult.dateRange;
-          if (!supplyRange && channelResult.supplyRange) supplyRange = channelResult.supplyRange;
-        }
-        const supplyByAsset = await fetchSupplyMetrics(supplyRange);
-        rows.forEach(row => {
-          if (row.channel !== '全部' || !supplyByAsset[row.assetCode]) return;
-          Object.assign(row, supplyByAsset[row.assetCode]);
-        });
-        await restoreChannel('全部');
-        await channelSleep(700);
-        const overallRow = rows.find(row => row.channel === '全部' && row.assetCode === 'all');
-        const seedingGmvShare = overallRow && Number.isFinite(overallRow.seedingGmvShare)
-          ? overallRow.seedingGmvShare
-          : visibleSeedingGmvShare();
-        if (overallRow && Number.isFinite(seedingGmvShare)) {
-          overallRow.seedingGmvShare = seedingGmvShare;
-        }
-        await restoreChannel(originalChannel);
-        if (originalPeriod && originalPeriod !== '30日') await selectPeriod(originalPeriod);
-        window.postMessage({
-          type: 'GH_CHANNEL_DIAGNOSIS_DATA',
-          rows,
-          seedingGmvShare,
-          filterContext: Object.assign({}, (opts && opts.visibleFilters) || {}, {
-            '统计周期': diagnosisDateRange || '最近30天',
-          }),
-        }, '*');
+        releaseContentWorkflow = await acquireContentWorkflow('channel-diagnosis', 0);
       } catch (error) {
-        await restoreChannel(originalChannel);
-        if (originalPeriod && originalPeriod !== selectedPeriod()) {
-          try { await selectPeriod(originalPeriod); } catch (restoreError) {}
-        }
         window.postMessage({
           type: 'GH_CHANNEL_DIAGNOSIS_ERROR',
           message: error && error.message ? error.message : String(error),
         }, '*');
+        return;
+      }
+      try {
+        if (opts && opts.metricsOnly) {
+          await fetchBusinessDefenseMetrics(opts);
+          return;
+        }
+        const originalChannel = selectedChannel() || '全部';
+        const originalPeriod = selectedPeriod();
+        window.postMessage({ type: 'GH_CHANNEL_DIAGNOSIS_PROGRESS', channel: '', index: 0, total: CHANNEL_DIAGNOSIS_LIST.length }, '*');
+        try {
+          await selectPeriod('30日');
+          const rows = [];
+          let supplyRange = null;
+          // 展示口径取页面已确认的30天实际区间；接口中的 stat_date 可能是最新产出日。
+          let diagnosisDateRange = selectedDateRange();
+          for (let index = 0; index < CHANNEL_DIAGNOSIS_LIST.length; index += 1) {
+            const channel = CHANNEL_DIAGNOSIS_LIST[index];
+            window.postMessage({
+              type: 'GH_CHANNEL_DIAGNOSIS_PROGRESS',
+              channel,
+              index: index + 1,
+              total: CHANNEL_DIAGNOSIS_LIST.length,
+            }, '*');
+            await prepareChannelRequest(channel);
+            const channelResult = await captureChannelMetrics(channel);
+            rows.push.apply(rows, channelResult.rows);
+            if (!diagnosisDateRange && channelResult.dateRange) diagnosisDateRange = channelResult.dateRange;
+            if (!supplyRange && channelResult.supplyRange) supplyRange = channelResult.supplyRange;
+          }
+          const supplyByAsset = await fetchSupplyMetrics(supplyRange);
+          rows.forEach(row => {
+            if (row.channel !== '全部' || !supplyByAsset[row.assetCode]) return;
+            Object.assign(row, supplyByAsset[row.assetCode]);
+          });
+          await restoreChannel('全部');
+          await channelSleep(700);
+          const overallRow = rows.find(row => row.channel === '全部' && row.assetCode === 'all');
+          const seedingGmvShare = overallRow && Number.isFinite(overallRow.seedingGmvShare)
+            ? overallRow.seedingGmvShare
+            : visibleSeedingGmvShare();
+          if (overallRow && Number.isFinite(seedingGmvShare)) {
+            overallRow.seedingGmvShare = seedingGmvShare;
+          }
+          await restoreChannel(originalChannel);
+          if (originalPeriod && originalPeriod !== '30日') await selectPeriod(originalPeriod);
+          window.postMessage({
+            type: 'GH_CHANNEL_DIAGNOSIS_DATA',
+            rows,
+            seedingGmvShare,
+            filterContext: Object.assign({}, (opts && opts.visibleFilters) || {}, {
+              '统计周期': diagnosisDateRange || '最近30天',
+            }),
+          }, '*');
+        } catch (error) {
+          await restoreChannel(originalChannel);
+          if (originalPeriod && originalPeriod !== selectedPeriod()) {
+            try { await selectPeriod(originalPeriod); } catch (restoreError) {}
+          }
+          window.postMessage({
+            type: 'GH_CHANNEL_DIAGNOSIS_ERROR',
+            message: error && error.message ? error.message : String(error),
+          }, '*');
+        }
+      } finally {
+        if (releaseContentWorkflow) releaseContentWorkflow();
       }
     };
+
+    let contentWorkflowLease = null;
+
+    function contentWorkflowBusyError() {
+      const error = new Error('光合页面正在执行另一项作品读取，请等待当前操作完成后重试。');
+      error.code = 'GUANGHE_PAGE_BUSY';
+      return error;
+    }
+
+    async function acquireContentWorkflow(owner, waitMs) {
+      const deadline = Date.now() + Math.max(0, Number(waitMs) || 0);
+      while (contentWorkflowLease) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw contentWorkflowBusyError();
+        const activeLease = contentWorkflowLease;
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(contentWorkflowBusyError()), remaining);
+          activeLease.done.then(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
+      let finish;
+      const lease = {
+        owner: String(owner || ''),
+        done: new Promise((resolve) => { finish = resolve; }),
+      };
+      contentWorkflowLease = lease;
+      return () => {
+        if (contentWorkflowLease !== lease) return;
+        contentWorkflowLease = null;
+        finish();
+      };
+    }
 
     // 主入口：一次捕获条件，同时抓作品 + 商品两套数据
     window.__ghFetchBoth = async function (opts) {
       const pageCount = (opts && opts.pageCount) || 3;
       const requestId = String(opts && opts.requestId || '');
       window.postMessage({ type: 'GH_FETCH_PROGRESS', requestId, step: 'start', loaded: 0 }, '*');
+      let releaseContentWorkflow = null;
       try {
+        releaseContentWorkflow = await acquireContentWorkflow('manual:' + requestId, 0);
         const raw = await captureRawConditions((opts && opts.triggerMode) || '');
         capturedCtx = buildBothConditions(raw);
         // 作品侧确认有效日期（顺便回填到 contentConditions）
@@ -2407,6 +2583,8 @@
       } catch (e) {
         console.error(TAG, '数据抓取失败:', e);
         window.postMessage({ type: 'GH_FETCH_PROGRESS', requestId, step: 'error', message: e.message || String(e) }, '*');
+      } finally {
+        if (releaseContentWorkflow) releaseContentWorkflow();
       }
     };
 
@@ -2424,7 +2602,9 @@
         loaded: 0,
         batch: 0,
       }, '*');
+      let releaseContentWorkflow = null;
       try {
+        releaseContentWorkflow = await acquireContentWorkflow('automatic:' + requestId, 90000);
         const raw = await captureContentConditionsWithRetry();
         capturedCtx = forceAutomaticThirtyDayRange(buildBothConditions(raw));
         capturedCtx.contentRequestTemplate = requestTemplateWithRequiredIndicators(
@@ -2486,9 +2666,11 @@
         window.postMessage({
           type: 'GH_FULL_CONTENT_SYNC_ERROR',
           requestId,
+          code: String(error && error.code || 'GUANGHE_SYNC_FAILED'),
           message: error && error.message ? error.message : String(error),
         }, '*');
       } finally {
+        if (releaseContentWorkflow) releaseContentWorkflow();
         fullContentSyncRequests.delete(requestId);
       }
     };
@@ -2499,12 +2681,14 @@
       const pageFrom = (opts && opts.pageFrom) || 1;
       const pageCount = (opts && opts.pageCount) || 3;
       const requestId = String(opts && opts.requestId || '');
-      if (!capturedCtx) {
-        window.postMessage({ type: 'GH_FETCH_PROGRESS', requestId, step: 'error', message: '尚未加载数据，请先点数据分析' }, '*');
-        return;
-      }
-      window.postMessage({ type: 'GH_FETCH_PROGRESS', requestId, step: 'start', loaded: 0 }, '*');
+      let releaseContentWorkflow = null;
       try {
+        releaseContentWorkflow = await acquireContentWorkflow('load-more:' + requestId, 0);
+        if (!capturedCtx) {
+          window.postMessage({ type: 'GH_FETCH_PROGRESS', requestId, step: 'error', message: '尚未加载数据，请先点数据分析' }, '*');
+          return;
+        }
+        window.postMessage({ type: 'GH_FETCH_PROGRESS', requestId, step: 'start', loaded: 0 }, '*');
         if (view === 'product') {
           const r = await fetchProductBatch(pageFrom, pageCount, pageCount * 100);
           window.postMessage({
@@ -2525,10 +2709,11 @@
       } catch (e) {
         console.error(TAG, '加载更多失败:', e);
         window.postMessage({ type: 'GH_FETCH_PROGRESS', requestId, step: 'error', message: e.message || String(e) }, '*');
+      } finally {
+        if (releaseContentWorkflow) releaseContentWorkflow();
       }
     };
 
-    console.log(TAG, 'window.__ghFetchBoth / __ghFetchMore 已就绪');
 
     // 监听来自 content-script（ISOLATED world）的触发请求
     window.addEventListener('message', (event) => {
@@ -2586,7 +2771,6 @@
     if (!href.startsWith('blob:') && !download.match(/\.xlsx?$/i)) return;
     const buf = blobMap.get(href);
     if (buf) {
-      console.log(TAG, '✅ 拦截到 <a download> Excel:', download || href);
       window.postMessage({ type: 'GH_XLSX_CAPTURED', buffer: buf.slice(0) }, '*', [buf.slice(0)]);
     }
   }, true);
@@ -2596,7 +2780,6 @@
     if (url && url.startsWith('blob:')) {
       const buf = blobMap.get(url);
       if (buf) {
-        console.log(TAG, '✅ 拦截到 window.open Excel blob');
         window.postMessage({ type: 'GH_XLSX_CAPTURED', buffer: buf.slice(0) }, '*', [buf.slice(0)]);
       }
     }
@@ -2618,7 +2801,6 @@
       if (isExcelResponse(ct, cd)) {
         const clone = response.clone();
         clone.arrayBuffer().then(buf => {
-          console.log(TAG, '✅ fetch 拦截到 Excel，大小:', buf.byteLength);
           window.postMessage({ type: 'GH_XLSX_CAPTURED', buffer: buf }, '*', [buf]);
         });
       }
@@ -2656,5 +2838,4 @@
     return _XHRSend.apply(this, args);
   };
 
-  console.log(TAG, 'page-hook 已注入');
 })();

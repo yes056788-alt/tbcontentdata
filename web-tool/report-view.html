@@ -44,7 +44,7 @@
     <p id="reportNotice" class="hint report-notice" role="status" aria-live="polite"></p>
     <section class="run-section report-run">
       <div class="section-heading">
-        <div><h2>报告生成结果</h2><p id="reportRunCopy">四个平台并行生成，万相台两章按依赖顺序执行</p></div>
+        <div><h2>报告生成结果</h2><p id="reportRunCopy">淘宝任务与小红书三源同时启动；三源统一对齐后发布各来源结果</p></div>
         <div class="progress-track" aria-hidden="true"><span id="reportProgressBar"></span></div>
       </div>
       <div id="reportSteps" class="report-steps"></div>
@@ -57,7 +57,9 @@
         <button class="report-tab" type="button" data-section="wxt">03 万相台报告</button>
         <button class="report-tab" type="button" data-section="shortVideo">04 短视频诊断</button>
         <button class="report-tab" type="button" data-section="dmp">05 内容人群画像</button>
-        <button class="report-tab" type="button" data-section="xiaohongshu">06 小红书全链路</button>
+        <button class="report-tab" type="button" data-section="adstar">06 淘宝星河报告</button>
+        <button class="report-tab" type="button" data-section="pgy">07 蒲公英报告</button>
+        <button class="report-tab" type="button" data-section="juguang">08 聚光报告</button>
       </nav>
       <div class="report-stage">
         <div id="emptyReport" class="empty-report">
@@ -90,14 +92,25 @@
           <div id="dmpReport"></div>
         </section>
 
-        <section id="xiaohongshuSection" class="report-section" data-report-section="xiaohongshu" hidden>
-          <header class="report-section-head"><div><span>06 / XIAOHONGSHU</span><h2>小红书全链路分析</h2><p id="xhsContext">淘宝星河 · 蒲公英 · 聚光</p></div><b>三源按 noteId 联表</b></header>
-          <div id="xhsReport"></div>
+        <section id="adstarSection" class="report-section" data-report-section="adstar" hidden>
+          <header class="report-section-head"><div><span>06 / TAOBAO STAR</span><h2>淘宝星河分析报告</h2><p id="adstarContext">自定义日期范围</p></div><b>三源对齐后的经营结果</b></header>
+          <div id="adstarReport"></div>
+        </section>
+
+        <section id="pgySection" class="report-section" data-report-section="pgy" hidden>
+          <header class="report-section-head"><div><span>07 / PUGONGYING</span><h2>蒲公英分析报告</h2><p id="pgyContext">自定义日期范围</p></div><b>笔记发布日期口径</b></header>
+          <div id="pgyReport"></div>
+        </section>
+
+        <section id="juguangSection" class="report-section" data-report-section="juguang" hidden>
+          <header class="report-section-head"><div><span>08 / JUGUANG</span><h2>聚光分析报告</h2><p id="juguangContext">自定义日期范围</p></div><b>账户 → 营销诉求 → 投放位置</b></header>
+          <div id="juguangReport"></div>
         </section>
       </div>
     </section>
   </main>
 
+  <script src="/xhs-report-model.js"></script>
   <script src="/report.js"></script>
 </body>
 </html>

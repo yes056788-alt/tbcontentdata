@@ -6,6 +6,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { AuthShell } from "./auth-shell";
 import { ClientApiError, normalizeAuthStatus, requestJson } from "./auth-api";
 import { CheckIcon, EyeIcon, EyeOffIcon, KeyIcon, LockIcon } from "./icons";
+import { lockVaultAndRedirect } from "./vault-session-lock";
 
 export function ChangePasswordClient() {
   const [currentPassword, setCurrentPassword] = useState("");
@@ -23,14 +24,15 @@ export function ChangePasswordClient() {
       try {
         const status = normalizeAuthStatus(await requestJson("/api/auth/status"));
         if (!status.authenticated) {
-          window.location.replace("/login?next=%2Fchange-password");
+          await lockVaultAndRedirect("/login?next=%2Fchange-password");
           return;
         }
         setForced(status.mustChangePassword);
         setDisplayName(status.displayName || status.username);
       } catch (statusError) {
-        if (statusError instanceof ClientApiError && statusError.status === 401) {
-          window.location.replace("/login?next=%2Fchange-password");
+        if (statusError instanceof ClientApiError &&
+            (statusError.status === 401 || statusError.status === 403)) {
+          await lockVaultAndRedirect("/login?next=%2Fchange-password");
           return;
         }
         setError(statusError instanceof Error ? statusError.message : "暂时无法检查账号状态。");
@@ -64,8 +66,13 @@ export function ChangePasswordClient() {
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
-      window.location.replace("/");
+      await lockVaultAndRedirect("/");
     } catch (changeError) {
+      if (changeError instanceof ClientApiError &&
+          (changeError.status === 401 || changeError.status === 403)) {
+        await lockVaultAndRedirect("/login?next=%2Fchange-password");
+        return;
+      }
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");

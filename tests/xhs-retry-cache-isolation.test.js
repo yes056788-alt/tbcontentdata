@@ -84,7 +84,6 @@ test('platform retry does not retry returned XHS account, structure, or explicit
   );
 
   for (const detail of [
-    { ok: false, code: 'XHS_ACCOUNT_BINDING_FAILED' },
     { ok: false, code: 'XHS_ANALYSIS_STRUCTURE_INVALID' },
     { ok: false, code: 'XHS_COLLECTION_FAILED', retryable: false },
   ]) {
@@ -135,6 +134,37 @@ test('a returned transient failure never masks a later terminal thrown error', a
       /terminal permission failure/.test(error.message),
   );
   assert.deepEqual(attempts, [1, 2]);
+});
+
+test('snapshot size limit is terminal and never triggers a full platform recollection', async () => {
+  const from = source.indexOf('function normalizePlatformTaskIds');
+  const to = source.indexOf('\nasync function waitTabComplete', from);
+  assert.ok(from >= 0 && to > from, 'retry helper must remain extractable');
+  const context = vm.createContext({
+    PLATFORM_TASK_IDS: ['sycm'],
+    REPORT_PLATFORM_TASK_IDS: ['sycm', 'adstar', 'pgy', 'juguang'],
+    PLATFORM_RETRY_ATTEMPTS: 3,
+    async waitMilliseconds() {},
+  });
+  vm.runInContext(
+    source.slice(from, to) + '\nglobalThis.retryForTest = runPlatformStepWithRetry;',
+    context,
+  );
+
+  const attempts = [];
+  await assert.rejects(
+    context.retryForTest({
+      async run(attempt) {
+        attempts.push(attempt);
+        const error = new Error('fictional snapshot exceeds archive limit');
+        error.code = 'XHS_SNAPSHOT_SIZE_LIMIT';
+        error.retryable = false;
+        throw error;
+      },
+    }),
+    (error) => error && error.code === 'XHS_SNAPSHOT_SIZE_LIMIT' && error.retryable === false,
+  );
+  assert.deepEqual(attempts, [1]);
 });
 
 test('a returned transient failure never masks the final thrown error after retries exhaust', async () => {

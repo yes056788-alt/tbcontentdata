@@ -83,7 +83,9 @@ test("replay protection is append-only migration state with valid Drizzle metada
   assert.match(migration, /CREATE TABLE `owner_recovery_uses`/);
   assert.match(migration, /`token_hash` text PRIMARY KEY NOT NULL/);
   assert.match(schema, /ownerRecoveryUses = sqliteTable\("owner_recovery_uses"/);
-  assert.equal(journal.entries.at(-1).tag, "0003_owner_recovery_uses");
+  const recoveryEntry = journal.entries.find((entry) => entry.tag === "0003_owner_recovery_uses");
+  assert.ok(recoveryEntry);
+  assert.equal(recoveryEntry.idx, 3);
   assert.equal(snapshot.prevId, prior.id);
   assert.ok(snapshot.tables.owner_recovery_uses);
   assert.equal(snapshot.tables.owner_recovery_uses.columns.token_hash.primaryKey, true);

@@ -31,7 +31,7 @@ const platformWiring = [
 
 const isolatedBridge = 'xhs-platform-content.js';
 const backgroundModules = [
-  'xhs/bindings.js',
+  'xhs/identity.js',
   'xhs/collector-core.js',
   'xhs/local-cache.js',
   'xhs/page-client.js',

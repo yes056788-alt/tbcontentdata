@@ -4,6 +4,7 @@ import type { runs } from "@/db/schema";
 type RunRow = typeof runs.$inferSelect;
 
 const MAX_XHS_SNAPSHOT_BYTES = 8 * 1024 * 1024;
+const XHS_DETAIL_KEY_PREFIX = "xhsAnalysisDetailChunkV1:";
 const XHS_SNAPSHOT_KEYS = new Set([
   "xhsAnalysisSnapshotV1",
   "xhsCollectionStatusV1",
@@ -81,6 +82,13 @@ function isForbiddenXhsStateKey(value: unknown) {
     FORBIDDEN_XHS_STATE_KEYS.has(key) ||
     key.startsWith("raw") ||
     key.startsWith("checkpoint")
+  );
+}
+
+function isXhsDetailSnapshotKey(value: unknown) {
+  const key = String(value ?? "");
+  return key.startsWith(XHS_DETAIL_KEY_PREFIX) && /^\d{4,6}$/.test(
+    key.slice(XHS_DETAIL_KEY_PREFIX.length),
   );
 }
 
@@ -180,9 +188,8 @@ function assertNoXhsRawState(
 export function assertRunPayloadSafe(value: unknown) {
   assertNoRunCredentials(value);
   const snapshots = asRecord(asRecord(value).snapshots);
-  for (const key of XHS_SNAPSHOT_KEYS) {
-    if (!Object.prototype.hasOwnProperty.call(snapshots, key)) continue;
-    const snapshot = snapshots[key];
+  for (const [key, snapshot] of Object.entries(snapshots)) {
+    if (!XHS_SNAPSHOT_KEYS.has(key) && !isXhsDetailSnapshotKey(key)) continue;
     let serialized = "";
     try {
       serialized = JSON.stringify(snapshot);
