@@ -65,11 +65,13 @@
     return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
   }
 
-  function retryableApiFailure(response, body) {
+  function retryableApiFailure(response, body, endpoint) {
     const status = Number(response && response.status);
     const bodyCode = Number(body && (body.code ?? body.status ?? body.statusCode));
     const message = String(body && (body.msg || body.message) || '').toLowerCase();
+    if ([401, 403].includes(status) || [401, 403].includes(bodyCode)) return false;
     return status === 429 || status >= 500 || bodyCode === 429 ||
+      (endpoint === 'notes.sum' && /^汇总笔记列表的数据失败[。.!！]?$/.test(message.trim())) ||
       /\u8bf7\u6c42(?:\u8fc7\u4e8e|\u592a)?\u9891\u7e41|\u64cd\u4f5c\u9891\u7e41|\u9650\u6d41|\u7a0d\u540e\u91cd\u8bd5|too many requests|rate limit/.test(message);
   }
 
@@ -315,7 +317,7 @@
           ok: false,
           code: 'PGY_API_ERROR',
           message: String(body && (body.msg || body.message) || `HTTP ${response.status}`),
-          retryable: retryableApiFailure(response, body),
+          retryable: retryableApiFailure(response, body, message.endpoint),
         });
         return;
       }

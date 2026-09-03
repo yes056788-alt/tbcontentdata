@@ -3413,8 +3413,13 @@
     const pgyCosts = xhsObject(pgy.costs);
     const pgyTaobao15d = xhsObject(pgy.taobao15d);
     const pgyExportMetric = (path) => interactiveExport ? path : '';
+    const pgySummaryUnavailable = xhsArray(xhsPlatformState('pgy').errors)
+      .some((error) => error && error.code === 'summary_unavailable');
     const pgyPanel = '<section class="xhs-report-panel" data-xhs-panel="pgy-analysis">' +
       xhsPanelHeading('PUGONGYING', '蒲公英分析', '仅统计所选时间内发布的笔记；合作金额与平台服务费分开展示', '发布日期口径') +
+      (pgySummaryUnavailable
+        ? '<p class="xhs-inline-warning" role="alert">蒲公英官方汇总未完成：以下仅展示已采集的笔记明细及其合计，尚未通过官方汇总对账，请勿据此确认总账。</p>'
+        : '') +
       buildXhsPgyLinkCoverageNotice(pgyView) +
       buildXhsPgyDateControls(pgyView, staticExport && !interactiveExport, interactiveExport) +
       xhsKpiMarkup([

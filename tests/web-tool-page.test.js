@@ -229,7 +229,7 @@ assert.ok(bridgeContentScript);
 assert.ok(bridgeContentScript.matches.includes('http://127.0.0.1:3400/*'));
 assert.equal(bridgeContentScript.all_frames, true);
 assert.match(server, /frame-ancestors 'self'/);
-assert.equal(manifest.version, '2.37.51');
+assert.equal(manifest.version, '2.37.52');
 
 const classificationStart = taskPage.indexOf('const CLASSIFICATION_PROFILE_IDS');
 const classificationEnd = taskPage.indexOf('\n  function selectedPlatforms', classificationStart);

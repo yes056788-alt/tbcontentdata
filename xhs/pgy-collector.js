@@ -612,14 +612,22 @@
     const feeBearingCount = notes.reduce((count, note) => (
       numberOrZero(note && note.costs && note.costs.platformFee) > 0 ? count + 1 : count
     ), 0);
-    const platformFeeDiagnostics = platformFeeReconciliation(
+    const summaryAvailable = optionalNumber(summary.cooperationCost) !== null &&
+      optionalNumber(summary.platformFee) !== null;
+    const platformFeeDiagnostics = summaryAvailable ? platformFeeReconciliation(
       summary.platformFee,
       platformFee,
       feeBearingCount
-    );
-    const expectedCount = optionalNumber(summary.expectedCount);
+    ) : null;
+    const expectedCount = firstOptionalNumber(summary.expectedCount, source.expectedCount);
     const issues = [];
     const warnings = [];
+    if (!summaryAvailable) {
+      issues.push({
+        code: 'summary_unavailable',
+        message: '蒲公英官方汇总未完成；笔记明细及其合计尚未通过官方汇总对账。',
+      });
+    }
     if (duplicateSourceCount > 0) {
       issues.push({ code: 'duplicate_source_row', count: duplicateSourceCount });
     } else if (duplicateCount > 0) {
@@ -628,7 +636,7 @@
     if (expectedCount != null && expectedCount !== receivedCount) {
       issues.push({ code: 'row_count_mismatch', expected: expectedCount, actual: receivedCount });
     }
-    if (!closeEnough(summary.cooperationCost, cooperationCost)) {
+    if (summaryAvailable && !closeEnough(summary.cooperationCost, cooperationCost)) {
       const expected = stableMoney(summary.cooperationCost);
       const difference = stableMoney(expected - cooperationCost);
       issues.push({
@@ -641,7 +649,7 @@
         tolerance: MONEY_TOLERANCE,
       });
     }
-    if (platformFeeDiagnostics.reconciliation === 'per_row_yuan_truncation') {
+    if (platformFeeDiagnostics && platformFeeDiagnostics.reconciliation === 'per_row_yuan_truncation') {
       warnings.push({
         code: 'platform_fee_rounding_reconciled',
         message: `PGY summary platform fee ${platformFeeDiagnostics.expected} exceeds the note-row total ` +
@@ -654,7 +662,7 @@
         tolerance: platformFeeDiagnostics.tolerance,
         feeBearingCount: platformFeeDiagnostics.feeBearingCount,
       });
-    } else if (platformFeeDiagnostics.reconciliation === 'mismatch') {
+    } else if (platformFeeDiagnostics && platformFeeDiagnostics.reconciliation === 'mismatch') {
       issues.push({
         code: 'platform_fee_mismatch',
         message: platformFeeMismatchMessage(platformFeeDiagnostics),
@@ -1144,7 +1152,8 @@
         return result;
       }
 
-      let summary;
+      let summary = null;
+      let summaryError = null;
       try {
         const response = await collectorCore.withRetry(
           () => request(context.tabId, 'notes.sum', requestBody(context, 1), context.signal),
@@ -1153,12 +1162,12 @@
         summary = normalizePgySummary(response);
       } catch (error) {
         rethrowAbort(error, context.signal);
-        const result = baseResult(context, startedAt);
-        result.identity = Object.assign({ accountKey: context.accountKey }, context.identity);
-        result.status = 'failed';
-        result.errors = [errorRecord(error, { code: 'summary_invalid' })];
-        result.finishedAt = now();
-        return result;
+        summaryError = errorRecord(error, {
+          code: 'summary_unavailable',
+          causeCode: error && error.code || 'summary_invalid',
+          message: '蒲公英官方汇总未完成，继续采集笔记明细但不视为已对账：' +
+            String(error && error.message || error),
+        });
       }
 
       const cacheKey = `xhs:${encodeURIComponent(context.runId)}:pgy:notes`;
@@ -1231,7 +1240,8 @@
           result.summary = summary;
           result.status = 'failed';
           result.schemaValid = false;
-          result.errors = [errorRecord(error, { code: 'schema_invalid' })];
+          result.errors = (summaryError ? [summaryError] : [])
+            .concat(errorRecord(error, { code: 'schema_invalid' }));
           result.finishedAt = now();
           return result;
         }
@@ -1286,8 +1296,10 @@
         officialLinkPromise,
       ]);
       const notes = applyOfficialNoteLinks(searchKeywordResult.notes, officialLinkResult);
-      if (summary.expectedCount == null) summary = Object.assign({}, summary, { expectedCount: notesResult.expectedCount });
-      const reconciliation = reconcilePgyCollection({ summary, notes });
+      if (summary && summary.expectedCount == null) {
+        summary = Object.assign({}, summary, { expectedCount: notesResult.expectedCount });
+      }
+      const reconciliation = reconcilePgyCollection({ summary, notes, expectedCount: notesResult.expectedCount });
       const taskDateErrors = taskDates.coverage.missingTaskEndCount > 0
         ? [{
           code: 'pgy_task_end_date_missing',
@@ -1295,9 +1307,9 @@
           count: taskDates.coverage.missingTaskEndCount,
         }]
         : [];
-      const errors = (paginationError
+      const errors = (summaryError ? [summaryError] : []).concat(paginationError
         ? [errorRecord(paginationError, { code: 'pagination_incomplete' })]
-        : []).concat(projectsError
+        : [], projectsError
           ? [errorRecord(projectsError, { code: 'pgy_task_metadata_incomplete' })]
           : [], taskDateErrors);
       const schemaValid = true;

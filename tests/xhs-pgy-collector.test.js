@@ -159,6 +159,7 @@ function createFakePageClient(options = {}) {
     }
 
     if (input.endpoint === 'notes.sum') {
+      if (options.summaryError) throw options.summaryError;
       if (options.zero) return rawSummary({ total: 0, actualConsume: '0', totalPlatformPrice: '0' });
       if (options.duplicate) return rawSummary({ total: 3, actualConsume: '300', totalPlatformPrice: '30' });
       return rawSummary(options.summaryOverride || {});
@@ -696,6 +697,121 @@ test('collects identity, sum, and every list page without applying the task date
   ));
   assert.equal(linkResultCall.timeoutMs, 3 * 60 * 1000,
     'result download and XLSX parsing must not inherit the ordinary 45-second page timeout');
+});
+
+test('summary API failure preserves all note pages without claiming official reconciliation', async () => {
+  const result = await createCollector(createFakePageClient({
+    summaryError: Object.assign(new Error('汇总笔记列表的数据失败'), {
+      code: 'PGY_API_ERROR', retryable: false,
+    }),
+  })).collect(collectionOptions());
+
+  assert.equal(result.status, 'partial');
+  assert.equal(result.notes.length, 3);
+  assert.equal(result.receivedCount, 3);
+  assert.equal(result.paginationComplete, true);
+  assert.equal(result.schemaValid, true);
+  assert.equal(result.summary, null, 'never fabricate an official summary from detail totals');
+  assert.equal(result.reconciled, false);
+  assert.equal(result.reconciliation.reconciled, false);
+  assert.equal(result.reconciliation.cooperationCost, 350);
+  assert.equal(result.reconciliation.platformFee, 35);
+  assert.deepEqual(result.reconciliation.issues.map(issue => issue.code), ['summary_unavailable']);
+  assert.equal(result.errors[0].code, 'summary_unavailable');
+  assert.equal(result.errors[0].causeCode, 'PGY_API_ERROR');
+  assert.match(result.errors[0].message, /汇总笔记列表的数据失败/);
+  const { createXhsAnalysisSnapshot } = require('../xhs/analysis');
+  const snapshot = createXhsAnalysisSnapshot({
+    runId: result.runId, dateRange: DATE_RANGE, collections: { pgy: result },
+    selectedPlatforms: ['pgy'], generatedAt: '2030-02-01T00:00:00.000Z',
+  });
+  assert.equal(snapshot.pgy.noteCount, 3);
+  assert.equal(snapshot.quality.decisionReady, false);
+  assert.equal(snapshot.management.accountOverview.totalSpend, null);
+});
+
+test('invalid summary fields preserve notes but keep the schema error cause', async () => {
+  const result = await createCollector(createFakePageClient({
+    summaryOverride: { actualConsume: null },
+  })).collect(collectionOptions());
+  assert.equal(result.status, 'partial');
+  assert.equal(result.notes.length, 3);
+  assert.equal(result.summary, null);
+  assert.equal(result.reconciled, false);
+  assert.equal(result.errors[0].causeCode, 'summary_invalid');
+});
+
+test('transient summary failures recover within the retry budget before collecting notes', async () => {
+  const fake = createFakePageClient();
+  let attempts = 0;
+  const pageClient = { async request(input) {
+    if (input.endpoint === 'notes.sum' && ++attempts < 3) {
+      throw Object.assign(new Error('汇总笔记列表的数据失败'), { retryable: true });
+    }
+    return fake.request(input);
+  } };
+  const result = await createCollector(pageClient).collect(collectionOptions());
+  assert.equal(attempts, 3);
+  assert.equal(result.status, 'complete');
+  assert.equal(result.reconciled, true);
+  assert.equal(result.notes.length, 3);
+  assert.deepEqual(result.errors, []);
+});
+
+test('summary retry exhaustion is bounded and still retains the note list', async () => {
+  const fake = createFakePageClient();
+  let attempts = 0;
+  const pageClient = { async request(input) {
+    if (input.endpoint === 'notes.sum') {
+      attempts += 1;
+      throw Object.assign(new Error('汇总笔记列表的数据失败'), { retryable: true });
+    }
+    return fake.request(input);
+  } };
+  const result = await createCollector(pageClient).collect(collectionOptions());
+  assert.equal(attempts, 3);
+  assert.equal(result.status, 'partial');
+  assert.equal(result.reconciled, false);
+  assert.equal(result.notes.length, 3);
+});
+
+test('summary failure with zero-cost or empty notes never passes reconciliation', async () => {
+  const result = await createCollector(createFakePageClient({
+    zero: true, summaryError: Object.assign(new Error('汇总不可用'), { retryable: false }),
+  })).collect(collectionOptions());
+  assert.equal(result.status, 'partial');
+  assert.equal(result.notes.length, 0);
+  assert.equal(result.empty, false);
+  assert.equal(result.reconciled, false);
+  assert.equal(reconcilePgyCollection({ summary: null, notes: [] }).reconciled, false);
+});
+
+test('summary and list failures retain both causes without fabricating a partial report', async () => {
+  const result = await createCollector(createFakePageClient({
+    summaryError: Object.assign(new Error('汇总不可用'), { retryable: false }),
+    structureDrift: true,
+  })).collect(collectionOptions());
+  assert.equal(result.status, 'failed');
+  assert.equal(result.notes.length, 0);
+  assert.ok(result.errors.some(error => error.code === 'summary_unavailable'));
+  assert.ok(result.errors.some(error => error.code !== 'summary_unavailable'));
+});
+
+test('aborting summary collection does not start detail collection', async () => {
+  const controller = new AbortController();
+  const fake = createFakePageClient();
+  const pageClient = { async request(input) {
+    if (input.endpoint === 'notes.sum') {
+      await Promise.resolve();
+      controller.abort();
+      throw Object.assign(new Error('cancelled'), { name: 'AbortError' });
+    }
+    return fake.request(input);
+  } };
+  await assert.rejects(createCollector(pageClient).collect({
+    ...collectionOptions(), signal: controller.signal,
+  }), { name: 'AbortError' });
+  assert.equal(fake.calls.some(call => call.endpoint === 'notes.list'), false);
 });
 
 test('keeps official-link export failure non-critical and leaves missing titles non-clickable', async () => {

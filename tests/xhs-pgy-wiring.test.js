@@ -113,6 +113,9 @@ function evaluatePgyHook(options = {}) {
           success: false,
           msg: '请求过于频繁，请稍后重试',
         });
+      } else if (pathname === '/api/solar/content/note/list/sum' && options.summaryResponseBody) {
+        this.status = options.summaryResponseStatus || 200;
+        this.responseText = JSON.stringify(options.summaryResponseBody);
       } else if (pathname === PGY_LINK_EXPORT_ENDPOINTS.submit) {
         this.responseText = JSON.stringify({
           code: 0,
@@ -477,6 +480,27 @@ test('pgy note search-keyword endpoint uses a fixed GET path and only note-scope
     JSON.stringify(response),
     /fixture-private-cookie|fixture-private-token|fixture-override-token|xsec_token/,
   );
+});
+
+test('pgy transient summary business failure is eligible for bounded collector retry', async () => {
+  const evaluated = evaluatePgyHook({
+    summaryResponseBody: { success: false, code: -1, msg: '汇总笔记列表的数据失败' },
+  });
+  await evaluated.request(PGY_ENDPOINTS.find(item => item.endpoint === 'notes.sum'), 95);
+  assert.equal(evaluated.posted[0].message.ok, false);
+  assert.equal(evaluated.posted[0].message.retryable, true);
+});
+
+test('pgy summary authentication and permission errors are not retried', async () => {
+  for (const status of [401, 403]) {
+    const evaluated = evaluatePgyHook({
+      summaryResponseStatus: status,
+      summaryResponseBody: { success: false, code: status, msg: '汇总笔记列表的数据失败' },
+    });
+    await evaluated.request(PGY_ENDPOINTS.find(item => item.endpoint === 'notes.sum'), 96);
+    assert.equal(evaluated.posted[0].message.ok, false);
+    assert.equal(evaluated.posted[0].message.retryable, false);
+  }
 });
 
 test('pgy search-keyword throttling remains retryable for the bounded collector backoff', async () => {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "淘宝内容诊断插件",
-  "version": "2.37.51",
+  "version": "2.37.52",
   "description": "为全链路取数网页提供淘宝经营及星河、蒲公英、聚光、灵犀后台取数能力",
   "permissions": ["storage", "unlimitedStorage", "webRequest", "downloads", "tabs", "scripting", "webNavigation", "alarms"],
   "action": {

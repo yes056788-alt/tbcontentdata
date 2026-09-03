@@ -377,6 +377,18 @@ function assertPgySearchMetricCards(markup, expected) {
   }
 }
 
+test('PGY partial report prominently marks detail totals as not officially reconciled', () => {
+  const harness = createPgyReportHarness();
+  const status = collectionStatus();
+  status.platforms.pgy.status = 'partial';
+  status.platforms.pgy.errors = [{ code: 'summary_unavailable', message: '官方汇总未完成' }];
+  harness.api.setState({ status, analysis: pgySnapshot() });
+  const panel = pgyPanel(harness.api.buildPgyMarkup());
+  assert.match(panel, /role="alert"[^>]*>蒲公英官方汇总未完成/);
+  assert.match(panel, /尚未通过官方汇总对账/);
+  assert.match(panel, /合作金额[\s\S]*?<strong>¥300<\/strong>/);
+});
+
 test('PGY facts default to pgy.defaultDateRange and render the locally aggregated summary', () => {
   const harness = createPgyReportHarness();
   harness.api.setState({ status: collectionStatus(), analysis: pgySnapshot() });
