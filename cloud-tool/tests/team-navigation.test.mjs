@@ -41,6 +41,7 @@ test("home and team pages share one complete account navigation", () => {
   assert.match(topbarSource, /href:\s*"\/workspace\.html", label:\s*"项目管理"/);
   assert.doesNotMatch(topbarSource, /href:\s*"\/collect\.html"|label:\s*"经营取数"/);
   assert.match(topbarSource, /href:\s*"\/report\.html", label:\s*"一键取数"/);
+  assert.match(topbarSource, /href:\s*"\/comments\.html", label:\s*"评论监测"/);
   assert.match(topbarSource, /href:\s*"\/accounts\.html", label:\s*"账号库管理"/);
   assert.match(topbarSource, /href:\s*"\/admin", label:\s*"团队管理"/);
   assert.match(topbarSource, /href="\/change-password"/);

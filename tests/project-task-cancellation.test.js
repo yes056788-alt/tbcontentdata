@@ -268,6 +268,8 @@ function createProjectHarness(options = {}) {
   const archiveCalls = [];
   const rollbackCalls = [];
   const reportRuns = [];
+  const createdTabs = [];
+  const removedTabs = [];
   const successWriteStarted = deferred();
   const releaseSuccessWrite = deferred();
   let blockedSuccessWrite = false;
@@ -290,10 +292,24 @@ function createProjectHarness(options = {}) {
     PLATFORM_RETRY_ATTEMPTS: 5,
     PROJECT_TASK_STATUS_KEY: 'taobaoProjectTaskStatusV1',
     CONTENT_DIAGNOSIS_STATUS_KEY: 'taobaoContentDiagnosisReportStatusV1',
+    BUSINESS_DEFENSE_XINGHE_URL: 'https://adstar.alimama.com/portal/v2/pages/myAdstar/order/list.htm',
+    XHS_PLATFORM_ENTRY_URLS: {
+      pgy: 'https://pgy.xiaohongshu.com/microapp/creativity/inspire',
+      juguang: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+    },
     setTimeout,
     clearTimeout,
     chrome: {
       runtime: { id: 'fictional-extension-id' },
+      tabs: {
+        async create(details) {
+          createdTabs.push(copy(details));
+          return { id: 41, status: 'loading', url: details.url };
+        },
+        async remove(tabId) {
+          removedTabs.push(Number(tabId));
+        },
+      },
       storage: {
         local: {
           async get(keys) {
@@ -374,8 +390,10 @@ function createProjectHarness(options = {}) {
   return {
     archiveCalls,
     context,
+    createdTabs,
     releaseSuccessWrite,
     reportRuns,
+    removedTabs,
     rollbackCalls,
     state,
     successWriteStarted,
@@ -414,9 +432,12 @@ test('current project cancellation reaches a cancelled terminal state, never arc
   const blocked = harness.context.testEnsure(validPayload('fictional-too-early'));
   assert.equal(blocked.started, false);
   assert.equal(blocked.taskId, first.taskId);
+  assert.deepEqual(harness.removedTabs, [], '采集 drain 完成前不得关闭任务标签页。');
   harness.reportRuns[0].drainGate.resolve();
   const result = await first.promise;
   assert.equal(result.cancelled, true);
+  assert.deepEqual(harness.removedTabs, [41],
+    '必须先排空采集，再关闭本次任务创建的标签页。');
   await waitFor(() => harness.context.testExecution() === null, '取消后未释放任务执行权。');
 
   const terminal = harness.state.taobaoProjectTaskStatusV1;

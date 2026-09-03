@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>评论监测 - 淘宝经营数据</title>
+  <link rel="stylesheet" href="/comments.css">
+</head>
+<body>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
+
+  <header class="comment-topbar">
+    <a class="comment-brand" href="/index.html" aria-label="返回项目管理">
+      <span class="comment-brand-mark" aria-hidden="true">TB</span>
+      <span><strong>淘宝经营数据</strong><small>全链路经营工作台</small></span>
+    </a>
+    <nav class="comment-global-nav" aria-label="主要工作区">
+      <a href="/index.html">项目管理</a>
+      <a href="/report.html">搜索词分析</a>
+      <a class="active" href="/comments.html" aria-current="page">评论监测</a>
+      <a href="/accounts.html">账号库管理</a>
+    </nav>
+    <div class="comment-connection">
+      <span id="commentConnectionState" class="connection-state checking">正在检测数据助手</span>
+      <span id="commentExtensionVersion" class="extension-version"></span>
+    </div>
+  </header>
+
+  <main id="mainContent" class="comment-main" tabindex="-1">
+    <p id="commentMonitorNotice" class="comment-notice" role="status" aria-live="polite"></p>
+
+    <header class="comment-heading">
+      <div>
+        <span class="section-kicker">COMMENT MONITOR</span>
+        <h1>评论监测</h1>
+        <p>按新增笔记与近期热度每日更新，结论可追溯到原评论与官方笔记链接。</p>
+      </div>
+      <div class="comment-heading-actions">
+        <div class="comment-store-control">
+          <label for="commentStoreSelect">监测店铺</label>
+          <select id="commentStoreSelect" aria-describedby="commentStoreHelp" required>
+            <option value="">正在读取店铺…</option>
+          </select>
+          <small id="commentStoreHelp">复用当前 Chrome 已登录的蒲公英账号；未登录时会打开登录页。</small>
+        </div>
+        <button id="exportCommentHtmlBtn" class="button" type="button">导出洞察 HTML</button>
+        <button id="runCommentMonitorBtn" class="button primary" type="button" aria-describedby="commentStoreHelp" disabled>立即更新</button>
+      </div>
+    </header>
+
+    <section class="comment-status-band" aria-labelledby="commentStatusTitle">
+      <div>
+        <span class="section-kicker">DAILY STATUS</span>
+        <h2 id="commentStatusTitle">日更状态</h2>
+      </div>
+      <dl class="comment-status-list">
+        <div><dt>当前状态</dt><dd id="commentRunStatus"><span class="status-badge empty">待连接</span></dd></div>
+        <div><dt>最近成功</dt><dd id="commentLastSuccess">-</dd></div>
+        <div><dt>下次计划</dt><dd id="commentNextRun">09:00</dd></div>
+        <div><dt>待续抓</dt><dd id="commentPendingCount">0 篇</dd></div>
+      </dl>
+    </section>
+
+    <form id="commentFilterForm" class="comment-filter-bar" aria-label="筛选评论监测数据">
+      <label><span>开始日期</span><input id="commentDateFrom" name="from" type="date"></label>
+      <label><span>结束日期</span><input id="commentDateTo" name="to" type="date"></label>
+      <label class="comment-search-field"><span>搜索</span><input id="commentSearch" name="search" type="search" maxlength="100" placeholder="搜索笔记、主题或评论"></label>
+      <button id="applyCommentFiltersBtn" class="button" type="submit">应用筛选</button>
+    </form>
+
+    <div class="comment-tabs" role="tablist" aria-label="评论监测视图">
+      <button id="comment-overview-tab" class="active" type="button" role="tab" data-comment-view="overview" aria-controls="comment-overview-panel" aria-selected="true" tabindex="0">今日概览</button>
+      <button id="comment-heat-tab" type="button" role="tab" data-comment-view="heat" aria-controls="comment-heat-panel" aria-selected="false" tabindex="-1">笔记热度</button>
+      <button id="comment-insights-tab" type="button" role="tab" data-comment-view="insights" aria-controls="comment-insights-panel" aria-selected="false" tabindex="-1">主题洞察</button>
+      <button id="comment-evidence-tab" type="button" role="tab" data-comment-view="evidence" aria-controls="comment-evidence-panel" aria-selected="false" tabindex="-1">评论证据</button>
+      <button id="comment-runs-tab" type="button" role="tab" data-comment-view="runs" aria-controls="comment-runs-panel" aria-selected="false" tabindex="-1">运行记录与设置</button>
+    </div>
+
+    <section id="commentErrorState" class="comment-state comment-state-error" role="alert" hidden>
+      <strong>本次更新未完成</strong>
+      <p id="commentErrorCopy">请检查登录状态后重试。</p>
+    </section>
+
+    <section id="commentEmptyState" class="comment-state comment-state-empty">
+      <strong>正在连接评论监测数据</strong>
+      <p>如果未安装或未重新加载数据助手，本页会保持安全空态。</p>
+    </section>
+
+    <section id="comment-overview-panel" class="comment-panel" role="tabpanel" aria-labelledby="comment-overview-tab" data-comment-panel="overview">
+      <div class="comment-summary" aria-label="今日评论监测概览">
+        <article><span>新增笔记</span><strong id="metricNewNotes">0</strong><small>首次出现且 7 天内发布</small></article>
+        <article><span>新增评论</span><strong id="metricNewComments">0</strong><small>自上次成功更新以来</small></article>
+        <article><span>热笔记</span><strong id="metricHotNotes">0</strong><small>近期热度 Top 20%</small></article>
+        <article><span>负面反馈</span><strong id="metricNegativeFeedback">0</strong><small>含投诉与明显负向表达</small></article>
+        <article><span>购买顾虑</span><strong id="metricPurchaseConcerns">0</strong><small>价格、规格、效果等阻力</small></article>
+        <article><span>未回答问题</span><strong id="metricUnansweredQuestions">0</strong><small>尚未识别到作者回复</small></article>
+        <article><span>待续抓任务</span><strong id="metricPendingTasks">0</strong><small>已保存检查点，可继续</small></article>
+      </div>
+
+      <section class="comment-section" aria-labelledby="overviewHotTitle">
+        <header class="comment-section-head"><div><h2 id="overviewHotTitle">今日优先处理</h2><p>按新笔记、评论增量与热度排序</p></div><span id="overviewPriorityCount">0 篇</span></header>
+        <div class="comment-table-wrap">
+          <table class="comment-table">
+            <thead><tr><th scope="col">笔记</th><th scope="col">评论增量</th><th scope="col">热度</th><th scope="col">采集状态</th><th scope="col">操作</th></tr></thead>
+            <tbody id="commentPriorityRows"><tr><td class="empty-cell" colspan="5">暂无优先处理笔记</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section id="comment-heat-panel" class="comment-panel" role="tabpanel" aria-labelledby="comment-heat-tab" data-comment-panel="heat" hidden>
+      <section class="comment-section no-margin" aria-labelledby="commentHeatTitle">
+        <header class="comment-section-head"><div><h2 id="commentHeatTitle">笔记热度</h2><p>热度分 = 评论增速 50% + 非评论互动增速 30% + 阅读增速 20%</p></div><span id="commentHeatCount">0 篇</span></header>
+        <div class="comment-table-wrap">
+          <table class="comment-table">
+            <thead><tr><th scope="col">笔记</th><th scope="col">阅读增量</th><th scope="col">互动增量</th><th scope="col">评论增量</th><th scope="col">热度</th><th scope="col">抓取状态</th><th scope="col">最后更新</th><th scope="col">操作</th></tr></thead>
+            <tbody id="commentHeatRows"><tr><td class="empty-cell" colspan="8">暂无笔记热度数据</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section id="comment-insights-panel" class="comment-panel" role="tabpanel" aria-labelledby="comment-insights-tab" data-comment-panel="insights" hidden>
+      <section class="comment-section no-margin" aria-labelledby="commentInsightsTitle">
+        <header class="comment-section-head"><div><h2 id="commentInsightsTitle">主题洞察</h2><p>规则识别显性标签，AI 语义分析购买动机、顾虑与优化建议</p></div><span id="commentInsightCount">0 个主题</span></header>
+        <div class="comment-table-wrap">
+          <table class="comment-table">
+            <thead><tr><th scope="col">主题</th><th scope="col">业务类型</th><th scope="col">新增提及</th><th scope="col">趋势</th><th scope="col">洞察摘要</th><th scope="col">证据</th></tr></thead>
+            <tbody id="commentInsightRows"><tr><td class="empty-cell" colspan="6">暂无可分析的评论主题</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section id="comment-evidence-panel" class="comment-panel" role="tabpanel" aria-labelledby="comment-evidence-tab" data-comment-panel="evidence" hidden>
+      <section class="comment-section no-margin" aria-labelledby="commentEvidenceTitle">
+        <header class="comment-section-head"><div><h2 id="commentEvidenceTitle">评论证据</h2><p>评论只与笔记关联，不将评论归因到任何搜索词</p></div><span id="commentEvidenceCount">0 条</span></header>
+        <div class="comment-table-wrap">
+          <table class="comment-table evidence-table">
+            <thead><tr><th scope="col">评论原文</th><th scope="col">主题</th><th scope="col">倾向</th><th scope="col">所属笔记</th><th scope="col">评论时间</th><th scope="col">链接</th></tr></thead>
+            <tbody id="commentEvidenceRows"><tr><td class="empty-cell" colspan="6">暂无评论证据</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section id="comment-runs-panel" class="comment-panel" role="tabpanel" aria-labelledby="comment-runs-tab" data-comment-panel="runs" hidden>
+      <div class="comment-runs-layout">
+        <section class="comment-section no-margin" aria-labelledby="commentRunsTitle">
+          <header class="comment-section-head"><div><h2 id="commentRunsTitle">运行记录</h2><p>日更、补跑、失败和续抓进度</p></div><span id="commentRunCount">0 次</span></header>
+          <div class="comment-table-wrap">
+            <table class="comment-table">
+              <thead><tr><th scope="col">开始时间</th><th scope="col">执行类型</th><th scope="col">候选笔记</th><th scope="col">新增评论</th><th scope="col">状态</th><th scope="col">说明</th></tr></thead>
+              <tbody id="commentRunRows"><tr><td class="empty-cell" colspan="6">暂无运行记录</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside class="comment-settings" aria-labelledby="commentSettingsTitle">
+          <header><h2 id="commentSettingsTitle">日更设置</h2><p>自动更新沿用页面上方选中的店铺与当前 Chrome 登录态；电脑休眠后会在下次启动补跑。</p></header>
+          <form id="commentSettingsForm">
+            <label class="check-row"><input id="commentMonitorEnabled" type="checkbox" checked><span>启用每日自动更新</span></label>
+            <label for="commentScheduleTime"><span>每日更新时间</span><input id="commentScheduleTime" type="time" value="09:00" required></label>
+            <p class="settings-hint">时区固定为 Asia/Shanghai。请确保定时更新时 Chrome 中登录的是该店铺对应的蒲公英账号；无数据与登录异常会分开显示。</p>
+            <button id="saveCommentSettingsBtn" class="button primary" type="submit">保存设置</button>
+          </form>
+          <div class="raw-export-actions" aria-labelledby="rawExportTitle">
+            <h3 id="rawExportTitle">原始评论导出</h3>
+            <p>原文仅保存在当前浏览器，导出为手动操作。</p>
+            <div><button id="exportCommentCsvBtn" class="button" type="button">导出 CSV</button><button id="exportCommentJsonBtn" class="button" type="button">导出 JSON</button></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <script src="/comments.js"></script>
+</body>
+</html>

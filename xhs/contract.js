@@ -166,8 +166,49 @@
       normalized === 'setcookie';
   }
 
+  function cleanOfficialNoteId(value) {
+    const noteId = String(value == null ? '' : value).trim();
+    return /^[a-z0-9_-]{3,128}$/i.test(noteId) ? noteId : '';
+  }
+
+  // The PGY content-note export is the platform's only supported web link source.
+  // Keep this exception deliberately narrow: one HTTPS host/path, an exact noteId,
+  // and only the two query parameters emitted by the official export workbook.
+  function sanitizeOfficialNoteUrl(value, expectedNoteId) {
+    const text = String(value == null ? '' : value).trim();
+    if (!text || !/^https:\/\//i.test(text)) return null;
+    let url;
+    try {
+      url = new URL(text);
+    } catch (error) {
+      return null;
+    }
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'www.xiaohongshu.com' ||
+        url.username || url.password || url.hash) return null;
+    const pathMatch = url.pathname.match(/^\/explore\/([^/]+)\/?$/i);
+    if (!pathMatch) return null;
+    let pathNoteId = '';
+    try {
+      pathNoteId = cleanOfficialNoteId(decodeURIComponent(pathMatch[1]));
+    } catch (error) {
+      return null;
+    }
+    const requiredNoteId = cleanOfficialNoteId(expectedNoteId);
+    if (!pathNoteId || (requiredNoteId && pathNoteId !== requiredNoteId)) return null;
+    const xsecToken = String(url.searchParams.get('xsec_token') || '').trim();
+    const xsecSource = String(url.searchParams.get('xsec_source') || '').trim();
+    if (!/^[^\s\u0000-\u001f\u007f]{8,2048}$/.test(xsecToken) ||
+        xsecSource !== 'pc_pgyexport') return null;
+    const normalized = new URL(`https://www.xiaohongshu.com/explore/${encodeURIComponent(pathNoteId)}`);
+    normalized.searchParams.set('xsec_token', xsecToken);
+    normalized.searchParams.set('xsec_source', xsecSource);
+    return normalized.toString();
+  }
+
   function sanitizeUrl(text) {
     if (!/^https?:\/\//i.test(text)) return text;
+    const officialNoteUrl = sanitizeOfficialNoteUrl(text);
+    if (officialNoteUrl) return officialNoteUrl;
     let url;
     try {
       url = new URL(text);
@@ -222,6 +263,7 @@
     COLLECTION_STATUSES,
     PLATFORM_IDS,
     isSensitiveKey,
+    sanitizeOfficialNoteUrl,
     sanitizeSensitiveData,
     validateResponseEnvelope,
   });

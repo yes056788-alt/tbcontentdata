@@ -277,11 +277,20 @@ function createCollector(pageClient, dependencies = {}) {
 function createMultiTabFixture(options = {}) {
   const originalTabId = 81;
   const laneTabIds = [181, 182, 183];
-  const tabAccounts = new Map([[originalTabId, clone(ACCOUNTS[0])]]);
+  const fixtureAccounts = Array.isArray(options.accounts) && options.accounts.length
+    ? options.accounts
+    : ACCOUNTS;
+  const fixtureAccountData = options.accountData || ACCOUNT_DATA;
+  const mainAccount = fixtureAccounts.find((account) => Number(account.accountType) === 4) ||
+    fixtureAccounts[0];
+  const tabAccounts = new Map([[originalTabId, clone(mainAccount)]]);
   const calls = [];
   const closed = [];
+  const switchCalls = [];
   let activeReports = 0;
   let maxActiveReports = 0;
+  let activeSwitches = 0;
+  let maxActiveSwitches = 0;
   let driftApplied = false;
 
   async function request(input) {
@@ -294,13 +303,13 @@ function createMultiTabFixture(options = {}) {
     if (input.endpoint === 'accounts.current') return clone(current);
     if (input.endpoint === 'accounts.list') {
       assert.equal(tabId, originalTabId);
-      return { accounts: clone(ACCOUNTS), total: ACCOUNTS.length };
+      return { accounts: clone(fixtureAccounts), total: fixtureAccounts.length };
     }
     if (input.endpoint !== 'reports.query') {
       throw new Error(`unexpected fictional endpoint: ${input.endpoint}`);
     }
 
-    const data = ACCOUNT_DATA[current.vSellerId];
+    const data = fixtureAccountData[current.vSellerId];
     if (!data) throw new Error('report requested for an unknown fictional account');
     activeReports += 1;
     maxActiveReports = Math.max(maxActiveReports, activeReports);
@@ -334,7 +343,7 @@ function createMultiTabFixture(options = {}) {
   const dependencies = {
     async createConcurrentAccountTabs(input) {
       const ids = laneTabIds.slice(0, Number(input.count));
-      ids.forEach((tabId) => tabAccounts.set(tabId, clone(ACCOUNTS[0])));
+      ids.forEach((tabId) => tabAccounts.set(tabId, clone(mainAccount)));
       return ids;
     },
     async closeConcurrentAccountTabs(input) {
@@ -344,20 +353,34 @@ function createMultiTabFixture(options = {}) {
       }
     },
     async switchAccount(input) {
-      const target = accountFromTarget(input && input.target || {});
+      const requested = input && input.target || {};
+      const target = fixtureAccounts.find((account) => (
+        account.vSellerId === requested.vSellerId ||
+        Number(account.advertiserId) === Number(requested.advertiserId)
+      ));
       if (!target) throw new Error('fictional runtime target account not found');
-      if (options.sharedLaneIdentity && Number(input.tabId) !== originalTabId) {
-        for (const tabId of laneTabIds) {
-          if (tabAccounts.has(tabId)) tabAccounts.set(tabId, clone(target));
+      activeSwitches += 1;
+      maxActiveSwitches = Math.max(maxActiveSwitches, activeSwitches);
+      switchCalls.push({ tabId: Number(input.tabId), target: target.vSellerId });
+      try {
+        if (Number(options.switchDelayMs) > 0) {
+          await new Promise((resolve) => setTimeout(resolve, Number(options.switchDelayMs)));
         }
-      } else {
-        tabAccounts.set(Number(input.tabId), clone(target));
+        if (options.sharedLaneIdentity && Number(input.tabId) !== originalTabId) {
+          for (const tabId of laneTabIds) {
+            if (tabAccounts.has(tabId)) tabAccounts.set(tabId, clone(target));
+          }
+        } else {
+          tabAccounts.set(Number(input.tabId), clone(target));
+        }
+        return clone(target);
+      } finally {
+        activeSwitches -= 1;
       }
-      return clone(target);
     },
     async returnToMainAccount(input) {
-      tabAccounts.set(Number(input.tabId), clone(ACCOUNTS[0]));
-      return clone(ACCOUNTS[0]);
+      tabAccounts.set(Number(input.tabId), clone(mainAccount));
+      return clone(mainAccount);
     },
   };
 
@@ -366,8 +389,10 @@ function createMultiTabFixture(options = {}) {
     dependencies,
     calls,
     closed,
+    switchCalls,
     getCurrent: (tabId) => clone(tabAccounts.get(Number(tabId))),
     getMaxActiveReports: () => maxActiveReports,
+    getMaxActiveSwitches: () => maxActiveSwitches,
   };
 }
 
@@ -855,6 +880,87 @@ test('enables two isolated Juguang account tabs and guards every concurrent repo
     assert.ok(identityCount >= reportCount * 2 + 2,
       'each report requires pre/post identity checks in addition to isolation self-checks');
   }
+});
+
+test('three Juguang lanes bootstrap sequentially once, then collect reports concurrently', async () => {
+  const thirdChild = {
+    vSellerId: 'fictional-child-third',
+    name: '虚构第三个子账户',
+    advertiserId: 2003,
+    accountType: 602,
+  };
+  const fixture = createMultiTabFixture({
+    accounts: [...ACCOUNTS, thirdChild],
+    accountData: {
+      ...ACCOUNT_DATA,
+      [thirdChild.vSellerId]: {
+        fee: 50,
+        summary: [['fictional-note-child-third-001', 50]],
+        daily: [['2030-01-03', 'fictional-note-child-third-001', 4, 'fixture-feed', 50]],
+      },
+    },
+    switchDelayMs: 5,
+  });
+  const result = await createCollector(fixture.pageClient, fixture.dependencies).collect(collectionOptions({
+    runId: 'fictional-juguang-run-three-isolated-tabs',
+    concurrentAccountTabs: 3,
+  }));
+
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(result.accountCollection, {
+    mode: 'parallel',
+    requestedLanes: 3,
+    activeLanes: 3,
+    isolationVerified: true,
+    fallbackReason: null,
+  });
+  assert.equal(fixture.getMaxActiveSwitches(), 1,
+    'three account navigations must be serialized so the shared session cannot race');
+  assert.deepEqual(fixture.switchCalls.map((call) => call.target), [
+    'fictional-child-spend',
+    'fictional-child-zero',
+    'fictional-child-third',
+  ], 'an isolation-verified lane must not navigate to its first account a second time');
+  assert.ok(fixture.getMaxActiveReports() >= 3,
+    'after identity isolation succeeds, three report lanes should still run concurrently');
+  assert.deepEqual(fixture.closed.sort((left, right) => left - right), [181, 182, 183]);
+});
+
+test('third Juguang lane identity drift stops parallel work and falls back before any lane report', async () => {
+  const thirdChild = {
+    vSellerId: 'fictional-child-third-drift',
+    name: '虚构第三个漂移子账户',
+    advertiserId: 2004,
+    accountType: 602,
+  };
+  const fixture = createMultiTabFixture({
+    accounts: [...ACCOUNTS, thirdChild],
+    accountData: {
+      ...ACCOUNT_DATA,
+      [thirdChild.vSellerId]: {
+        fee: 60,
+        summary: [['fictional-note-child-third-drift-001', 60]],
+        daily: [['2030-01-03', 'fictional-note-child-third-drift-001', 13, 'fixture-search', 60]],
+      },
+    },
+    sharedLaneIdentity: true,
+  });
+  const result = await createCollector(fixture.pageClient, fixture.dependencies).collect(collectionOptions({
+    runId: 'fictional-juguang-run-third-lane-drift-fallback',
+    concurrentAccountTabs: 3,
+  }));
+
+  assert.equal(result.status, 'complete');
+  assert.equal(result.accountCollection.mode, 'sequential_fallback');
+  assert.equal(result.accountCollection.isolationVerified, false);
+  assert.equal(result.accountCollection.fallbackReason, 'account_identity_drift');
+  assert.equal(fixture.calls.some((call) => (
+    [181, 182, 183].includes(Number(call.tabId)) && call.endpoint === 'reports.query'
+  )), false, 'identity drift during bootstrap must stop before temporary tabs request reports');
+  assert.ok(result.accounts.every((unit) => [
+    'complete', 'verified_no_spend',
+  ].includes(unit.status)));
+  assert.deepEqual(fixture.closed.sort((left, right) => left - right), [181, 182, 183]);
 });
 
 test('discards concurrent results and falls back to the original tab after identity drift', async () => {

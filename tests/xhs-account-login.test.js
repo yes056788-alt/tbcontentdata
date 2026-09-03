@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
@@ -357,6 +358,146 @@ test('official login origin remains loading while its async login shell has not 
     },
   });
   assert.equal(state.kind, 'loading');
+});
+
+test('XHS state reader preserves a legitimate PGY top-frame loading observation', async () => {
+  const start = background.indexOf('async function ensureXhsLoginContentScript');
+  const end = background.indexOf('\nasync function waitForXhsLoginState', start);
+  assert.ok(start >= 0 && end > start, 'background login-state reader source must remain available');
+
+  const href = accountLogin.XHS_PLATFORM_ENTRY_URLS.pgy;
+  const context = vm.createContext({
+    Array,
+    Error,
+    Number,
+    Object,
+    Promise,
+    String,
+    XhsAccountLogin: accountLogin,
+    chrome: {
+      webNavigation: {
+        async getAllFrames() {
+          return [{ frameId: 0, documentId: 'fixture-pgy-loading-document', url: href }];
+        },
+      },
+      tabs: {
+        async get() { return { id: 701, status: 'complete', url: href }; },
+      },
+    },
+    async injectScripts() {},
+    async sendTabMessageWithRetry() {
+      return {
+        ok: true,
+        href,
+        state: { kind: 'loading', message: '小红书平台页面正在加载或等待登录态确认。' },
+      };
+    },
+    batchText(value, limit) {
+      return String(value == null ? '' : value).trim().slice(0, Number(limit) || 160);
+    },
+  });
+  vm.runInContext(
+    background.slice(start, end) + '\nglobalThis.readXhsLoginStateUnderTest = readXhsLoginState;',
+    context,
+    { filename: 'xhs-login-state-reader.js' },
+  );
+
+  const state = await context.readXhsLoginStateUnderTest(701, 'pgy');
+
+  assert.equal(state.kind, 'loading');
+  assert.equal(state.frameId, 0);
+  assert.equal(state.documentId, 'fixture-pgy-loading-document');
+  assert.equal(state.href, href);
+});
+
+test('reinjecting the XHS login reader in one isolated document stays idempotent', async () => {
+  const source = fs.readFileSync(path.join(root, 'xiaohongshu-login-content.js'), 'utf8');
+  const runtimeListeners = [];
+  const activeRuntimeListeners = new Set();
+  const document = fixtureDocument({
+    bodyText: '内容广场 - 小红书蒲公英 内容合作 创意中心',
+  });
+  document.title = '内容广场 - 小红书蒲公英';
+  const context = vm.createContext({
+    URL,
+    clearTimeout,
+    chrome: {
+      runtime: {
+        id: 'fixture-extension',
+        onMessage: {
+          addListener(listener) {
+            runtimeListeners.push(listener);
+            activeRuntimeListeners.add(listener);
+          },
+          hasListener(listener) { return activeRuntimeListeners.has(listener); },
+        },
+      },
+    },
+    document,
+    location: {
+      href: accountLogin.XHS_PLATFORM_ENTRY_URLS.pgy,
+      origin: 'https://pgy.xiaohongshu.com',
+      pathname: '/microapp/creativity/inspire',
+    },
+    setTimeout,
+  });
+
+  vm.runInContext(source, context, { filename: 'xiaohongshu-login-content.js:first' });
+  vm.runInContext(source, context, { filename: 'xiaohongshu-login-content.js:reinjected' });
+
+  const responses = [];
+  for (const listener of runtimeListeners) {
+    listener(
+      { type: 'XHS_LOGIN_GET_STATE' },
+      { id: 'fixture-extension' },
+      (response) => responses.push(response),
+    );
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual({
+    listenerCount: runtimeListeners.length,
+    responseCount: responses.length,
+  }, {
+    listenerCount: 1,
+    responseCount: 1,
+  });
+  assert.equal(responses[0].ok, true);
+  assert.equal(responses[0].state.kind, 'productReady');
+
+  activeRuntimeListeners.clear();
+  vm.runInContext(source, context, { filename: 'xiaohongshu-login-content.js:runtime-reloaded' });
+  const reloadedResponses = [];
+  for (const listener of activeRuntimeListeners) {
+    listener(
+      { type: 'XHS_LOGIN_GET_STATE' },
+      { id: 'fixture-extension' },
+      (response) => reloadedResponses.push(response),
+    );
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(activeRuntimeListeners.size, 1);
+  assert.equal(reloadedResponses.length, 1);
+  assert.equal(reloadedResponses[0].state.kind, 'productReady');
+});
+
+test('live PGY content plaza shell is product-ready but never proof of login', () => {
+  const href = 'https://pgy.xiaohongshu.com/microapp/creativity/inspire';
+  const document = fixtureDocument({ bodyText: '内容广场 - 小红书蒲公英' });
+  document.title = '内容广场 - 小红书蒲公英';
+
+  const state = loginPage.detectPageState({
+    document,
+    location: {
+      href,
+      origin: 'https://pgy.xiaohongshu.com',
+      pathname: '/microapp/creativity/inspire',
+    },
+  });
+
+  assert.equal(state.kind, 'productReady');
+  assert.notEqual(state.kind, 'loggedIn', '产品壳只允许继续做 API 身份校验，不能单凭标题确认登录。');
 });
 
 for (const fixture of [

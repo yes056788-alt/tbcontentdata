@@ -11,7 +11,7 @@
 <body data-task-type="report">
   <header class="portal-topbar">
     <a class="portal-brand" href="/index.html"><span class="portal-brand-mark" aria-hidden="true">TB</span><span><strong>淘宝经营数据</strong><small>项目管理</small></span></a>
-    <nav class="portal-nav" aria-label="主要工作区"><a href="/index.html">项目管理</a><a class="active" href="/report.html" aria-current="page">一键取数</a><a href="/accounts.html">账号库管理</a></nav>
+    <nav class="portal-nav" aria-label="主要工作区"><a href="/index.html">项目管理</a><a class="active" href="/report.html" aria-current="page">一键取数</a><a href="/comments.html">评论监测</a><a href="/accounts.html">账号库管理</a></nav>
     <div class="portal-status"><span id="connectionState" class="connection-state connecting">正在连接数据助手</span><span id="extensionVersion" class="portal-version"></span></div>
   </header>
   <main class="portal-main">
@@ -24,7 +24,75 @@
         <div id="currentModePanel" class="task-mode-panel">
           <div class="task-fields"><div class="field-block"><label for="taskGroupSelect">店铺分组</label><select id="taskGroupSelect"></select></div><div class="field-block"><label for="taskStoreSelect">本次取数归属店铺</label><select id="taskStoreSelect"></select></div></div>
           <fieldset class="platform-picker credential-mode-picker"><legend>登录方式</legend><div class="platform-picker-grid"><label><input type="radio" name="credentialMode" value="vault" checked><span><strong>账号库自动登录</strong><small>星河用淘宝账号直登；蒲公英 + 聚光用小红书账号分别直登</small></span></label><label><input type="radio" name="credentialMode" value="currentSession"><span><strong>复用当前 Chrome 登录态</strong><small>不读取账号库，也不会自动切换账号</small></span></label></div></fieldset>
-          <fieldset class="platform-picker" data-platform-picker="current"><legend>执行平台</legend><div class="platform-picker-grid"><label><input type="checkbox" value="sycm" checked><span><strong>生意参谋</strong><small>流量诊断</small></span></label><label><input type="checkbox" value="guanghe" checked><span><strong>光合</strong><small>渠道与资产</small></span></label><label><input type="checkbox" value="wxt" checked><span><strong>万相台</strong><small>营销与短视频</small></span></label><label><input type="checkbox" value="dmp" checked><span><strong>达摩盘</strong><small>人群画像</small></span></label><label><input type="checkbox" value="adstar" checked><span><strong>淘宝星河</strong><small>项目、任务与成交</small></span></label><label><input type="checkbox" value="pgy" checked><span><strong>蒲公英</strong><small>报备笔记与合作成本</small></span></label><label><input type="checkbox" value="juguang" checked><span><strong>聚光</strong><small>多账户投放与归因</small></span></label></div></fieldset>
+          <fieldset class="platform-picker" data-platform-picker="current">
+            <legend>执行平台</legend>
+            <div class="platform-picker-grid">
+              <label data-platform-option="sycm"><input type="checkbox" value="sycm" checked><span><strong>生意参谋</strong><small>流量诊断</small></span></label>
+              <label data-platform-option="guanghe"><input type="checkbox" value="guanghe" checked><span><strong>光合</strong><small>渠道与资产</small></span></label>
+              <label data-platform-option="wxt"><input type="checkbox" value="wxt" checked><span><strong>万相台</strong><small>营销与短视频</small></span></label>
+              <label data-platform-option="dmp"><input type="checkbox" value="dmp" checked><span><strong>达摩盘</strong><small>人群画像</small></span></label>
+              <label data-platform-option="adstar"><input type="checkbox" value="adstar" checked><span><strong>淘宝星河</strong><small>项目、任务与成交</small></span></label>
+              <label data-platform-option="pgy"><input id="currentPlatformPgy" type="checkbox" value="pgy" checked aria-controls="pgyClassificationSetup"><span><strong>蒲公英</strong><small>报备笔记、搜索来源词与合作成本</small></span></label>
+              <label data-platform-option="juguang"><input type="checkbox" value="juguang" checked><span><strong>聚光</strong><small>多账户投放与归因</small></span></label>
+            </div>
+          </fieldset>
+
+          <section id="pgyClassificationSetup" class="pgy-classification-setup" data-platform-config="pgy" aria-labelledby="pgyClassificationTitle">
+            <header class="pgy-classification-head">
+              <div>
+                <span class="section-kicker">PGY SEARCH CLASSIFICATION</span>
+                <h2 id="pgyClassificationTitle">蒲公英搜索词分类设置</h2>
+                <p>只影响蒲公英搜索来源词。选择好店铺和行业事实后，系统会在启动取数前自动保存本次配置。</p>
+              </div>
+              <span class="pgy-platform-badge">仅蒲公英</span>
+            </header>
+            <div class="classification-layout">
+              <div id="pgyClassificationForm" class="classification-form">
+                <div class="classification-field">
+                  <label for="pgyClassificationTemplate">行业模板</label>
+                  <select id="pgyClassificationTemplate" aria-describedby="pgyClassificationTemplateHint">
+                    <option value="auto">自动识别（推荐）</option>
+                    <option value="pet">宠物行业</option>
+                    <option value="furniture">家具行业</option>
+                    <option value="supplement">保健品行业</option>
+                    <option value="custom">自定义行业</option>
+                  </select>
+                  <small id="pgyClassificationTemplateHint">自动识别会依据店铺词库和采集内容选择最匹配的模板。</small>
+                </div>
+                <div id="pgyClassificationCustomIndustryField" class="classification-field" hidden>
+                  <label for="pgyClassificationCustomIndustry">自定义行业名称</label>
+                  <input id="pgyClassificationCustomIndustry" type="text" maxlength="120" autocomplete="off" placeholder="例如：户外装备">
+                  <small>用于报告说明和人工复核，最长 120 个字符。</small>
+                </div>
+                <div class="classification-term-grid">
+                  <div class="classification-field">
+                    <label for="pgyClassificationOwnBrandTerms">自有品牌词</label>
+                    <textarea id="pgyClassificationOwnBrandTerms" rows="5" maxlength="13000" spellcheck="false" placeholder="例如：顾家&#10;顾家家居"></textarea>
+                    <small>每行一个词，也支持逗号或分号分隔。</small>
+                  </div>
+                  <div class="classification-field">
+                    <label for="pgyClassificationOwnProductTerms">自有产品词</label>
+                    <textarea id="pgyClassificationOwnProductTerms" rows="5" maxlength="13000" spellcheck="false" placeholder="例如：护腰床垫&#10;深睡床垫 M1"></textarea>
+                    <small>填写明确属于本店的产品、系列或型号。</small>
+                  </div>
+                  <div class="classification-field">
+                    <label for="pgyClassificationCompetitorTerms">竞品词</label>
+                    <textarea id="pgyClassificationCompetitorTerms" rows="5" maxlength="13000" spellcheck="false" placeholder="例如：慕思&#10;喜临门"></textarea>
+                    <small>商业分类优先识别品牌词，其次竞品词，再识别品类词。</small>
+                  </div>
+                </div>
+                <footer class="classification-form-actions">
+                  <span id="pgyClassificationRevisionMeta" role="status" aria-live="polite">选择店铺后载入已有配置</span>
+                  <span>点击“开始一键取数”后先保存配置，保存成功才会启动任务。</span>
+                </footer>
+              </div>
+              <aside class="classification-guide pgy-model-guide" aria-labelledby="pgyRulesTitle">
+                <h2 id="pgyRulesTitle">希宝同款分类方式</h2>
+                <p>不调用大模型。每次取数都按已选行业模板、店铺词典和固定优先级自动分类，结果稳定、可追溯。</p>
+                <p class="pgy-model-security">商业分类按“自有品牌词 → 竞品词 → 自有产品词 → 品类/需求/场景词”依次判断；相关度与搜索意图各只保留一个标签。未命中稳定规则的词保留“待确认”，可在报告中人工纠正。</p>
+              </aside>
+            </div>
+          </section>
           <div class="task-fields xhs-date-fields"><div class="field-block"><label for="xhsDateFrom">小红书开始日期</label><input id="xhsDateFrom" type="date"></div><div class="field-block"><label for="xhsDateTo">小红书结束日期</label><input id="xhsDateTo" type="date"></div><div class="field-block"><label for="juguangConcurrentTabs">聚光账户扫描</label><select id="juguangConcurrentTabs"><option value="">单标签安全扫描（默认）</option><option value="2">2 标签并发（先自检）</option><option value="3">3 标签并发（先自检）</option></select></div></div>
           <div class="task-scope">小红书按中国标准时间（Asia/Shanghai）取数；蒲公英日期口径为笔记发布时间，星河和聚光按所选经营周期。账号库模式会直接进入对应平台的官方登录流程，不先登录普通小红书网页，也不建立平台身份绑定。登录准备后，所选平台同时启动取数；任一平台的普通失败只影响该平台，其他平台继续。遇到验证码、滑块或安全验证时会激活受阻页面并等待，人工完成验证后任务自动继续。星河、蒲公英和聚光全部结束后再统一校验并按 noteId 联表。</div>
           <div class="task-actions"><button id="startCurrentTaskBtn" class="button primary" type="button">开始一键取数</button><button id="cancelCurrentTaskBtn" class="button danger" type="button" hidden disabled>取消任务</button></div>

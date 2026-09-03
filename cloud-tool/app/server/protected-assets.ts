@@ -12,6 +12,7 @@ export const LEGACY_PAGE_FILENAMES = [
   "workspace.html",
   "accounts.html",
   "report.html",
+  "comments.html",
   "data.html",
   "report-view.html",
 ] as const;

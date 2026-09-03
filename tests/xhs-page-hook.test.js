@@ -5,7 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
-const CHANNEL = 'xhs-page-bridge-v2';
+const CHANNEL = 'xhs-page-bridge-v3';
 const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
 const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
 
@@ -38,6 +38,13 @@ const HOOKS = [
     responseBody: { success: true, model: { result: [], totalCount: 0 } },
   },
 ];
+
+test('current XHS page hooks use v3 installation guards so upgraded extensions recover stale tabs', () => {
+  for (const hook of HOOKS) {
+    const source = fs.readFileSync(path.join(root, hook.filename), 'utf8');
+    assert.match(source, /HookV3/, `${hook.platform} hook must not reuse the resident v2 guard`);
+  }
+});
 
 function evaluateHook(hook, options = {}) {
   const source = fs.readFileSync(path.join(root, hook.filename), 'utf8');

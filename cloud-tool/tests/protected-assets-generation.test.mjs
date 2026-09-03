@@ -15,6 +15,7 @@ const protectedFilenames = [
   "workspace.html",
   "accounts.html",
   "report.html",
+  "comments.html",
   "data.html",
   "report-view.html",
 ];
@@ -22,6 +23,7 @@ const protectedPageAssets = {
   "workspace.html": ["portal.css", "batch-report-export.js", "project.js"],
   "accounts.html": ["app.css", "accounts.css", "account-vault.js", "accounts.js"],
   "report.html": ["portal.css", "task.js"],
+  "comments.html": ["comments.css", "comments.js"],
   "data.html": [
     "app.css", "portal.css", "xlsx.full.min.js", "diagnosis-spec.js",
     "xhs-contract.js", "xhs-metrics.js", "diagnosis-popup.js",
@@ -34,6 +36,8 @@ const extensionFilenames = [
   "adstar-page-hook.js",
   "pgy-page-hook.js",
   "juguang-page-hook.js",
+  "lingxi-page-hook.js",
+  "lingxi-content-script.js",
   "xhs-platform-content.js",
   "xhs/contract.js",
   "xhs/quality.js",
@@ -43,12 +47,20 @@ const extensionFilenames = [
   "xhs/local-cache.js",
   "xhs/page-client.js",
   "xhs/adstar-collector.js",
+  "xhs/pgy-export-links.js",
   "xhs/pgy-collector.js",
+  "xhs/pgy-comment-inventory.js",
+  "xhs/comment-monitor.js",
+  "xhs/comment-summary-archive.js",
+  "xhs/comment-monitor-runtime.js",
+  "xhs/comment-capture-coordinator.js",
   "xhs/juguang-accounts.js",
   "xhs/juguang-collector.js",
   "xhs/runtime.js",
   "xhs/analysis.js",
   "xhs/metrics.js",
+  "xhs-comment-page-hook.js",
+  "xhs-comment-content.js",
   "xiaohongshu-login-content.js",
   "xinghe-content-script.js",
   "diagnosis-popup.js",
@@ -178,13 +190,14 @@ test("generates the exact protected page and download allowlists around one ZIP"
     assert.ok(html.includes(
       `<link rel="stylesheet" href="/cloud-team-navigation.css?v=${navigationStylesVersion}">`,
     ));
-    assert.match(html, /class="(?:portal-topbar|management-topbar) cloud-team-topbar"/);
+    assert.match(html, /class="(?:portal-topbar|management-topbar|comment-topbar) cloud-team-topbar"/);
     assert.match(html, /class="cloud-team-brand" href="\/"/);
     assert.match(html, /class="cloud-team-nav" aria-label="团队工作台主导航"/);
     for (const [href, label] of [
       ["/", "首页"],
       ["/workspace.html", "项目管理"],
       ["/report.html", "一键取数"],
+      ["/comments.html", "评论监测"],
       ["/accounts.html", "账号库管理"],
       ["/admin", "团队管理"],
     ]) {
@@ -208,7 +221,7 @@ test("generates the exact protected page and download allowlists around one ZIP"
       accountActions,
       /id="cloudTeamLogout"[\s\S]*?<svg[\s\S]*?id="cloudTeamLogoutLabel" class="cloud-team-account-button-label">退出登录<\/span><\/button>/,
     );
-    assert.equal((html.match(/class="cloud-team-nav-link/g) ?? []).length, 5);
+    assert.equal((html.match(/class="cloud-team-nav-link/g) ?? []).length, 6);
     assert.doesNotMatch(html, /href="\/collect\.html"|>经营取数<\/a>/);
     assert.equal((html.match(/aria-current="page"/g) ?? []).length, 1);
     assert.equal((html.match(/cloud-team-navigation\.js/g) ?? []).length, 1);
@@ -243,6 +256,27 @@ test("generates the exact protected page and download allowlists around one ZIP"
   assert.match(generated.LEGACY_PAGE_HTML["report.html"], /id="batchSelectAllBtn"[^>]*>全选本组/);
   assert.doesNotMatch(generated.LEGACY_PAGE_HTML["report.html"], /batchScopeType|batchScopeSelect|单个店铺/);
   assert.match(
+    generated.LEGACY_PAGE_HTML["comments.html"],
+    /class="cloud-team-nav-link is-active" href="\/comments\.html" aria-current="page">评论监测/,
+  );
+  assert.doesNotMatch(
+    generated.LEGACY_PAGE_HTML["workspace.html"],
+    /id="projectClassification(?:Tab|Panel)"|data-project-view="classification"/,
+  );
+  const cloudReportHtml = generated.LEGACY_PAGE_HTML["report.html"];
+  const currentPlatformStart = cloudReportHtml.indexOf('data-platform-picker="current"');
+  const batchPlatformStart = cloudReportHtml.indexOf('data-platform-picker="batch"');
+  assert.ok(currentPlatformStart >= 0 && batchPlatformStart > currentPlatformStart);
+  assert.equal(
+    (cloudReportHtml.slice(currentPlatformStart, batchPlatformStart)
+      .match(/data-platform-config="pgy"/g) ?? []).length,
+    1,
+  );
+  assert.equal(
+    (cloudReportHtml.slice(batchPlatformStart).match(/data-platform-config="pgy"/g) ?? []).length,
+    0,
+  );
+  assert.match(
     generated.LEGACY_PAGE_HTML["accounts.html"],
     /class="cloud-team-nav-link is-active" href="\/accounts\.html" aria-current="page">账号库管理/,
   );
@@ -264,10 +298,10 @@ test("generates the exact protected page and download allowlists around one ZIP"
     assert.equal((generated.LEGACY_PAGE_HTML[filename].match(/id="lockVaultBtn"/g) ?? []).length, 0);
   }
 
-  assert.equal(generated.EXTENSION_PACKAGE_VERSION, "2.37.38");
+  assert.equal(generated.EXTENSION_PACKAGE_VERSION, "2.37.51");
   assert.deepEqual(Array.from(generated.EXTENSION_PACKAGE_FILENAMES), [
     "taobao-data-assistant.zip",
-    "taobao-data-assistant-2.37.38.zip",
+    "taobao-data-assistant-2.37.51.zip",
   ]);
   const archive = Buffer.from(generated.EXTENSION_PACKAGE_BASE64, "base64");
   assert.ok(archive.length > 100_000);

@@ -9,7 +9,7 @@ const pageHook = fs.readFileSync(path.join(__dirname, '..', 'page-hook.js'), 'ut
 const content = fs.readFileSync(path.join(__dirname, '..', 'content-script.js'), 'utf8');
 
 const fallbackStart = background.indexOf('async function runBusinessDefenseGuanghe(');
-const fallbackEnd = background.indexOf('async function runBusinessDefenseSycm()', fallbackStart);
+const fallbackEnd = background.indexOf('async function runBusinessDefenseSycm(', fallbackStart);
 const fallbackFlow = background.slice(fallbackStart, fallbackEnd);
 
 assert.ok(fallbackStart >= 0 && fallbackEnd > fallbackStart);

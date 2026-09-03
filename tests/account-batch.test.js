@@ -17,7 +17,7 @@ const reportHtml = fs.readFileSync(path.join(root, 'web-tool', 'report.html'), '
 const vaultSource = fs.readFileSync(path.join(root, 'web-tool', 'account-vault.js'), 'utf8');
 const server = fs.readFileSync(path.join(root, 'web-tool', 'server.mjs'), 'utf8');
 
-assert.equal(manifest.version, '2.37.38');
+assert.equal(manifest.version, '2.37.51');
 assert.ok(manifest.host_permissions.includes('https://oapi.dingtalk.com/*'));
 assert.ok(manifest.content_scripts.some((entry) => (
   entry.matches.includes('*://adstar.alimama.com/*') && entry.js.includes('xinghe-content-script.js')
@@ -365,6 +365,18 @@ async function verifyXingheNoPermissionLoginFlow() {
   result = await context.login(account, loginOptions(true));
   assert.equal(result.noPermission, true);
   assert.equal(runtime.logoutCalls, 0);
+  assert.equal(runtime.messages.length, 0);
+
+  runtime.states = [{ kind: 'noPermission', frameId: 0 }];
+  runtime.logoutCalls = 0;
+  runtime.messages = [];
+  result = await context.login(account, {
+    ...loginOptions(false),
+    allowExistingSession: true,
+  });
+  assert.equal(result.noPermission, true);
+  assert.equal(runtime.logoutCalls, 0,
+    '项目新建页继承星河登录态时应直接继续，不得退出当前会话。');
   assert.equal(runtime.messages.length, 0);
 
   runtime.states = [{

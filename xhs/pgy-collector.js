@@ -24,8 +24,33 @@
 
   const DEFAULT_PAGE_SIZE = 30;
   const PROJECT_PAGE_SIZE = 30;
+  const DEFAULT_SEARCH_KEYWORD_CONCURRENCY = 4;
+  const DEFAULT_SEARCH_KEYWORD_BUDGET_MS = 2 * 60 * 1000;
+  const DEFAULT_LINK_EXPORT_POLL_INTERVAL_MS = 1000;
+  const DEFAULT_LINK_EXPORT_TIMEOUT_MS = 2 * 60 * 1000;
+  const DEFAULT_LINK_EXPORT_RESULT_TIMEOUT_MS = 3 * 60 * 1000;
   const MONEY_TOLERANCE = 0.01;
   const PLATFORM_FEE_ROW_DISPLAY_UNIT = 1;
+  const SEARCH_KEYWORD_LIST_FIELDS = Object.freeze([
+    'list', 'keywordList', 'searchKeywordList', 'searchKeywords',
+    'topSearchKeywordList', 'keywordDataList', 'searchKeywordDataList', 'dataList',
+    'rows', 'items', 'records',
+  ]);
+  const SEARCH_KEYWORD_FIELDS = Object.freeze([
+    'keyword', 'keyWord', 'searchKeyword', 'searchWord', 'word', 'query',
+  ]);
+  const SEARCH_KEYWORD_IMPRESSION_FIELDS = Object.freeze([
+    'impressions', 'impNum', 'impressionNum', 'exposure', 'exposureNum',
+    'exposureCount', 'exposeNum', 'showNum', 'searchImpNum', 'searchImpressionNum',
+  ]);
+  const SEARCH_KEYWORD_READ_FIELDS = Object.freeze([
+    'reads', 'read', 'readNum', 'readCount', 'clickNum', 'clicks',
+    'searchReadNum', 'searchClickNum',
+  ]);
+  const SEARCH_KEYWORD_RATE_FIELDS = Object.freeze([
+    'clickRate', 'clickRatio', 'ctr', 'readRate', 'clickThroughRate',
+  ]);
+  const SEARCH_KEYWORD_SCORE_FIELDS = Object.freeze(['searchScore']);
 
   function isObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -82,6 +107,192 @@
       if (number !== null) return number;
     }
     return null;
+  }
+
+  function nonNegativeOptionalNumber(value) {
+    const number = optionalNumber(value);
+    return number !== null && number >= 0 ? number : null;
+  }
+
+  function normalizedRate(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const text = String(value).trim();
+    const number = Number(text.replace(/[,，%\s]/g, ''));
+    if (!Number.isFinite(number) || number < 0) return null;
+    const normalized = text.includes('%') || number > 1 ? number / 100 : number;
+    return normalized >= 0 && normalized <= 1 ? normalized : null;
+  }
+
+  function normalizedSearchKeywordFailureCode(value) {
+    const code = String(value == null ? '' : value).trim();
+    return /^[A-Za-z0-9_:-]{1,128}$/.test(code)
+      ? code
+      : 'pgy_search_keywords_failed';
+  }
+
+  function firstOwnValue(value, fields) {
+    const source = isObject(value) ? value : {};
+    for (const field of fields) {
+      if (Object.prototype.hasOwnProperty.call(source, field)) return source[field];
+    }
+    return undefined;
+  }
+
+  function hasOwnField(value, fields) {
+    return isObject(value) && fields.some((field) => (
+      Object.prototype.hasOwnProperty.call(value, field)
+    ));
+  }
+
+  function searchKeywordValue(value) {
+    const strong = firstOwnValue(value, SEARCH_KEYWORD_FIELDS);
+    if (strong !== undefined) return strong;
+    const hasMetric = hasOwnField(value, SEARCH_KEYWORD_IMPRESSION_FIELDS) ||
+      hasOwnField(value, SEARCH_KEYWORD_READ_FIELDS) ||
+      hasOwnField(value, SEARCH_KEYWORD_RATE_FIELDS) ||
+      hasOwnField(value, SEARCH_KEYWORD_SCORE_FIELDS);
+    return hasMetric && Object.prototype.hasOwnProperty.call(value, 'name')
+      ? value.name
+      : undefined;
+  }
+
+  function hasSearchKeywordRow(value) {
+    if (!isObject(value) || searchKeywordValue(value) === undefined) return false;
+    return hasOwnField(value, SEARCH_KEYWORD_IMPRESSION_FIELDS) ||
+      hasOwnField(value, SEARCH_KEYWORD_READ_FIELDS) ||
+      hasOwnField(value, SEARCH_KEYWORD_RATE_FIELDS) ||
+      hasOwnField(value, SEARCH_KEYWORD_SCORE_FIELDS);
+  }
+
+  function searchKeywordRows(value) {
+    const seen = new Set();
+    let explicitEmptyListFound = false;
+
+    function visit(candidate, depth, explicitList) {
+      if (depth > 6 || candidate === null || candidate === undefined) return null;
+      if (Array.isArray(candidate)) {
+        if (candidate.length === 0) {
+          if (explicitList) explicitEmptyListFound = true;
+          return null;
+        }
+        if (candidate.some(hasSearchKeywordRow)) return candidate;
+        for (const item of candidate) {
+          const nested = visit(item, depth + 1, false);
+          if (nested) return nested;
+        }
+        return null;
+      }
+      if (!isObject(candidate) || seen.has(candidate)) return null;
+      seen.add(candidate);
+      const handled = new Set();
+      for (const field of SEARCH_KEYWORD_LIST_FIELDS) {
+        if (!Object.prototype.hasOwnProperty.call(candidate, field)) continue;
+        handled.add(field);
+        const nested = visit(candidate[field], depth + 1, true);
+        if (nested) return nested;
+      }
+      for (const field of ['data', 'result', 'content', 'detail']) {
+        if (!Object.prototype.hasOwnProperty.call(candidate, field)) continue;
+        handled.add(field);
+        const directEnvelopeList = depth === 0 && field === 'data' &&
+          Array.isArray(candidate[field]);
+        const nested = visit(candidate[field], depth + 1, directEnvelopeList);
+        if (nested) return nested;
+      }
+      for (const [field, nestedValue] of Object.entries(candidate)) {
+        if (handled.has(field)) continue;
+        const nested = visit(nestedValue, depth + 1, false);
+        if (nested) return nested;
+      }
+      return null;
+    }
+
+    const rows = visit(value, 0, false);
+    return rows || (explicitEmptyListFound ? [] : null);
+  }
+
+  function normalizePgySearchKeywords(value) {
+    const safe = contract.sanitizeSensitiveData(value);
+    const rows = searchKeywordRows(safe);
+    if (!rows) throw new Error('PGY search-keyword response list is missing or invalid.');
+    const byKeyword = new Map();
+    for (const rowValue of rows) {
+      const row = isObject(rowValue) ? rowValue : {};
+      const keywordValue = searchKeywordValue(row);
+      const keyword = cleanIdentifier(keywordValue);
+      if (!keyword) continue;
+      const impressions = nonNegativeOptionalNumber(
+        firstOwnValue(row, SEARCH_KEYWORD_IMPRESSION_FIELDS)
+      );
+      const reads = nonNegativeOptionalNumber(firstOwnValue(row, SEARCH_KEYWORD_READ_FIELDS));
+      const clickRate = normalizedRate(firstOwnValue(row, SEARCH_KEYWORD_RATE_FIELDS));
+      const searchScore = nonNegativeOptionalNumber(
+        firstOwnValue(row, SEARCH_KEYWORD_SCORE_FIELDS)
+      );
+      if (!byKeyword.has(keyword)) {
+        byKeyword.set(keyword, {
+          keyword,
+          rowCount: 0,
+          impressions: 0,
+          impressionsComplete: true,
+          reads: 0,
+          readsComplete: true,
+          weightedClickRate: 0,
+          weightedClickRateDenominator: 0,
+          fallbackClickRate: null,
+          searchScores: new Set(),
+        });
+      }
+      const state = byKeyword.get(keyword);
+      state.rowCount += 1;
+      if (impressions === null) state.impressionsComplete = false;
+      else state.impressions += impressions;
+      if (reads === null) state.readsComplete = false;
+      else state.reads += reads;
+      if (searchScore !== null) state.searchScores.add(searchScore);
+      if (clickRate !== null) {
+        state.fallbackClickRate = state.fallbackClickRate === null
+          ? clickRate
+          : state.fallbackClickRate;
+        if (impressions !== null && impressions > 0) {
+          state.weightedClickRate += clickRate * impressions;
+          state.weightedClickRateDenominator += impressions;
+        }
+      }
+    }
+    if (rows.length > 0 && byKeyword.size === 0) {
+      throw new Error('PGY search-keyword rows do not contain a recognizable keyword field.');
+    }
+    return [...byKeyword.values()].map((state) => {
+      const impressions = state.impressionsComplete ? state.impressions : null;
+      const reads = state.readsComplete ? state.reads : null;
+      let clickRate = null;
+      if (impressions !== null && reads !== null) {
+        clickRate = impressions > 0 ? reads / impressions : reads === 0 ? 0 : null;
+      } else if (state.weightedClickRateDenominator > 0) {
+        clickRate = state.weightedClickRate / state.weightedClickRateDenominator;
+      } else {
+        clickRate = state.fallbackClickRate;
+      }
+      const searchScore = state.searchScores.size === 1
+        ? [...state.searchScores][0]
+        : null;
+      return {
+        keyword: state.keyword,
+        ...(searchScore !== null ? { searchScore } : {}),
+        impressions,
+        reads,
+        clickRate,
+      };
+    }).sort((left, right) => {
+      const leftImpressions = left.impressions === null ? -1 : left.impressions;
+      const rightImpressions = right.impressions === null ? -1 : right.impressions;
+      if (rightImpressions !== leftImpressions) return rightImpressions - leftImpressions;
+      const leftReads = left.reads === null ? -1 : left.reads;
+      const rightReads = right.reads === null ? -1 : right.reads;
+      if (rightReads !== leftReads) return rightReads - leftReads;
+      return left.keyword.localeCompare(right.keyword, 'zh-CN');
+    });
   }
 
   function samplingRatio(value) {
@@ -160,17 +371,13 @@
     const safe = isObject(value) ? value : {};
     for (const candidate of [safe.noteUrl, safe.noteLink, safe.shareUrl, safe.url]) {
       if (typeof candidate !== 'string' || !candidate.trim()) continue;
-      try {
-        const parsed = new URL(candidate);
-        if (/(^|\.)xiaohongshu\.com$/i.test(parsed.hostname)) return parsed.toString();
-      } catch (error) {
-        // Keep looking for a usable first-party detail URL.
-      }
+      const officialUrl = contract.sanitizeOfficialNoteUrl(candidate, noteId);
+      if (officialUrl) return officialUrl;
     }
-    return `https://www.xiaohongshu.com/explore/${encodeURIComponent(noteId)}`;
+    return null;
   }
 
-  function normalizePgyNote(value) {
+  function normalizePgyNote(value, options) {
     const safe = contract.sanitizeSensitiveData(isObject(value) ? value : {});
     const noteId = String(safe.noteId || '').trim();
     if (!noteId) throw new Error('PGY note noteId is required.');
@@ -195,7 +402,7 @@
     const taobaoSamplingRatio = samplingRatio(
       starData.dataTransRatio !== undefined ? starData.dataTransRatio : safe.dataTransRatio
     );
-    return {
+    const normalized = {
       noteId,
       sourceKey,
       title: safe.noteTitle == null ? '' : String(safe.noteTitle),
@@ -251,6 +458,10 @@
         ),
       },
     };
+    if (options && options.includeSearchContext === true) {
+      normalized.orderCategory = cleanIdentifier(safe.orderCategory) || '0';
+    }
+    return normalized;
   }
 
   function normalizePgyProject(value) {
@@ -531,15 +742,313 @@
     const paginationResumeBaseDelayMs = Math.max(0, Math.floor(
       Number.isFinite(configuredResumeDelay) ? configuredResumeDelay : 300
     ));
+    const configuredSearchKeywordConcurrency = Number(settings.searchKeywordConcurrency);
+    const searchKeywordConcurrency = Math.max(1, Math.min(8, Math.floor(
+      Number.isFinite(configuredSearchKeywordConcurrency)
+        ? configuredSearchKeywordConcurrency
+        : DEFAULT_SEARCH_KEYWORD_CONCURRENCY
+    )));
+    const configuredSearchKeywordBudgetMs = Number(settings.searchKeywordBudgetMs);
+    const searchKeywordBudgetMs = Math.max(1, Math.min(5 * 60 * 1000, Math.floor(
+      Number.isFinite(configuredSearchKeywordBudgetMs)
+        ? configuredSearchKeywordBudgetMs
+        : DEFAULT_SEARCH_KEYWORD_BUDGET_MS
+    )));
+    const configuredLinkExportPollIntervalMs = Number(settings.linkExportPollIntervalMs);
+    const linkExportPollIntervalMs = Math.max(0, Math.min(10 * 1000, Math.floor(
+      Number.isFinite(configuredLinkExportPollIntervalMs)
+        ? configuredLinkExportPollIntervalMs
+        : DEFAULT_LINK_EXPORT_POLL_INTERVAL_MS
+    )));
+    const configuredLinkExportTimeoutMs = Number(settings.linkExportTimeoutMs);
+    const linkExportTimeoutMs = Math.max(1, Math.min(10 * 60 * 1000, Math.floor(
+      Number.isFinite(configuredLinkExportTimeoutMs)
+        ? configuredLinkExportTimeoutMs
+        : DEFAULT_LINK_EXPORT_TIMEOUT_MS
+    )));
+    const configuredLinkExportResultTimeoutMs = Number(settings.linkExportResultTimeoutMs);
+    const linkExportResultTimeoutMs = Math.max(1, Math.min(10 * 60 * 1000, Math.floor(
+      Number.isFinite(configuredLinkExportResultTimeoutMs)
+        ? configuredLinkExportResultTimeoutMs
+        : DEFAULT_LINK_EXPORT_RESULT_TIMEOUT_MS
+    )));
 
-    async function request(tabId, endpoint, payload, signal) {
+    async function request(tabId, endpoint, payload, signal, timeoutMs) {
       return settings.pageClient.request({
-        tabId, platform: 'pgy', endpoint, payload: payload || {}, signal,
+        tabId, platform: 'pgy', endpoint, payload: payload || {}, signal, timeoutMs,
       });
     }
 
     function rethrowAbort(error, signal) {
       if (collectorCore.isAbortError(error, signal)) throw collectorCore.abortError(signal);
+    }
+
+    function wait(delay, signal) {
+      const milliseconds = Math.max(0, Number(delay) || 0);
+      if (!milliseconds) {
+        collectorCore.throwIfAborted(signal);
+        return Promise.resolve();
+      }
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          if (signal) signal.removeEventListener('abort', onAbort);
+          resolve();
+        }, milliseconds);
+        const onAbort = () => {
+          clearTimeout(timer);
+          if (signal) signal.removeEventListener('abort', onAbort);
+          reject(collectorCore.abortError(signal));
+        };
+        if (signal) {
+          signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        }
+      });
+    }
+
+    function noteInsideDateRange(note, dateRange) {
+      const range = isObject(dateRange) ? dateRange : {};
+      const publishDate = canonicalDate(note && note.publishDate);
+      return Boolean(publishDate && (!range.from || publishDate >= range.from) &&
+        (!range.to || publishDate <= range.to));
+    }
+
+    function linkEligibleNotes(notes, dateRange) {
+      return (Array.isArray(notes) ? notes : []).filter((note) => (
+        noteInsideDateRange(note, dateRange)
+      ));
+    }
+
+    async function collectOfficialNoteLinks(notesValue, context) {
+      const eligible = linkEligibleNotes(notesValue, context.dateRange);
+      const baseCoverage = {
+        taskType: 'content_note_download_task',
+        totalNoteCount: eligible.length,
+        matchedNoteCount: 0,
+        missingNoteCount: eligible.length,
+        parsedRowCount: 0,
+        rejectedRowCount: 0,
+        status: eligible.length ? 'failed' : 'empty',
+      };
+      if (!eligible.length) return { links: new Map(), coverage: baseCoverage };
+      try {
+        const submitted = await collectorCore.withRetry(
+          () => request(context.tabId, 'notes.linkExport.submit', {
+            brandUserId: context.identity.brandUserId,
+            startTime: context.dateRange.from,
+            endTime: context.dateRange.to,
+          }, context.signal),
+          Object.assign({}, retry, { signal: context.signal })
+        );
+        const taskId = cleanIdentifier(submitted && submitted.taskId);
+        if (!taskId) throw new Error('PGY official note-link export taskId is missing.');
+        const deadline = Date.now() + linkExportTimeoutMs;
+        while (true) {
+          collectorCore.throwIfAborted(context.signal);
+          const statusResponse = await collectorCore.withRetry(
+            () => request(context.tabId, 'notes.linkExport.status', { taskId }, context.signal),
+            Object.assign({}, retry, { signal: context.signal })
+          );
+          const taskStatus = Number(statusResponse && statusResponse.status);
+          if (taskStatus === 3) break;
+          if (taskStatus === 5) {
+            const taskError = new Error('PGY official note-link export task failed.');
+            taskError.code = 'PGY_LINK_EXPORT_TASK_FAILED';
+            taskError.retryable = false;
+            throw taskError;
+          }
+          if (![1, 2].includes(taskStatus)) {
+            const statusError = new Error(`PGY official note-link export returned status ${taskStatus}.`);
+            statusError.code = 'PGY_LINK_EXPORT_STATUS_INVALID';
+            statusError.retryable = true;
+            throw statusError;
+          }
+          if (Date.now() >= deadline) {
+            const timeoutError = new Error('PGY official note-link export timed out.');
+            timeoutError.code = 'PGY_LINK_EXPORT_TIMEOUT';
+            timeoutError.retryable = true;
+            throw timeoutError;
+          }
+          await wait(linkExportPollIntervalMs, context.signal);
+        }
+        const eligibleIds = eligible.map((note) => String(note.noteId || '')).filter(Boolean);
+        const result = await collectorCore.withRetry(
+          () => request(context.tabId, 'notes.linkExport.result', {
+            taskId,
+            noteIds: eligibleIds.length <= 1000 ? eligibleIds : [],
+          }, context.signal, linkExportResultTimeoutMs),
+          Object.assign({}, retry, { signal: context.signal })
+        );
+        const eligibleSet = new Set(eligibleIds);
+        const links = new Map();
+        for (const pair of Array.isArray(result && result.links) ? result.links : []) {
+          if (!Array.isArray(pair) || pair.length < 2) continue;
+          const noteId = String(pair[0] == null ? '' : pair[0]).trim();
+          if (!eligibleSet.has(noteId)) continue;
+          const officialUrl = contract.sanitizeOfficialNoteUrl(pair[1], noteId);
+          if (officialUrl) links.set(noteId, officialUrl);
+        }
+        const matchedNoteCount = links.size;
+        return {
+          links,
+          coverage: Object.assign({}, baseCoverage, {
+            matchedNoteCount,
+            missingNoteCount: Math.max(0, eligible.length - matchedNoteCount),
+            parsedRowCount: Math.max(0, Number(result && result.parsedRowCount) || 0),
+            rejectedRowCount: Math.max(0, Number(result && result.rejectedRowCount) || 0),
+            status: matchedNoteCount === eligible.length
+              ? 'complete'
+              : matchedNoteCount > 0 ? 'partial' : 'failed',
+          }),
+        };
+      } catch (error) {
+        rethrowAbort(error, context.signal);
+        return {
+          links: new Map(),
+          coverage: Object.assign({}, baseCoverage, {
+            errorCode: String(error && error.code || 'PGY_LINK_EXPORT_FAILED'),
+            errorMessage: String(error && error.message || error || 'PGY link export failed.'),
+          }),
+        };
+      }
+    }
+
+    function applyOfficialNoteLinks(notesValue, linkResult) {
+      const links = linkResult && linkResult.links instanceof Map ? linkResult.links : new Map();
+      return (Array.isArray(notesValue) ? notesValue : []).map((note) => {
+        const noteId = String(note && note.noteId || '');
+        const officialUrl = links.get(noteId) ||
+          contract.sanitizeOfficialNoteUrl(note && note.noteUrl, noteId);
+        return Object.assign({}, note, { noteUrl: officialUrl || null });
+      });
+    }
+
+    async function collectSearchKeywords(notesValue, context) {
+      const notes = Array.isArray(notesValue) ? notesValue : [];
+      const enriched = notes.map((note) => {
+        const publicNote = Object.assign({}, note);
+        delete publicNote.orderCategory;
+        return publicNote;
+      });
+      const queue = notes.map((note, index) => ({ note, index })).filter(({ note }) => (
+        noteInsideDateRange(note, context.dateRange)
+      ));
+      const failures = [];
+      let cursor = 0;
+      let budgetExceeded = false;
+      const budgetController = new AbortController();
+      const budgetError = new Error(
+        `PGY search-keyword collection exceeded its ${searchKeywordBudgetMs} ms time budget.`
+      );
+      budgetError.name = 'AbortError';
+      budgetError.code = 'PGY_SEARCH_KEYWORD_BUDGET_EXCEEDED';
+      budgetError.retryable = false;
+      const abortFromParent = () => budgetController.abort(context.signal && context.signal.reason);
+      if (context.signal && typeof context.signal.addEventListener === 'function') {
+        context.signal.addEventListener('abort', abortFromParent, { once: true });
+        if (context.signal.aborted) abortFromParent();
+      }
+      const budgetTimer = setTimeout(() => {
+        budgetExceeded = true;
+        budgetController.abort(budgetError);
+      }, searchKeywordBudgetMs);
+
+      function recordFailure(note, index, code) {
+        const publicNote = Object.assign({}, note);
+        delete publicNote.orderCategory;
+        const failureCode = normalizedSearchKeywordFailureCode(code);
+        failures.push({
+          noteId: String(note && note.noteId || ''),
+          code: failureCode,
+        });
+        enriched[index] = Object.assign(publicNote, {
+          searchKeywordFetchStatus: 'failed',
+          searchKeywordErrorCode: failureCode,
+          searchKeywords: [],
+        });
+      }
+
+      async function worker() {
+        while (cursor < queue.length) {
+          const queueIndex = cursor;
+          cursor += 1;
+          const { note, index } = queue[queueIndex];
+          const publicNote = Object.assign({}, note);
+          delete publicNote.orderCategory;
+          if (budgetController.signal.aborted) {
+            if (context.signal && context.signal.aborted) {
+              throw collectorCore.abortError(context.signal);
+            }
+            budgetExceeded = true;
+            recordFailure(note, index, 'PGY_SEARCH_KEYWORD_BUDGET_EXCEEDED');
+            continue;
+          }
+          try {
+            const response = await collectorCore.withRetry(
+              () => request(context.tabId, 'notes.searchKeywords', {
+                noteId: note.noteId,
+                orderCategory: note.orderCategory,
+              }, budgetController.signal),
+              Object.assign({}, retry, { signal: budgetController.signal })
+            );
+            const searchKeywords = normalizePgySearchKeywords(response);
+            enriched[index] = Object.assign(publicNote, {
+              searchKeywordFetchStatus: searchKeywords.length ? 'complete' : 'empty',
+              searchKeywords,
+            });
+          } catch (error) {
+            if (context.signal && context.signal.aborted) {
+              throw collectorCore.abortError(context.signal);
+            }
+            const timedOut = budgetExceeded || budgetController.signal.aborted;
+            if (timedOut) budgetExceeded = true;
+            recordFailure(note, index, timedOut
+              ? 'PGY_SEARCH_KEYWORD_BUDGET_EXCEEDED'
+              : error && error.code || 'pgy_search_keywords_failed');
+          }
+        }
+      }
+
+      const workers = Math.min(searchKeywordConcurrency, queue.length);
+      try {
+        await Promise.all(Array.from({ length: workers }, () => worker()));
+      } finally {
+        clearTimeout(budgetTimer);
+        if (context.signal && typeof context.signal.removeEventListener === 'function') {
+          context.signal.removeEventListener('abort', abortFromParent);
+        }
+      }
+      const completeNoteCount = enriched.reduce((count, note) => (
+        count + (note && note.searchKeywordFetchStatus === 'complete' ? 1 : 0)
+      ), 0);
+      const emptyNoteCount = enriched.reduce((count, note) => (
+        count + (note && note.searchKeywordFetchStatus === 'empty' ? 1 : 0)
+      ), 0);
+      const keywordCount = enriched.reduce((count, note) => (
+        count + (Array.isArray(note && note.searchKeywords) ? note.searchKeywords.length : 0)
+      ), 0);
+      const failureCodeCounts = failures.reduce((counts, failure) => {
+        counts[failure.code] = (counts[failure.code] || 0) + 1;
+        return counts;
+      }, {});
+      return {
+        notes: enriched,
+        coverage: {
+          totalNoteCount: queue.length,
+          coveredNoteCount: completeNoteCount + emptyNoteCount,
+          completeNoteCount,
+          emptyNoteCount,
+          failedNoteCount: failures.length,
+          timedOutNoteCount: failures.filter((failure) => (
+            failure.code === 'PGY_SEARCH_KEYWORD_BUDGET_EXCEEDED'
+          )).length,
+          failureCodeCounts,
+          keywordCount,
+          budgetExceeded,
+          budgetMs: searchKeywordBudgetMs,
+          status: failures.length === 0 ? 'complete' : 'partial',
+        },
+      };
     }
 
     function resumablePaginationError(error) {
@@ -678,7 +1187,11 @@
               ),
               parsePage(response, page) {
                 const parsed = parsePgyPage(response, page);
-                return Object.assign({}, parsed, { items: parsed.items.map(normalizePgyNote) });
+                return Object.assign({}, parsed, {
+                  items: parsed.items.map((row) => normalizePgyNote(row, {
+                    includeSearchContext: true,
+                  })),
+                });
               },
             });
             break;
@@ -729,6 +1242,7 @@
         notesResult = partialPageResult(await settings.cache.read(cacheKey), error);
       }
 
+      const officialLinkPromise = collectOfficialNoteLinks(notesResult.items, context);
       let projectsResult;
       let projectsError = null;
       const projectsCacheKey = `xhs:${encodeURIComponent(context.runId)}:pgy:projects`;
@@ -767,7 +1281,11 @@
       }
 
       const taskDates = applyPgyTaskEndDates(notesResult.items, projectsResult.items);
-      const notes = taskDates.notes;
+      const [searchKeywordResult, officialLinkResult] = await Promise.all([
+        collectSearchKeywords(taskDates.notes, context),
+        officialLinkPromise,
+      ]);
+      const notes = applyOfficialNoteLinks(searchKeywordResult.notes, officialLinkResult);
       if (summary.expectedCount == null) summary = Object.assign({}, summary, { expectedCount: notesResult.expectedCount });
       const reconciliation = reconcilePgyCollection({ summary, notes });
       const taskDateErrors = taskDates.coverage.missingTaskEndCount > 0
@@ -799,6 +1317,24 @@
         errors,
       });
       const status = statusEvidence.status;
+      const searchKeywordWarnings = searchKeywordResult.coverage.failedNoteCount > 0
+        ? [{
+          code: 'pgy_search_keywords_incomplete',
+          message: `${searchKeywordResult.coverage.failedNoteCount} PGY notes are missing search-keyword data${searchKeywordResult.coverage.budgetExceeded ? ' after the enhancement time budget was reached' : ''}; core cost and performance metrics remain complete.`,
+          count: searchKeywordResult.coverage.failedNoteCount,
+          budgetExceeded: searchKeywordResult.coverage.budgetExceeded,
+          failureCodeCounts: searchKeywordResult.coverage.failureCodeCounts,
+        }]
+        : [];
+      const officialLinkWarnings = officialLinkResult.coverage.missingNoteCount > 0
+        ? [{
+          code: 'pgy_official_note_links_incomplete',
+          message: `${officialLinkResult.coverage.missingNoteCount} PGY notes are missing platform-exported official links; those titles remain non-clickable.`,
+          count: officialLinkResult.coverage.missingNoteCount,
+          exportStatus: officialLinkResult.coverage.status,
+          errorCode: officialLinkResult.coverage.errorCode || null,
+        }]
+        : [];
       const latestPublishDate = notes.reduce((latest, note) => {
         const publishDate = canonicalDate(note && note.publishDate);
         return publishDate && (!latest || publishDate > latest) ? publishDate : latest;
@@ -838,9 +1374,14 @@
         identity: Object.assign({ accountKey: context.accountKey }, context.identity),
         summary,
         notes: contract.sanitizeSensitiveData(notes),
+        officialLinkCoverage: contract.sanitizeSensitiveData(officialLinkResult.coverage),
+        searchKeywordCoverage: contract.sanitizeSensitiveData(searchKeywordResult.coverage),
         taskDateCoverage: contract.sanitizeSensitiveData(taskDates.coverage),
         reconciliation: contract.sanitizeSensitiveData(reconciliation),
         empty: paginationComplete && reconciliation.reconciled && notesResult.receivedCount === 0,
+        warnings: contract.sanitizeSensitiveData(
+          (statusEvidence.warnings || []).concat(searchKeywordWarnings, officialLinkWarnings)
+        ),
         errors: contract.sanitizeSensitiveData(errors),
       });
     }
@@ -852,6 +1393,7 @@
     createPgyCollector,
     applyPgyTaskEndDates,
     normalizePgyNote,
+    normalizePgySearchKeywords,
     normalizePgyProject,
     normalizePgySummary,
     parsePgyPage,

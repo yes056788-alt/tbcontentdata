@@ -3,10 +3,12 @@
 
   if (self !== top) return;
 
-  const CHANNEL = 'xhs-page-bridge-v2';
+  const CHANNEL = 'xhs-page-bridge-v3';
   const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
   const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
   const MAX_PAYLOAD_BYTES = 64 * 1024;
+  const DEFAULT_BRIDGE_TIMEOUT_MS = 45 * 1000;
+  const LINK_EXPORT_RESULT_TIMEOUT_MS = 3 * 60 * 1000;
   const PLATFORM_BY_ORIGIN = Object.freeze({
     'https://adstar.alimama.com': 'adstar',
     'https://pgy.xiaohongshu.com': 'pgy',
@@ -16,16 +18,35 @@
     adstar: Object.freeze([
       'projects.list', 'orders.list', 'reports.summary', 'reports.detail', 'identity.get',
     ]),
-    pgy: Object.freeze(['notes.list', 'notes.sum', 'projects.list', 'identity.get']),
+    pgy: Object.freeze([
+      'notes.list', 'notes.sum', 'notes.searchKeywords',
+      'notes.linkExport.submit', 'notes.linkExport.status', 'notes.linkExport.result',
+      'projects.list', 'identity.get',
+    ]),
     juguang: Object.freeze([
       'reports.query', 'accounts.current', 'accounts.list', 'identity.get',
     ]),
   });
   const platform = PLATFORM_BY_ORIGIN[location.origin];
   if (!platform) return;
-  const INSTALL_FLAG = '__taobaoDataAssistantXhsPlatformContentV2';
-  if (window[INSTALL_FLAG]) return;
-  Object.defineProperty(window, INSTALL_FLAG, { value: true });
+  const INSTALL_STATE_KEY = '__taobaoDataAssistantXhsPlatformContentV4';
+  const previousInstall = window[INSTALL_STATE_KEY];
+  const previousRuntimeListener = previousInstall && previousInstall.runtimeListener;
+  let previousReceiverActive = false;
+  if (typeof previousRuntimeListener === 'function') {
+    try {
+      previousReceiverActive = typeof chrome.runtime.onMessage.hasListener === 'function'
+        ? chrome.runtime.onMessage.hasListener(previousRuntimeListener)
+        : true;
+    } catch (error) {
+      previousReceiverActive = false;
+    }
+  }
+  if (previousReceiverActive) return;
+  if (previousInstall && typeof previousInstall.windowListener === 'function' &&
+      typeof window.removeEventListener === 'function') {
+    window.removeEventListener('message', previousInstall.windowListener);
+  }
 
   const pending = new Map();
 
@@ -52,7 +73,13 @@
       !pending.has(message.requestId);
   }
 
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  function bridgeTimeoutMs(endpoint) {
+    return endpoint === 'notes.linkExport.result'
+      ? LINK_EXPORT_RESULT_TIMEOUT_MS
+      : DEFAULT_BRIDGE_TIMEOUT_MS;
+  }
+
+  const runtimeListener = (message, sender, sendResponse) => {
     if (!isAllowedRequest(message)) return false;
     const requestNonce = nonce();
     const timer = setTimeout(() => {
@@ -69,7 +96,7 @@
         message: '平台页面响应超时。',
         retryable: true,
       });
-    }, 45000);
+    }, bridgeTimeoutMs(message.endpoint));
     pending.set(message.requestId, { nonce: requestNonce, sendResponse, timer });
     window.postMessage({
       channel: CHANNEL,
@@ -81,9 +108,10 @@
       nonce: requestNonce,
     }, location.origin);
     return true;
-  });
+  };
+  chrome.runtime.onMessage.addListener(runtimeListener);
 
-  window.addEventListener('message', (event) => {
+  const windowListener = (event) => {
     if (event.source !== window || event.origin !== location.origin) return;
     const message = event.data;
     if (!message || message.channel !== CHANNEL || message.type !== RESPONSE_TYPE) return;
@@ -103,5 +131,17 @@
       message: message.message,
       retryable: message.retryable !== false,
     });
-  });
+  };
+  window.addEventListener('message', windowListener);
+
+  const installState = { runtimeListener, windowListener };
+  try {
+    Object.defineProperty(window, INSTALL_STATE_KEY, {
+      value: installState,
+      configurable: true,
+      writable: true,
+    });
+  } catch (error) {
+    try { window[INSTALL_STATE_KEY] = installState; } catch (assignmentError) {}
+  }
 })();

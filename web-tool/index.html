@@ -17,6 +17,7 @@
     <nav class="portal-nav" aria-label="主要工作区">
       <a class="active" href="/index.html" aria-current="page">项目管理</a>
       <a href="/report.html">一键取数</a>
+      <a href="/comments.html">评论监测</a>
       <a href="/accounts.html">账号库管理</a>
     </nav>
     <div class="portal-status">
@@ -61,9 +62,9 @@
 
         <div class="project-viewbar">
           <div class="project-view-tabs" role="tablist" aria-label="店铺结果视图">
-            <button class="active" type="button" data-project-view="report">诊断报告</button>
-            <button type="button" data-project-view="data">数据表格</button>
-            <button type="button" data-project-view="history">运行记录</button>
+            <button id="projectReportTab" class="active" type="button" role="tab" aria-controls="projectReportPanel" aria-selected="true" data-project-view="report">诊断报告</button>
+            <button id="projectDataTab" type="button" role="tab" aria-controls="projectDataPanel" aria-selected="false" data-project-view="data">数据表格</button>
+            <button id="projectHistoryTab" type="button" role="tab" aria-controls="projectHistoryPanel" aria-selected="false" data-project-view="history">运行记录</button>
           </div>
           <div class="project-view-tools">
             <label id="projectHistoryPicker" class="project-history-picker" hidden>
@@ -75,20 +76,21 @@
           </div>
         </div>
 
-        <section id="projectReportPanel" class="project-result-panel" data-project-panel="report">
+        <section id="projectReportPanel" class="project-result-panel" role="tabpanel" aria-labelledby="projectReportTab" data-project-panel="report">
           <div id="projectReportState" class="project-view-state"><strong>正在载入最近诊断报告</strong><p>请稍候</p></div>
           <iframe id="projectReportFrame" class="project-view-frame" title="店铺诊断报告" hidden></iframe>
         </section>
 
-        <section id="projectDataPanel" class="project-result-panel" data-project-panel="data" hidden>
+        <section id="projectDataPanel" class="project-result-panel" role="tabpanel" aria-labelledby="projectDataTab" data-project-panel="data" hidden>
           <div id="projectDataState" class="project-view-state"><strong>正在载入最近数据表格</strong><p>请稍候</p></div>
           <iframe id="projectDataFrame" class="project-view-frame" title="店铺经营数据表格" hidden></iframe>
         </section>
 
-        <section id="projectHistoryPanel" class="section-band project-history-panel" data-project-panel="history" hidden>
+        <section id="projectHistoryPanel" class="section-band project-history-panel" role="tabpanel" aria-labelledby="projectHistoryTab" data-project-panel="history" hidden>
           <div class="section-head"><div><h2>历史报告与取数记录</h2><p>当前账号与批量账号任务统一归档</p></div><span id="storeHistoryCount" class="section-count">0 条</span></div>
           <div class="data-table-wrap"><table class="data-table"><thead><tr><th>任务类型</th><th>执行方式</th><th>执行账号</th><th>完成时间</th><th>状态</th><th>平台异常</th><th>操作</th></tr></thead><tbody id="projectRunRows"></tbody></table></div>
         </section>
+
       </section>
     </main>
   </div>

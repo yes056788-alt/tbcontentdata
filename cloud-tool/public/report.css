@@ -655,6 +655,239 @@
 .xhs-table-heading h4 { margin: 0; font-size: 15px; }
 .xhs-table-heading span { color: #667085; font-size: 11px; }
 
+.xhs-pgy-keyword-rules {
+  margin: 0 14px 14px;
+  padding: 10px 12px;
+  border: 1px solid #dfe4ea;
+  background: #f8fafc;
+  color: #475467;
+  font-size: 11px;
+}
+
+.xhs-pgy-keyword-rules summary {
+  color: #243b72;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.xhs-pgy-keyword-rules p { margin: 8px 0 0; line-height: 1.65; }
+.xhs-metric-grid.xhs-pgy-search-metrics {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 0 14px 14px;
+}
+.xhs-classification-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 14px 14px;
+  padding: 10px 12px;
+  border: 1px solid #dbe6f5;
+  border-radius: 6px;
+  background: #f5f8fd;
+  color: #344054;
+  font-size: 10px;
+}
+.xhs-classification-state { margin-right: auto; color: #243b72; font-weight: 750; }
+.xhs-classification-toolbar label { display: inline-flex; align-items: center; gap: 6px; }
+.xhs-classification-toolbar select {
+  min-width: 112px;
+  height: 30px;
+  border: 1px solid #b7c7df;
+  border-radius: 4px;
+  background: #fff;
+  color: #344054;
+  font-size: 10px;
+}
+.xhs-classification-toolbar button,
+.xhs-keyword-correct {
+  min-height: 30px;
+  padding: 4px 9px;
+  border: 1px solid #8eabd2;
+  border-radius: 4px;
+  background: #fff;
+  color: #0b67d1;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.xhs-classification-toolbar button:disabled { opacity: .5; cursor: wait; }
+.xhs-review-toggle input { accent-color: #0b67d1; }
+.xhs-classification-badge {
+  display: inline-flex;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: #eaf2ff;
+  color: #0b67d1;
+  font-size: 9px;
+  font-weight: 750;
+}
+.xhs-classification-badge[data-source="override"],
+.xhs-classification-badge[data-source="manual"] { background: #ecfdf3; color: #067647; }
+.xhs-classification-badge[data-source="hybrid"],
+.xhs-classification-badge[data-source="qwen"] { background: #f4ebff; color: #6941c6; }
+.xhs-review-required { display: block; margin-top: 4px; color: #b54708; font-size: 9px; }
+.xhs-pgy-keyword-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 14px 16px;
+}
+
+.xhs-pgy-keyword-comparison {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #dfe4ea;
+  background: #fff;
+}
+
+.xhs-pgy-keyword-comparison > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 11px;
+  border-bottom: 1px solid #e3eaf4;
+}
+
+.xhs-pgy-keyword-comparison h5 { margin: 0; color: #243b72; font-size: 12px; }
+.xhs-pgy-keyword-comparison header span { color: #667085; font-size: 9px; }
+.xhs-pgy-keyword-comparison > div { overflow: auto; }
+.xhs-pgy-keyword-comparison table { min-width: 560px; font-size: 10px; }
+.xhs-pgy-keyword-comparison th,
+.xhs-pgy-keyword-comparison td { padding: 7px 8px; }
+.xhs-pgy-keyword-comparison td small { color: #667085; }
+.xhs-pgy-keyword-filter-button {
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: #0b67d1;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+.xhs-pgy-keyword-filter-button:hover { border-color: #b7c7df; background: #f4f8ff; }
+.xhs-pgy-keyword-filter-button[aria-pressed="true"] {
+  border-color: #0b67d1;
+  background: #eaf2ff;
+}
+.xhs-pgy-keyword-filter-button:focus-visible,
+.xhs-pgy-keyword-filter-clear:focus-visible,
+.xhs-pgy-keyword-table thead select:focus-visible { outline: 2px solid #0b67d1; outline-offset: 2px; }
+.xhs-pgy-keyword-table { min-width: 1420px !important; }
+.xhs-pgy-keyword-table thead th { vertical-align: bottom; }
+.xhs-pgy-keyword-column-label { display: block; margin-bottom: 5px; }
+.xhs-pgy-keyword-table thead select {
+  display: block;
+  width: 100%;
+  min-width: 140px;
+  height: 30px;
+  border: 1px solid #b7c7df;
+  border-radius: 4px;
+  background: #fff;
+  color: #344054;
+  font-size: 10px;
+}
+.xhs-pgy-keyword-filter-clear {
+  display: block;
+  margin-top: 5px;
+  padding: 3px 7px;
+  border: 1px solid #b7c7df;
+  border-radius: 4px;
+  background: #fff;
+  color: #0b67d1;
+  font-size: 9px;
+  cursor: pointer;
+}
+.xhs-pgy-keyword-filter-clear:disabled { opacity: .45; cursor: default; }
+.xhs-pgy-keyword-table > tbody > tr > td:last-child { min-width: 120px; white-space: normal; }
+.xhs-pgy-keyword-notes summary {
+  display: inline-flex;
+  padding: 4px 8px;
+  border: 1px solid #b7c7df;
+  border-radius: 4px;
+  background: #fff;
+  color: #0b67d1;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.xhs-pgy-keyword-notes > div {
+  max-width: 760px;
+  margin-top: 8px;
+  overflow: auto;
+  border: 1px solid #dfe4ea;
+}
+
+.xhs-pgy-keyword-notes table { min-width: 720px; font-size: 10px; }
+.xhs-pgy-keyword-notes th,
+.xhs-pgy-keyword-notes td { padding: 7px 8px; white-space: nowrap; }
+.xhs-pgy-keyword-notes td:nth-child(2) { min-width: 220px; white-space: normal; }
+.xhs-note-link-unavailable { display: block; margin-top: 3px; color: #98a2b3; font-size: 9px; }
+
+.xhs-classification-dialog {
+  width: min(680px, calc(100vw - 32px));
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  box-shadow: 0 24px 70px rgba(16, 24, 40, .28);
+  color: #1d2939;
+}
+.xhs-classification-dialog::backdrop { background: rgba(15, 23, 42, .48); }
+.xhs-classification-dialog form { margin: 0; }
+.xhs-classification-dialog header,
+.xhs-classification-dialog footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid #e4e7ec;
+}
+.xhs-classification-dialog header span { color: #667085; font-size: 10px; font-weight: 750; }
+.xhs-classification-dialog header h3 { margin: 3px 0 0; font-size: 17px; }
+.xhs-dialog-close {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  background: #f2f4f7;
+  color: #475467;
+  font-size: 22px;
+  cursor: pointer;
+}
+.xhs-classification-keyword {
+  margin: 18px 20px 6px;
+  color: #243b72;
+  font-size: 18px;
+  font-weight: 800;
+  word-break: break-all;
+}
+.xhs-classification-dialog-note { margin: 0 20px 16px; color: #667085; font-size: 11px; }
+.xhs-classification-dialog-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  padding: 0 20px 18px;
+}
+.xhs-classification-dialog-fields label { display: grid; gap: 6px; color: #344054; font-size: 11px; font-weight: 700; }
+.xhs-classification-dialog-fields select,
+.xhs-classification-dialog-fields input {
+  width: 100%;
+  min-height: 38px;
+  box-sizing: border-box;
+  border: 1px solid #b7c7df;
+  border-radius: 5px;
+  background: #fff;
+  color: #1d2939;
+  font: inherit;
+  font-weight: 500;
+}
+.xhs-classification-reason-field { grid-column: 1 / -1; }
+.xhs-classification-dialog-error { min-height: 18px; margin: 0 20px 8px; color: #b42318; font-size: 11px; }
+.xhs-classification-dialog footer { justify-content: flex-end; border-top: 1px solid #e4e7ec; border-bottom: 0; }
+
 .xhs-report-panel {
   margin: 0 18px 22px;
   overflow: hidden;
@@ -1045,12 +1278,14 @@
   .xhs-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .xhs-account-metrics,
   .xhs-pgy-metrics,
+  .xhs-metric-grid.xhs-pgy-search-metrics,
   .xhs-star-metrics,
   .xhs-star-task-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .xhs-star-project-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .xhs-star-metrics .xhs-metric-card:nth-last-child(2):nth-child(5n + 1),
   .xhs-star-metrics .xhs-metric-card:last-child:nth-child(5n + 2) { grid-column: auto; }
   .xhs-chart-grid { grid-template-columns: 1fr; }
+  .xhs-pgy-keyword-comparison-grid { grid-template-columns: 1fr; }
   .xhs-control-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .xhs-unit-costs,
   .xhs-unit-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -1090,6 +1325,7 @@
   .xhs-pgy-note-analysis { margin-right: 12px; margin-left: 12px; }
   .xhs-account-metrics,
   .xhs-pgy-metrics,
+  .xhs-metric-grid.xhs-pgy-search-metrics,
   .xhs-star-metrics,
   .xhs-star-task-metrics { grid-template-columns: 1fr; }
   .xhs-star-project-metrics { grid-template-columns: 1fr; }

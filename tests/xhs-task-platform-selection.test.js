@@ -30,6 +30,7 @@ test('selecting a platform clears only the stale empty-platform error', () => {
       },
     },
     renderBatchControls() {},
+    renderPgyClassificationSetup() {},
     renderStatus() {},
     setNotice(message, tone) {
       notice.textContent = message || '';

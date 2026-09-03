@@ -110,6 +110,72 @@
     </section>
   </main>
 
+  <dialog id="xhsClassificationCorrectionDialog" class="xhs-classification-dialog">
+    <form method="dialog" data-xhs-classification-correction-form>
+      <header>
+        <div>
+          <span>人工分类规则</span>
+          <h3>纠正搜索来源词</h3>
+        </div>
+        <button type="button" class="xhs-dialog-close" data-xhs-classification-correction-cancel
+          aria-label="关闭">&times;</button>
+      </header>
+      <p class="xhs-classification-keyword" data-xhs-classification-correction-keyword></p>
+      <p class="xhs-classification-dialog-note">每个维度只能选择一个最终标签。人工纠正优先于店铺词典和行业规则。</p>
+      <div class="xhs-classification-dialog-fields">
+        <label>
+          <span>商业分类</span>
+          <select name="commercialCategory" required>
+            <option value="own_brand">自有品牌词</option>
+            <option value="competitor">竞品词</option>
+            <option value="own_product">自有产品词</option>
+            <option value="need_pain_point">品类需求词</option>
+            <option value="core_category">核心品类词</option>
+            <option value="adjacent_category">邻近品类/场景</option>
+            <option value="industry_interest">行业兴趣词</option>
+            <option value="unrelated">无关词</option>
+            <option value="unknown">待确认</option>
+          </select>
+        </label>
+        <label>
+          <span>品类相关度</span>
+          <select name="relevance" required>
+            <option value="strong">强相关</option>
+            <option value="medium">中相关</option>
+            <option value="weak">弱相关</option>
+            <option value="none">无关</option>
+            <option value="review">待确认</option>
+          </select>
+        </label>
+        <label>
+          <span>搜索意图</span>
+          <select name="intent" required>
+            <option value="purchase_decision">购买决策</option>
+            <option value="comparison">对比评估</option>
+            <option value="problem_solving">问题解决</option>
+            <option value="usage">使用方法</option>
+            <option value="brand_product_lookup">品牌/产品查找</option>
+            <option value="category_exploration">品类探索</option>
+            <option value="interest_browsing">兴趣浏览</option>
+            <option value="unclear">意图不明确</option>
+          </select>
+        </label>
+        <label class="xhs-classification-reason-field">
+          <span>修正说明（可选）</span>
+          <input name="reason" type="text" maxlength="160" placeholder="例如：店铺主营品牌词">
+        </label>
+      </div>
+      <p class="xhs-classification-dialog-error" data-xhs-classification-correction-error
+        role="alert" aria-live="polite"></p>
+      <footer>
+        <button type="button" class="button" data-xhs-classification-correction-cancel>取消</button>
+        <button type="submit" class="button primary" data-xhs-classification-correction-save>保存并重新分类</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <script src="/xhs-search-classification.js"></script>
+  <script src="/search-classification-client.js"></script>
   <script src="/xhs-report-model.js"></script>
   <script src="/report.js"></script>
 </body>

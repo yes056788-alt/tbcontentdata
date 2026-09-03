@@ -5,7 +5,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createXhsPageClientApi() {
   'use strict';
 
-  const CHANNEL = 'xhs-page-bridge-v2';
+  const CHANNEL = 'xhs-page-bridge-v3';
   const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
   const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
   const BRIDGE_UNAVAILABLE_CODE = 'XHS_PAGE_BRIDGE_UNAVAILABLE';
@@ -14,7 +14,11 @@
     adstar: Object.freeze([
       'projects.list', 'orders.list', 'reports.summary', 'reports.detail', 'identity.get',
     ]),
-    pgy: Object.freeze(['notes.list', 'notes.sum', 'projects.list', 'identity.get']),
+    pgy: Object.freeze([
+      'notes.list', 'notes.sum', 'notes.searchKeywords',
+      'notes.linkExport.submit', 'notes.linkExport.status', 'notes.linkExport.result',
+      'projects.list', 'identity.get',
+    ]),
     juguang: Object.freeze([
       'reports.query', 'accounts.current', 'accounts.list', 'identity.get',
     ]),
@@ -71,6 +75,12 @@
       .test(String(error.message || error));
   }
 
+  function isUndeliveredReceiverError(error) {
+    if (!error || error.code != null) return false;
+    return /(?:receiving end does not exist|could not establish connection)/i
+      .test(String(error.message || error));
+  }
+
   function validateResponse(response, request) {
     if (!response || typeof response !== 'object') throw bridgeUnavailableError();
     if (response.channel !== CHANNEL || response.type !== RESPONSE_TYPE) {
@@ -110,6 +120,9 @@
   function createPageClient(options) {
     const settings = options && typeof options === 'object' ? options : {};
     if (typeof settings.sendMessage !== 'function') throw new Error('sendMessage is required.');
+    const recoverBridge = typeof settings.recoverBridge === 'function'
+      ? settings.recoverBridge
+      : null;
     const defaultTimeoutMs = Math.max(1, Number(settings.timeoutMs) || 45000);
 
     return Object.freeze({
@@ -137,9 +150,22 @@
           signal.addEventListener('abort', abortListener, { once: true });
           if (signal.aborted) abortListener();
         });
-        const sent = Promise.resolve().then(() => {
+        const sent = Promise.resolve().then(async () => {
           throwIfAborted(signal);
-          return settings.sendMessage(safe.tabId, envelope);
+          try {
+            return await settings.sendMessage(safe.tabId, envelope);
+          } catch (error) {
+            if (!recoverBridge || !isUndeliveredReceiverError(error)) throw error;
+            throwIfAborted(signal);
+            await recoverBridge({
+              tabId: safe.tabId,
+              platform: safe.platform,
+              endpoint: safe.endpoint,
+              signal,
+            });
+            throwIfAborted(signal);
+            return settings.sendMessage(safe.tabId, envelope);
+          }
         });
         sent.catch(() => {});
         try {

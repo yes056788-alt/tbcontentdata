@@ -115,6 +115,21 @@ for (const scenario of [
     );
     assert.equal(harness.submitCount(), 0, '已存会话不得继续提交所选账号的明文凭据。');
   });
+
+  test(`项目新建页可显式继承 ${scenario.name} 会话并直接继续`, async () => {
+    const harness = createPreexistingSessionHarness(scenario.platform, scenario.kind);
+    const result = await harness.context.ensureXhsPlatformSessionUnderTest(scenario.platform, {
+      username: 'selected-account@example.test',
+      password: 'selected-account-password',
+    }, {
+      taskOwnedTabId: scenario.platform === 'pgy' ? 301 : 302,
+      allowExistingSession: true,
+    });
+
+    assert.equal(result.tabId, scenario.platform === 'pgy' ? 301 : 302);
+    assert.equal(result.taskSessionReused, true);
+    assert.equal(harness.submitCount(), 0, '新页已继承登录态时不得重复提交密码。');
+  });
 }
 
 function createConcurrentSharedSessionHarness() {

@@ -224,6 +224,7 @@
   function taskTypeInfo(value) {
     if (value === 'collect') return ['历史经营取数', true, false];
     if (value === 'report') return ['一键取数', true, true];
+    if (value === 'comment_monitor') return ['评论监测', false, false];
     return ['一键取数', true, true];
   }
 
@@ -753,6 +754,7 @@
       const active = button.dataset.projectView === activeView;
       button.classList.toggle('active', active);
       button.setAttribute('aria-selected', String(active));
+      button.tabIndex = active ? 0 : -1;
     });
     document.querySelectorAll('[data-project-panel]').forEach((panel) => {
       panel.hidden = panel.dataset.projectPanel !== activeView;
@@ -880,6 +882,19 @@
     button.addEventListener('click', () => {
       activeView = button.dataset.projectView;
       renderActiveView();
+    });
+    button.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      const tabs = Array.from(document.querySelectorAll('[data-project-view]'));
+      const currentIndex = tabs.indexOf(button);
+      const nextIndex = event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? tabs.length - 1
+          : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      event.preventDefault();
+      tabs[nextIndex].focus();
+      tabs[nextIndex].click();
     });
   });
 

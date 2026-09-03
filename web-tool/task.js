@@ -9,6 +9,7 @@
   const taskType = 'report';
   const pendingRequests = new Map();
   const $ = (selector) => document.querySelector(selector);
+  const initialRequestedStoreId = new URLSearchParams(location.search).get('store') || '';
 
   function isPlainObject(value) {
     return Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -36,6 +37,97 @@
   let selectedStoreId = '';
   let activeMode = 'current';
   let refreshing = false;
+  let pgyClassificationFormStoreId = '';
+  let pgyClassificationFormDirty = false;
+  let pgyClassificationSaving = false;
+  let pgyClassificationDraftsByStore = new Map();
+  let currentTaskStarting = false;
+  let initialStoreQueryConsumed = false;
+
+  const CLASSIFICATION_PROFILE_IDS = Object.freeze({
+    auto: 'auto',
+    pet: 'sheba-cat-food-v1',
+    furniture: 'home-furnishing-v1',
+    supplement: 'health-supplements-v1',
+    custom: 'cross-industry-generic-v1',
+  });
+  const CLASSIFICATION_TEMPLATE_HINTS = Object.freeze({
+    auto: '依据店铺词库和采集内容自动选择宠物、家具、保健品或通用模板。',
+    pet: '适用于宠物食品、用品、健康与喂养相关搜索词。',
+    furniture: '适用于家具、家居、装修、使用场景与养护相关搜索词。',
+    supplement: '适用于保健品、营养补充、安全副作用与服用方式相关搜索词。',
+    custom: '使用通用跨行业模板，并以自定义行业名称辅助人工复核。',
+  });
+
+  function cleanClassificationText(value, maxLength) {
+    if (typeof value !== 'string' && typeof value !== 'number') return '';
+    return String(value).normalize('NFKC').trim().replace(/\s+/gu, ' ').slice(0, maxLength);
+  }
+
+  function parseClassificationTerms(value) {
+    const result = [];
+    const seen = new Set();
+    const source = Array.isArray(value) ? value.join('\n') : String(value == null ? '' : value);
+    for (const raw of source.split(/[\n,，;；]+/u).slice(0, 400)) {
+      const term = cleanClassificationText(raw, 64);
+      const key = term.toLocaleLowerCase('zh-CN');
+      if (!term || seen.has(key)) continue;
+      seen.add(key);
+      result.push(term);
+      if (result.length >= 200) break;
+    }
+    return result;
+  }
+
+  function classificationTemplateFor(value) {
+    const source = isPlainObject(value) ? value : {};
+    const profileId = cleanClassificationText(source.profileId, 96);
+    return Object.keys(CLASSIFICATION_PROFILE_IDS).find((template) => (
+      CLASSIFICATION_PROFILE_IDS[template] === profileId
+    )) || (cleanClassificationText(source.customIndustry, 120) ? 'custom' : 'auto');
+  }
+
+  function buildStoreClassification(currentValue, draftValue, updatedAtValue) {
+    const current = isPlainObject(currentValue) ? currentValue : {};
+    const draft = isPlainObject(draftValue) ? draftValue : {};
+    const template = Object.prototype.hasOwnProperty.call(CLASSIFICATION_PROFILE_IDS, draft.template)
+      ? draft.template
+      : 'auto';
+    const currentRevision = Number(current.revision);
+    const revision = Number.isSafeInteger(currentRevision) && currentRevision >= 0
+      ? Math.min(currentRevision + 1, 2147483647)
+      : 1;
+    const requestedUpdatedAt = Number(updatedAtValue);
+    return {
+      schema: 1,
+      profileId: CLASSIFICATION_PROFILE_IDS[template],
+      customIndustry: template === 'custom'
+        ? cleanClassificationText(draft.customIndustry, 120)
+        : '',
+      ownBrandTerms: parseClassificationTerms(draft.ownBrandTerms),
+      ownProductTerms: parseClassificationTerms(draft.ownProductTerms),
+      competitorTerms: parseClassificationTerms(draft.competitorTerms),
+      semantic: { enabled: false },
+      manualOverrides: (Array.isArray(current.manualOverrides) ? current.manualOverrides : [])
+        .filter(isPlainObject).slice(0, 500),
+      revision,
+      updatedAt: Number.isSafeInteger(requestedUpdatedAt) && requestedUpdatedAt > 0
+        ? requestedUpdatedAt
+        : Date.now(),
+    };
+  }
+
+  function classificationConfigMatches(currentValue, nextValue) {
+    const current = isPlainObject(currentValue) ? currentValue : {};
+    const next = isPlainObject(nextValue) ? nextValue : {};
+    return Number(current.schema) === 1 &&
+      cleanClassificationText(current.profileId, 96) === cleanClassificationText(next.profileId, 96) &&
+      cleanClassificationText(current.customIndustry, 120) === cleanClassificationText(next.customIndustry, 120) &&
+      JSON.stringify(parseClassificationTerms(current.ownBrandTerms)) === JSON.stringify(next.ownBrandTerms || []) &&
+      JSON.stringify(parseClassificationTerms(current.ownProductTerms)) === JSON.stringify(next.ownProductTerms || []) &&
+      JSON.stringify(parseClassificationTerms(current.competitorTerms)) === JSON.stringify(next.competitorTerms || []) &&
+      isPlainObject(current.semantic) && current.semantic.enabled === false;
+  }
 
   function selectedPlatforms(mode) {
     const picker = document.querySelector('[data-platform-picker="' + mode + '"]');
@@ -193,6 +285,150 @@
     }).format(date).replace(/\//g, '-');
   }
 
+  function syncPgyClassificationTemplateFields() {
+    const templateInput = $('#pgyClassificationTemplate');
+    const customField = $('#pgyClassificationCustomIndustryField');
+    const customInput = $('#pgyClassificationCustomIndustry');
+    const hint = $('#pgyClassificationTemplateHint');
+    if (!templateInput || !customField || !customInput || !hint) return;
+    const template = templateInput.value;
+    const custom = template === 'custom';
+    customField.hidden = !custom;
+    customInput.required = custom;
+    hint.textContent = CLASSIFICATION_TEMPLATE_HINTS[template] || CLASSIFICATION_TEMPLATE_HINTS.auto;
+  }
+
+  function renderPgyClassificationForm(store, force) {
+    const templateInput = $('#pgyClassificationTemplate');
+    const customInput = $('#pgyClassificationCustomIndustry');
+    const ownBrandInput = $('#pgyClassificationOwnBrandTerms');
+    const ownProductInput = $('#pgyClassificationOwnProductTerms');
+    const competitorInput = $('#pgyClassificationCompetitorTerms');
+    const revisionMeta = $('#pgyClassificationRevisionMeta');
+    if (!templateInput || !customInput || !ownBrandInput || !ownProductInput ||
+        !competitorInput || !revisionMeta) return;
+    if (!store) {
+      pgyClassificationFormStoreId = '';
+      pgyClassificationFormDirty = false;
+      templateInput.value = 'auto';
+      customInput.value = '';
+      ownBrandInput.value = '';
+      ownProductInput.value = '';
+      competitorInput.value = '';
+      revisionMeta.textContent = '请先选择本次取数归属店铺';
+      syncPgyClassificationTemplateFields();
+      return;
+    }
+    if (!force && pgyClassificationFormDirty && pgyClassificationFormStoreId === store.id) return;
+    const classification = isPlainObject(store.classification) ? store.classification : {};
+    const cachedDraft = pgyClassificationDraftsByStore.get(store.id) || null;
+    pgyClassificationFormStoreId = store.id;
+    templateInput.value = cachedDraft && cachedDraft.template || classificationTemplateFor(classification);
+    customInput.value = cachedDraft
+      ? cleanClassificationText(cachedDraft.customIndustry, 120)
+      : cleanClassificationText(classification.customIndustry, 120);
+    ownBrandInput.value = cachedDraft
+      ? String(cachedDraft.ownBrandTerms || '')
+      : parseClassificationTerms(classification.ownBrandTerms).join('\n');
+    ownProductInput.value = cachedDraft
+      ? String(cachedDraft.ownProductTerms || '')
+      : parseClassificationTerms(classification.ownProductTerms).join('\n');
+    competitorInput.value = cachedDraft
+      ? String(cachedDraft.competitorTerms || '')
+      : parseClassificationTerms(classification.competitorTerms).join('\n');
+    const revision = Number(classification.revision);
+    const updatedAt = Number(classification.updatedAt);
+    revisionMeta.textContent = cachedDraft
+      ? '有未保存草稿，将在该店铺取数启动前保存'
+      : Number.isSafeInteger(revision) && revision > 0
+        ? '当前配置 r' + revision + (updatedAt > 0 ? ' · 更新于 ' + formatDate(updatedAt) : '')
+        : '尚未保存，将在本次取数启动前建立 r1';
+    pgyClassificationFormDirty = Boolean(cachedDraft);
+    syncPgyClassificationTemplateFields();
+  }
+
+  function pgyClassificationDraft() {
+    const templateInput = $('#pgyClassificationTemplate');
+    const customInput = $('#pgyClassificationCustomIndustry');
+    const ownBrandInput = $('#pgyClassificationOwnBrandTerms');
+    const ownProductInput = $('#pgyClassificationOwnProductTerms');
+    const competitorInput = $('#pgyClassificationCompetitorTerms');
+    return {
+      template: templateInput ? templateInput.value : 'auto',
+      customIndustry: customInput ? customInput.value : '',
+      ownBrandTerms: ownBrandInput ? ownBrandInput.value : '',
+      ownProductTerms: ownProductInput ? ownProductInput.value : '',
+      competitorTerms: competitorInput ? competitorInput.value : '',
+    };
+  }
+
+  function rememberPgyClassificationDraft() {
+    if (!pgyClassificationFormStoreId) return;
+    pgyClassificationFormDirty = true;
+    pgyClassificationDraftsByStore.set(pgyClassificationFormStoreId, pgyClassificationDraft());
+    const revisionMeta = $('#pgyClassificationRevisionMeta');
+    if (revisionMeta) revisionMeta.textContent = '有未保存草稿，将在该店铺取数启动前保存';
+  }
+
+  function renderPgyClassificationSetup(force) {
+    const panel = $('#pgyClassificationSetup');
+    const pgyInput = $('#currentPlatformPgy');
+    if (!panel) return;
+    const enabled = Boolean(pgyInput && pgyInput.checked);
+    panel.hidden = !enabled;
+    if (pgyInput) pgyInput.setAttribute('aria-expanded', String(enabled));
+    const store = storeById(selectedStoreId);
+    if (enabled) renderPgyClassificationForm(store, Boolean(force));
+    const runningAnyTask = Boolean(taskStatus && (taskStatus.running || taskStatus.cancelling));
+    const disabled = !enabled || !store || pgyClassificationSaving || currentTaskStarting || runningAnyTask;
+    panel.querySelectorAll('#pgyClassificationForm input, #pgyClassificationForm select, #pgyClassificationForm textarea').forEach((control) => {
+      control.disabled = disabled;
+    });
+    panel.classList.toggle('is-disabled', disabled);
+  }
+
+  async function persistPgyClassificationBeforeStart(store, platforms) {
+    if (!Array.isArray(platforms) || !platforms.includes('pgy')) return store;
+    if (!store || pgyClassificationFormStoreId !== store.id) {
+      throw new Error('当前店铺的蒲公英分类配置尚未载入，请重新选择店铺。');
+    }
+    const draft = pgyClassificationDraft();
+    if (draft.template === 'custom' && !cleanClassificationText(draft.customIndustry, 120)) {
+      $('#pgyClassificationCustomIndustry').focus();
+      throw new Error('选择自定义行业时，请填写行业名称。');
+    }
+    const classification = buildStoreClassification(store.classification, draft, Date.now());
+    if (classificationConfigMatches(store.classification, classification)) {
+      pgyClassificationDraftsByStore.delete(store.id);
+      pgyClassificationFormDirty = false;
+      renderPgyClassificationForm(store, true);
+      return store;
+    }
+    const nextDirectory = Object.assign({}, directory, {
+      schema: 1,
+      storeGroups: directory.storeGroups,
+      stores: directory.stores.map((item) => item.id === store.id
+        ? Object.assign({}, item, { classification })
+        : item),
+      updatedAt: classification.updatedAt,
+    });
+    pgyClassificationSaving = true;
+    renderPgyClassificationSetup(false);
+    try {
+      await request('setProjectDirectory', { directory: nextDirectory }, 45000);
+      directory = nextDirectory;
+      pgyClassificationDraftsByStore.delete(store.id);
+      pgyClassificationFormDirty = false;
+      const savedStore = storeById(store.id);
+      renderPgyClassificationForm(savedStore, true);
+      setNotice('已在取数前保存“' + store.name + '”的蒲公英分类配置 r' + classification.revision + '。', 'success');
+      return savedStore;
+    } finally {
+      pgyClassificationSaving = false;
+      renderPgyClassificationSetup(false);
+    }
+  }
+
   function statusInfo(value) {
     if (value === 'success') return ['success', '成功'];
     if (value === 'partial') return ['partial', '部分成功'];
@@ -221,8 +457,12 @@
   }
 
   function renderSelectors() {
-    const requestedStoreId = new URLSearchParams(location.search).get('store');
-    if (requestedStoreId && storeById(requestedStoreId)) selectedStoreId = requestedStoreId;
+    if (!initialStoreQueryConsumed) {
+      initialStoreQueryConsumed = true;
+      if (initialRequestedStoreId && storeById(initialRequestedStoreId)) {
+        selectedStoreId = initialRequestedStoreId;
+      }
+    }
     const selected = storeById(selectedStoreId);
     const groupSelect = $('#taskGroupSelect');
     groupSelect.innerHTML = '<option value="__all__">全部店铺分组</option>' + directory.storeGroups.map((group) => (
@@ -241,7 +481,14 @@
     )).join('');
     select.value = stores.some((store) => store.id === selectedStoreId) ? selectedStoreId : '';
     if (!select.value) selectedStoreId = '';
-    renderStatus();
+  }
+
+  function syncSelectedStoreQuery() {
+    if (!window.history || typeof window.history.replaceState !== 'function') return;
+    const url = new URL(location.href);
+    if (selectedStoreId) url.searchParams.set('store', selectedStoreId);
+    else url.searchParams.delete('store');
+    window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
   }
 
   function normalizeAccountSessionSummary(value) {
@@ -423,17 +670,20 @@
     const resumePlatformCount = paused && Array.isArray(status.platforms) && status.platforms.length
       ? status.platforms.length
       : platformCount;
+    const currentTaskBusy = currentTaskStarting || Boolean(taskStatus && (
+      taskStatus.running || taskStatus.cancelling
+    ));
     $('#startBatchTaskBtn').disabled = !connected || !accountSession.unlocked || detailsState.kind !== 'ready' ||
-      !accountCount || accountCount > 100 || !platformCount || running || paused;
+      !accountCount || accountCount > 100 || !platformCount || running || paused || currentTaskBusy;
     $('#resumeBatchTaskBtn').hidden = !paused;
     $('#resumeBatchTaskBtn').disabled = !connected || !accountSession.unlocked || !resumePlatformCount;
     $('#cancelBatchTaskBtn').disabled = !(status.running || status.paused);
     $('#batchGroupSelect').disabled = !accountSession.unlocked || detailsState.kind !== 'ready' ||
-      !selectedBatchGroupId || running || paused;
+      !selectedBatchGroupId || running || paused || currentTaskBusy;
     document.querySelectorAll('[data-platform-picker="batch"] input[type="checkbox"]').forEach((input) => {
-      input.disabled = running || paused;
+      input.disabled = running || paused || currentTaskBusy;
     });
-    updateBatchSelectionActions(undefined, running || paused);
+    updateBatchSelectionActions(undefined, running || paused || currentTaskBusy);
   }
 
   function renderStatus() {
@@ -489,8 +739,24 @@
     const cancelling = Boolean(status && status.cancelling);
     const active = running || waitingForVerification;
     const cancelButton = $('#cancelCurrentTaskBtn');
+    const setupLocked = currentTaskStarting || runningAnyTask;
+    const startButton = $('#startCurrentTaskBtn');
     $('#taskStatusDescription').textContent = '单店一键取数进度';
-    $('#startCurrentTaskBtn').disabled = !connected || !selectedStoreId || !selectedPlatforms('current').length || runningAnyTask;
+    startButton.disabled = !connected || !selectedStoreId || !selectedPlatforms('current').length ||
+      pgyClassificationSaving || currentTaskStarting || runningAnyTask;
+    startButton.textContent = currentTaskStarting ? '正在保存并启动…' : '开始一键取数';
+    ['taskGroupSelect', 'taskStoreSelect', 'xhsDateFrom', 'xhsDateTo', 'juguangConcurrentTabs']
+      .forEach((id) => {
+        const control = $('#' + id);
+        if (control) control.disabled = setupLocked;
+      });
+    document.querySelectorAll('[data-platform-picker="current"] input, input[name="credentialMode"]')
+      .forEach((input) => { input.disabled = setupLocked; });
+    document.querySelectorAll('[data-task-mode]').forEach((button) => {
+      button.disabled = currentTaskStarting;
+    });
+    const currentModePanel = $('#currentModePanel');
+    if (currentModePanel) currentModePanel.setAttribute('aria-busy', String(currentTaskStarting));
     cancelButton.hidden = !(active || cancelling);
     cancelButton.disabled = !connected || cancelling || !status || !status.taskId ||
       !bridgeCapabilities.has('projectTaskCancel');
@@ -499,7 +765,9 @@
     $('#currentTaskProgress').style.width = running ? '' : (status && status.finishedAt ? '100%' : '0');
     $('#currentTaskStore').textContent = status && status.storeName || '尚未启动';
     $('#currentTaskState').textContent = status
-      ? (status.cancelled ? '已取消' : cancelling ? '正在取消' : waitingForVerification ? '等待验证' : running ? '执行中' : status.error || status.status === 'failed'
+      ? (status.cancelled ? '已取消' : cancelling ? '正在取消' : waitingForVerification
+        ? (status.waitingForLogin ? '等待登录' : '等待验证')
+        : running ? '执行中' : status.error || status.status === 'failed'
         ? '失败'
         : status.status === 'partial' ? '部分成功' : '已完成')
       : '等待开始';
@@ -512,6 +780,7 @@
     $('#currentTaskFinishedAt').textContent = status && status.finishedAt ? formatDate(status.finishedAt) : '-';
     $('#openLatestTaskBtn').hidden = !(status && status.archiveRunId && !active);
     $('#openLatestTaskBtn').dataset.runId = status && status.archiveRunId || '';
+    renderPgyClassificationSetup(false);
   }
 
   function renderLogs() {
@@ -557,10 +826,10 @@
         })),
       ]);
       const source = stored && stored[DIRECTORY_KEY] || {};
-      directory = {
+      directory = Object.assign({}, source, {
         storeGroups: Array.isArray(source.storeGroups) ? source.storeGroups.slice() : [],
         stores: Array.isArray(source.stores) ? source.stores.slice() : [],
-      };
+      });
       runs = Array.isArray(stored && stored[RUN_INDEX_KEY]) ? stored[RUN_INDEX_KEY] : [];
       taskStatus = stored && stored[TASK_STATUS_KEY] || null;
       batchStatus = stored && stored[BATCH_STATUS_KEY] || null;
@@ -588,6 +857,9 @@
 
   async function startBatch(resume) {
     if (!connected) throw new Error('数据助手未连接。');
+    if (currentTaskStarting || taskStatus && (taskStatus.running || taskStatus.cancelling)) {
+      throw new Error('单店一键取数正在启动或执行，请稍后再启动批量任务。');
+    }
     if (!accountSession.unlocked) throw new Error('请先在账号库管理中解锁一次，本次 Chrome 会话内无需重复解锁。');
     if (!batchMultiSelectSupported()) throw new Error('请在扩展管理页重新加载最新版数据助手后再使用组内多选。');
     let accountCount = selectedBatchAccountCount();
@@ -619,55 +891,64 @@
   }
 
   async function startCurrentTask() {
-    const store = storeById(selectedStoreId);
-    if (!store) throw new Error('请先选择本次任务归属的店铺。');
-    if (!connected) throw new Error('数据助手未连接。');
-    const platforms = selectedPlatforms('current');
-    if (!platforms.length) throw new Error('请至少选择一个平台任务。');
-    validatePlatformCapabilities(platforms);
-    const credentialMode = selectedCredentialMode();
-    if (credentialMode === 'vault' && !accountSession.unlocked) {
-      throw new Error('请先在账号库管理中解锁一次，再使用账号库自动登录。');
-    }
-    const hasXhs = platforms.some((platform) => ['adstar', 'pgy', 'juguang'].includes(platform));
-    const juguangConcurrentTabs = Number($('#juguangConcurrentTabs') && $('#juguangConcurrentTabs').value);
-    const dateRange = {
-      from: $('#xhsDateFrom').value,
-      to: $('#xhsDateTo').value,
-      timezone: 'Asia/Shanghai',
-    };
-    if (hasXhs && (!dateRange.from || !dateRange.to || dateRange.from > dateRange.to)) {
-      throw new Error('请选择有效的小红书开始和结束日期。');
-    }
-    const loginDescription = credentialMode === 'vault'
-      ? '使用账号库中该店铺的默认淘宝与小红书账号自动登录'
-      : '复用当前 Chrome 已登录账号';
-    if (!window.confirm(loginDescription + '，并为“' + store.name + '”执行一键取数？')) return;
-    taskStatus = {
-      taskType,
-      runMode: 'current',
-      storeId: store.id,
-      storeName: store.name,
-      running: true,
-      startedAt: Date.now(),
-      phase: '正在启动任务',
-      platforms,
-      credentialMode,
-    };
+    if (currentTaskStarting) return;
+    currentTaskStarting = true;
     renderStatus();
-    setNotice('任务已提交，后台页面会自动打开并执行。');
-    const response = await request('startProjectTask', {
-      taskType,
-      platforms,
-      credentialMode,
-      dateRange,
-      concurrentAccountTabs: platforms.includes('juguang') && [2, 3].includes(juguangConcurrentTabs)
-        ? juguangConcurrentTabs
-        : undefined,
-      store: { id: store.id, name: store.name, groupId: store.groupId || '', groupName: groupName(store.groupId) },
-    }, 30000);
-    if (!response || response.ok === false) throw new Error(response && response.message || '任务启动失败。');
-    setTimeout(refresh, 350);
+    try {
+      const store = storeById(selectedStoreId);
+      if (!store) throw new Error('请先选择本次任务归属的店铺。');
+      if (!connected) throw new Error('数据助手未连接。');
+      const platforms = selectedPlatforms('current');
+      if (!platforms.length) throw new Error('请至少选择一个平台任务。');
+      validatePlatformCapabilities(platforms);
+      const credentialMode = selectedCredentialMode();
+      if (credentialMode === 'vault' && !accountSession.unlocked) {
+        throw new Error('请先在账号库管理中解锁一次，再使用账号库自动登录。');
+      }
+      const hasXhs = platforms.some((platform) => ['adstar', 'pgy', 'juguang'].includes(platform));
+      const juguangConcurrentTabs = Number($('#juguangConcurrentTabs') && $('#juguangConcurrentTabs').value);
+      const dateRange = {
+        from: $('#xhsDateFrom').value,
+        to: $('#xhsDateTo').value,
+        timezone: 'Asia/Shanghai',
+      };
+      if (hasXhs && (!dateRange.from || !dateRange.to || dateRange.from > dateRange.to)) {
+        throw new Error('请选择有效的小红书开始和结束日期。');
+      }
+      const loginDescription = credentialMode === 'vault'
+        ? '使用账号库中该店铺的默认淘宝与小红书账号自动登录'
+        : '复用当前 Chrome 已登录账号';
+      if (!window.confirm(loginDescription + '，并为“' + store.name + '”执行一键取数？')) return;
+      await persistPgyClassificationBeforeStart(store, platforms);
+      taskStatus = {
+        taskType,
+        runMode: 'current',
+        storeId: store.id,
+        storeName: store.name,
+        running: true,
+        startedAt: Date.now(),
+        phase: '正在启动任务',
+        platforms,
+        credentialMode,
+      };
+      renderStatus();
+      setNotice('任务已提交，后台页面会自动打开并执行。');
+      const response = await request('startProjectTask', {
+        taskType,
+        platforms,
+        credentialMode,
+        dateRange,
+        concurrentAccountTabs: platforms.includes('juguang') && [2, 3].includes(juguangConcurrentTabs)
+          ? juguangConcurrentTabs
+          : undefined,
+        store: { id: store.id, name: store.name, groupId: store.groupId || '', groupName: groupName(store.groupId) },
+      }, 30000);
+      if (!response || response.ok === false) throw new Error(response && response.message || '任务启动失败。');
+      setTimeout(refresh, 350);
+    } finally {
+      currentTaskStarting = false;
+      renderStatus();
+    }
   }
 
   async function cancelCurrentTask() {
@@ -770,11 +1051,30 @@
       if (activeMode === 'batch') refresh();
     });
   });
-  $('#taskGroupSelect').addEventListener('change', () => { selectedStoreId = ''; renderStoreOptions(); });
-  $('#taskStoreSelect').addEventListener('change', (event) => {
-    selectedStoreId = event.currentTarget.value;
+  $('#taskGroupSelect').addEventListener('change', () => {
+    selectedStoreId = '';
+    syncSelectedStoreQuery();
+    renderStoreOptions();
+    renderPgyClassificationSetup(true);
     renderStatus();
   });
+  $('#taskStoreSelect').addEventListener('change', (event) => {
+    selectedStoreId = event.currentTarget.value;
+    syncSelectedStoreQuery();
+    renderPgyClassificationSetup(true);
+    renderStatus();
+  });
+  const pgyClassificationForm = $('#pgyClassificationForm');
+  if (pgyClassificationForm) {
+    pgyClassificationForm.addEventListener('input', rememberPgyClassificationDraft);
+  }
+  const pgyClassificationTemplate = $('#pgyClassificationTemplate');
+  if (pgyClassificationTemplate) {
+    pgyClassificationTemplate.addEventListener('change', () => {
+      rememberPgyClassificationDraft();
+      syncPgyClassificationTemplateFields();
+    });
+  }
   $('#startCurrentTaskBtn').addEventListener('click', () => {
     startCurrentTask().catch((error) => { setNotice(error.message, 'error'); refresh(); });
   });
@@ -813,6 +1113,7 @@
       if ($('#pageNotice').textContent === '请至少选择一个平台任务。' && selectedPlatforms(mode).length) {
         setNotice('', '');
       }
+      if (mode === 'current') renderPgyClassificationSetup(false);
       renderBatchControls();
       renderStatus();
     });
@@ -835,6 +1136,7 @@
     const button = event.target.closest('[data-run-action]');
     if (button) handleRunAction(button).catch((error) => setNotice(error.message, 'error'));
   });
+  renderPgyClassificationSetup(false);
   initializeXhsDateRange();
   Promise.resolve(window.TaobaoCloudSync && window.TaobaoCloudSync.ready)
     .catch(() => null)

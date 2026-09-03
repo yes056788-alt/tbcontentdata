@@ -111,6 +111,15 @@
     return normalized > 0 && normalized <= 1 ? normalized : null;
   }
 
+  function normalizedRate(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const text = String(value).trim();
+    const number = Number(text.replace(/[,，%\s]/g, ''));
+    if (!Number.isFinite(number) || number < 0) return null;
+    const normalized = text.includes('%') || number > 1 ? number / 100 : number;
+    return normalized >= 0 && normalized <= 1 ? normalized : null;
+  }
+
   function normalizePgySpus(value) {
     const source = array(value);
     const seen = new Set();
@@ -126,6 +135,45 @@
       seen.add(key);
       return true;
     });
+  }
+
+  function compactPgySearchKeywordEvidence(value) {
+    const source = isObject(value) ? value : {};
+    const hasKeywords = Object.prototype.hasOwnProperty.call(source, 'searchKeywords');
+    const hasStatus = Object.prototype.hasOwnProperty.call(source, 'searchKeywordFetchStatus');
+    const hasErrorCode = Object.prototype.hasOwnProperty.call(source, 'searchKeywordErrorCode');
+    if (!hasKeywords && !hasStatus && !hasErrorCode) return {};
+    const searchKeywords = array(source.searchKeywords).map((item) => {
+      const row = isObject(item) ? item : {};
+      const keyword = cleanIdentifier(row.keyword);
+      if (!keyword) return null;
+      const rawSearchScore = numberValue(row.searchScore);
+      const rawImpressions = numberValue(row.impressions);
+      const rawReads = numberValue(row.reads);
+      return {
+        keyword,
+        ...(rawSearchScore !== null && rawSearchScore >= 0
+          ? { searchScore: rawSearchScore }
+          : {}),
+        impressions: rawImpressions !== null && rawImpressions >= 0 ? rawImpressions : null,
+        reads: rawReads !== null && rawReads >= 0 ? rawReads : null,
+        clickRate: normalizedRate(row.clickRate),
+      };
+    }).filter(Boolean);
+    const requestedStatus = String(source.searchKeywordFetchStatus || '');
+    const searchKeywordFetchStatus = ['complete', 'empty', 'failed'].includes(requestedStatus)
+      ? requestedStatus
+      : searchKeywords.length ? 'complete' : 'empty';
+    const errorCode = cleanIdentifier(source.searchKeywordErrorCode);
+    const searchKeywordErrorCode = errorCode && /^[A-Za-z0-9_:-]{1,128}$/.test(errorCode)
+      ? errorCode
+      : null;
+    return Object.assign(
+      { searchKeywords, searchKeywordFetchStatus },
+      searchKeywordFetchStatus === 'failed' && searchKeywordErrorCode
+        ? { searchKeywordErrorCode }
+        : {}
+    );
   }
 
   function normalizedRange(value) {
@@ -325,7 +373,7 @@
       const platformFee = numberOrZero(
         costs.platformFee !== undefined ? costs.platformFee : source.totalPlatformPrice
       );
-      return {
+      const fact = {
         noteId,
         sourceKey: String(source.sourceKey || source.bizId || noteId),
         title: source.title == null ? String(source.noteTitle || '') : String(source.title),
@@ -410,6 +458,7 @@
           ),
         },
       };
+      return Object.assign(fact, compactPgySearchKeywordEvidence(source));
     }).filter((fact) => fact.noteId);
   }
 
@@ -1312,6 +1361,7 @@
       return {
         noteId: note && note.noteId == null ? null : String(note.noteId),
         title: note && note.title || null,
+        noteUrl: note && note.noteUrl || null,
         publishDate: canonicalDate(note && note.publishDate),
         projectIds: projectIds.slice(),
         candidateOrderIds: candidates.map((candidate) => String(candidate.id)),
@@ -1326,6 +1376,7 @@
       return {
         noteId: String(note.noteId),
         title: note.title || null,
+        noteUrl: note.noteUrl || null,
         publishDate: canonicalDate(note.publishDate),
         metrics: isObject(note.star && note.star.metrics) ? { ...note.star.metrics } : null,
         costs,

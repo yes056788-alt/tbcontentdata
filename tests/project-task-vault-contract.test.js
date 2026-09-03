@@ -97,6 +97,8 @@ function createHarness(options = {}) {
   const freshAuthorizationCalls = [];
   const verificationWaits = [];
   const activatedTabs = [];
+  const createdTabs = [];
+  const removedTabs = [];
   const taobaoGate = deferred();
   const xhsGate = deferred();
   const reportGate = deferred();
@@ -167,6 +169,8 @@ function createHarness(options = {}) {
     STORE_RUN_INDEX_KEY,
     STORE_RUN_KEY_PREFIX,
     XHS_PLATFORM_TASK_IDS: ['adstar', 'pgy', 'juguang'],
+    BUSINESS_DEFENSE_XINGHE_URL: 'https://adstar.alimama.com/portal/v2/pages/myAdstar/order/list.htm',
+    XHS_PLATFORM_ENTRY_URLS: accountLogin.XHS_PLATFORM_ENTRY_URLS,
     XhsAccountLogin: loginApi,
     XhsMetrics: {
       analysisDetailKeys() { return []; },
@@ -222,9 +226,28 @@ function createHarness(options = {}) {
         },
       },
       tabs: {
+        async create(details) {
+          const url = String(details && details.url || '');
+          const platform = /adstar\.alimama\.com/i.test(url)
+            ? 'adstar'
+            : (/pgy\.xiaohongshu\.com/i.test(url) ? 'pgy' : 'juguang');
+          const configured = options.freshTaskTabIds ||
+            options.currentSessionTaskOwnedTabIds || {};
+          const fallback = { adstar: 11, pgy: 21, juguang: 22 };
+          const tabId = Number(configured[platform] || fallback[platform]);
+          if (options.tabCreateFailurePlatform === platform) {
+            throw new Error(platform + ' fixture tab creation failed');
+          }
+          createdTabs.push({ platform, tabId, details: copy(details) });
+          return { id: tabId, status: 'loading', url };
+        },
         async update(tabId, update) {
           activatedTabs.push({ tabId, update: copy(update) });
           return { id: tabId, ...copy(update) };
+        },
+        async remove(tabIds) {
+          const ids = (Array.isArray(tabIds) ? tabIds : [tabIds]).map(Number);
+          removedTabs.push(...ids);
         },
       },
     },
@@ -365,7 +388,18 @@ function createHarness(options = {}) {
         platforms: Array.from(platforms || []),
         options: preflightOptions,
       });
-      return { taskOwnedTabIds: {}, platforms: {} };
+      const taskOwnedTabIds = copy(
+        preflightOptions && preflightOptions.taskOwnedTabIds ||
+        options.currentSessionTaskOwnedTabIds ||
+        {},
+      );
+      return {
+        taskOwnedTabIds,
+        platforms: Object.fromEntries(Object.entries(taskOwnedTabIds).map(([platform, tabId]) => [
+          platform,
+          { ok: true, state: 'productReady', tabId },
+        ])),
+      };
     },
     async waitForProjectVerification(error, waitOptions) {
       const entry = { error, options: waitOptions };
@@ -436,6 +470,7 @@ function createHarness(options = {}) {
   return {
     activatedTabs,
     context,
+    createdTabs,
     credentialPlans,
     currentSessionPreflights,
     events,
@@ -446,6 +481,7 @@ function createHarness(options = {}) {
     localWrites,
     reportCalls,
     reportGate,
+    removedTabs,
     sessionReads,
     sessionState,
     taobaoGate,
@@ -502,6 +538,13 @@ test('vault mode resolves the selected store before local mutation and prepares 
   assert.equal(harness.xhsLogins[0].account.id, 'xhs-1');
   assert.equal(typeof harness.xhsLogins[0].options.assertCredentialAuthorization, 'function');
   assert.deepEqual(Array.from(harness.xhsLogins[0].options.platforms), ['pgy', 'juguang']);
+  assert.equal(harness.taobaoLogins[0].options.taskOwnedTabId, 11);
+  assert.equal(harness.taobaoLogins[0].options.allowExistingSession, true);
+  assert.deepEqual(copy(harness.xhsLogins[0].options.taskOwnedTabIds), {
+    pgy: 21,
+    juguang: 22,
+  });
+  assert.equal(harness.xhsLogins[0].options.allowExistingSession, true);
 
   harness.taobaoGate.resolve();
   await waitFor(
@@ -528,6 +571,17 @@ test('vault mode resolves the selected store before local mutation and prepares 
   assert.equal(harness.xhsLogins.length, 1);
   assert.ok(harness.events.indexOf('login:xhs:start') < harness.events.indexOf('login:taobao:complete'));
   assert.ok(harness.events.indexOf('login:xhs:complete') < harness.events.indexOf('report:start'));
+  assert.deepEqual(copy(harness.reportCalls[0].taskOwnedTabIds), {
+    adstar: 11,
+    pgy: 21,
+    juguang: 22,
+  });
+  assert.deepEqual(harness.createdTabs.map((entry) => entry.platform), [
+    'adstar',
+    'pgy',
+    'juguang',
+  ]);
+  assert.deepEqual(harness.removedTabs.slice().sort((left, right) => left - right), [11, 21, 22]);
 
   const resolvedIndex = harness.events.indexOf('credentials:resolved:store-1');
   const firstLocalMutation = harness.events.findIndex((event) => event.startsWith('local:'));
@@ -858,7 +912,9 @@ test('locking while credential preflight is pending prevents every vault login a
 });
 
 test('currentSession mode skips vault reads and login preparation', async () => {
-  const harness = createHarness();
+  const harness = createHarness({
+    currentSessionTaskOwnedTabIds: { adstar: 31, pgy: 32, juguang: 33 },
+  });
   const running = harness.context.runProjectTaskUnderTest(projectPayload('currentSession'), {
     taskId: 'project-task-current-session-contract',
   });
@@ -873,6 +929,11 @@ test('currentSession mode skips vault reads and login preparation', async () => 
   assert.equal(harness.xhsLogins.length, 0);
   assert.equal(harness.reportCalls.length, 1);
   assert.deepEqual(Array.from(harness.reportCalls[0].platforms), ['adstar', 'pgy', 'juguang']);
+  assert.deepEqual(copy(harness.reportCalls[0].taskOwnedTabIds), {
+    adstar: 31,
+    pgy: 32,
+    juguang: 33,
+  });
 });
 
 test('currentSession collection verification waits sequentially and then completes the same report task', async () => {
@@ -938,6 +999,25 @@ test('cancelling currentSession while collection verification waits never resume
   assert.equal(Object.keys(harness.localState).some((key) => key.startsWith(STORE_RUN_KEY_PREFIX)), false);
   assert.equal(harness.localState[PROJECT_TASK_STATUS_KEY].waitingForVerification, false);
   assert.equal(harness.localState[PROJECT_TASK_STATUS_KEY].status, 'cancelled');
+  assert.deepEqual(harness.removedTabs.slice().sort((left, right) => left - right), [11, 21, 22]);
+});
+
+test('a later fresh-tab creation failure closes only tabs already created by this task', async () => {
+  const harness = createHarness({
+    tabCreateFailurePlatform: 'pgy',
+    enableCancellationSemantics: true,
+  });
+
+  await assert.rejects(
+    harness.context.runProjectTaskUnderTest(projectPayload('currentSession'), {
+      taskId: 'project-task-tab-create-failure',
+    }),
+    /pgy fixture tab creation failed/,
+  );
+
+  assert.deepEqual(harness.createdTabs.map((entry) => entry.platform), ['adstar']);
+  assert.deepEqual(harness.removedTabs, [11]);
+  assert.equal(harness.reportCalls.length, 0);
 });
 
 test('missing or invalid credential mode fails closed before any task mutation', async (t) => {

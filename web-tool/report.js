@@ -11,6 +11,7 @@
   const WXT_KEY = 'taobaoContentDiagnosisWxtReportV1';
   const XHS_STATUS_KEY = 'xhsCollectionStatusV1';
   const XHS_ANALYSIS_KEY = 'xhsAnalysisSnapshotV1';
+  const PROJECT_DIRECTORY_KEY = 'taobaoProjectDirectoryV1';
   const XHS_DETAIL_KEY_PREFIX = 'xhsAnalysisDetailChunkV1:';
   const STORAGE_KEYS = [STATUS_KEY, REPORT_KEY, WXT_KEY, XHS_STATUS_KEY, XHS_ANALYSIS_KEY];
   const SEARCH_PARAMS = new URLSearchParams(location.search);
@@ -53,6 +54,33 @@
     'complete', 'verified_no_spend', 'partial', 'failed', 'cancelled', 'missing',
   ]);
   const XHS_VIEWABLE_PLATFORM_STATUSES = new Set(['complete', 'verified_no_spend', 'partial']);
+  const XHS_PGY_SEARCH_DIMENSIONS = Object.freeze([
+    { key: 'commercialCategory', label: '商业分类', allLabel: '全部商业分类' },
+    { key: 'relevance', label: '品类相关度', allLabel: '全部相关度' },
+    { key: 'intent', label: '搜索意图', allLabel: '全部搜索意图' },
+  ]);
+  const XHS_COMMERCIAL_CORRECTION = Object.freeze({
+    own_brand: Object.freeze({ entityRelation: 'own_brand', topicTagId: '' }),
+    competitor: Object.freeze({ entityRelation: 'competitor', topicTagId: '' }),
+    own_product: Object.freeze({ entityRelation: 'own_product', topicTagId: '' }),
+    need_pain_point: Object.freeze({ entityRelation: 'generic_category', topicTagId: 'need_pain_point' }),
+    core_category: Object.freeze({ entityRelation: 'generic_category', topicTagId: 'core_category' }),
+    adjacent_category: Object.freeze({ entityRelation: 'generic_category', topicTagId: 'adjacent_category' }),
+    industry_interest: Object.freeze({ entityRelation: 'generic_category', topicTagId: 'industry_interest' }),
+    unrelated: Object.freeze({ entityRelation: 'generic_category', topicTagId: 'unrelated' }),
+    unknown: Object.freeze({ entityRelation: 'unknown', topicTagId: '' }),
+  });
+  const XHS_RELEVANCE_CORRECTION = Object.freeze({
+    '强相关': 'strong', '中相关': 'medium', '弱相关': 'weak',
+    '无关': 'none', '待确认': 'review',
+  });
+  const XHS_INTENT_CORRECTION = Object.freeze({
+    '购买决策': 'purchase_decision', '对比评估': 'comparison',
+    '问题解决': 'problem_solving', '使用方法': 'usage', '使用/喂养': 'usage',
+    '使用/养护': 'usage', '服用/使用': 'usage', '品牌/产品查找': 'brand_product_lookup',
+    '品类探索': 'category_exploration', '兴趣浏览': 'interest_browsing',
+    '意图不明确': 'unclear',
+  });
 
   function isXhsDetailKey(value) {
     const key = String(value == null ? '' : value);
@@ -175,6 +203,7 @@
   let wxtReport = null;
   let xhsStatus = {};
   let xhsAnalysis = null;
+  let projectDirectory = { stores: [] };
   let archiveRun = null;
   let activeSection = 'flow';
   let guangheView = 'channel';
@@ -201,8 +230,19 @@
   let xhsPgyDateRange = { from: '', to: '' };
   let xhsPgySpuName = '';
   let xhsPgyProjectName = '';
+  let xhsPgySearchFilters = {
+    commercialCategory: '', relevance: '', intent: '',
+    classificationSource: '', reviewRequired: null,
+  };
   let xhsPgyNoteExpanded = false;
   let xhsPgySnapshotKey = '';
+  let xhsClassificationRunning = false;
+  let xhsClassificationRerunRequested = false;
+  let xhsClassificationRerunForce = false;
+  let xhsClassificationAttemptKey = '';
+  let xhsClassificationErrorCode = '';
+  let xhsClassificationArchiveSaveFailed = false;
+  let xhsClassificationCorrectionKeyword = '';
   const pendingRequests = new Map();
   const expanded = {
     channel: new Set(),
@@ -308,7 +348,9 @@
     }
     if (message.type === 'storageChanged') {
       updateConnection(true, message.version || '', '', message.capabilities);
-      if (!BUILDER_MODE && (message.keys || []).some((key) => STORAGE_KEYS.includes(key))) scheduleLoad();
+      if (!BUILDER_MODE && (message.keys || []).some((key) => (
+        STORAGE_KEYS.includes(key) || key === PROJECT_DIRECTORY_KEY
+      ))) scheduleLoad();
       return;
     }
     if (message.type !== 'response' || !message.requestId) return;
@@ -335,18 +377,25 @@
   async function loadReport() {
     try {
       if (ARCHIVE_RUN_ID) {
-        const response = await requestBridge('getStoreRun', { runId: ARCHIVE_RUN_ID }, 45000);
+        const [response, directoryStored] = await Promise.all([
+          requestBridge('getStoreRun', { runId: ARCHIVE_RUN_ID }, 45000),
+          requestBridge('getStorage', { keys: [PROJECT_DIRECTORY_KEY] }, 30000),
+        ]);
+        projectDirectory = xhsObject(directoryStored && directoryStored[PROJECT_DIRECTORY_KEY]);
         const run = response && response.run;
         if (!run || typeof run !== 'object' || run.runId !== ARCHIVE_RUN_ID) {
           throw new Error('未找到这条店铺历史归档。');
         }
         applyArchiveRun(run);
       } else {
-        const stored = await requestBridge('getStorage', { keys: STORAGE_KEYS }, 30000);
+        const stored = await requestBridge('getStorage', {
+          keys: STORAGE_KEYS.concat(PROJECT_DIRECTORY_KEY),
+        }, 30000);
         reportStatus = stored && stored[STATUS_KEY] || {};
         reportData = stored && stored[REPORT_KEY] || null;
         wxtReport = stored && stored[WXT_KEY] || null;
         xhsStatus = stored && stored[XHS_STATUS_KEY] || {};
+        projectDirectory = xhsObject(stored && stored[PROJECT_DIRECTORY_KEY]);
         const baseAnalysis = stored && stored[XHS_ANALYSIS_KEY] || null;
         const detailKeys = xhsDetailKeys(baseAnalysis);
         const detailValues = detailKeys.length
@@ -357,6 +406,7 @@
       }
       if (reportStatus.running || reportStatus.finishedAt || reportStatus.error) transientNotice = '';
       render();
+      scheduleXhsSearchClassification();
     } catch (error) {
       updateConnection(false, '', error.message);
       document.getElementById('reportNotice').textContent = error.message;
@@ -563,7 +613,7 @@
       return XHS_VIEWABLE_PLATFORM_STATUSES.has(status);
     }
     if (section === 'xiaohongshu') return validXhsAnalysisSnapshot();
-    if (section === 'flow') return Boolean(reportData && reportData.sycm && reportData.guanghe);
+    if (section === 'flow') return Boolean(reportData && reportData.sycm);
     if (section === 'guanghe') return Boolean(reportData && reportData.guanghe);
     if (section === 'wxt') return Boolean(validWxtSnapshot() && wxtReport.marketing && wxtReport.marketing.ok);
     if (section === 'shortVideo') {
@@ -1186,6 +1236,45 @@
     return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
   }
 
+  function currentXhsStore(analysis) {
+    const storeId = String(analysis && analysis.storeId ||
+      archiveRun && archiveRun.account && archiveRun.account.storeId || '');
+    return xhsArray(projectDirectory && projectDirectory.stores).find((store) => (
+      String(store && store.id || '') === storeId
+    )) || null;
+  }
+
+  function currentXhsStoreClassification(analysis) {
+    const store = currentXhsStore(analysis);
+    return xhsObject(store && store.classification);
+  }
+
+  function xhsPgyClassificationOptions(analysis, archivedPgy) {
+    const storeClassification = currentXhsStoreClassification(analysis);
+    const configuredProfile = String(storeClassification.profileId || '');
+    const archivedProfile = String(archivedPgy && archivedPgy.searchKeywordProfile &&
+      archivedPgy.searchKeywordProfile.id || '');
+    const supportedProfiles = [
+      'sheba-cat-food-v1', 'home-furnishing-v1', 'health-supplements-v1',
+      'cross-industry-generic-v1',
+    ];
+    const profileId = supportedProfiles.includes(configuredProfile)
+      ? configuredProfile
+      : archivedProfile;
+    const hasStoreConfiguration = Boolean(
+      currentXhsStore(analysis) && currentXhsStore(analysis).classification
+    );
+    return {
+      profileId,
+      ownBrandTerms: xhsArray(storeClassification.ownBrandTerms),
+      ownProductTerms: xhsArray(storeClassification.ownProductTerms),
+      competitorTerms: xhsArray(storeClassification.competitorTerms),
+      factsConfigured: hasStoreConfiguration,
+      classificationArchive: xhsObject(archivedPgy && archivedPgy.searchClassification),
+      scopeKey: analysis && analysis.storeId ? 'store:' + String(analysis.storeId) : '*',
+    };
+  }
+
   function xhsPgySnapshotIdentity(analysis, pgy) {
     const facts = Array.isArray(pgy.facts) ? pgy.facts : null;
     const defaultRange = normalizedXhsPgyDateRange(
@@ -1215,6 +1304,10 @@
       );
       xhsPgySpuName = '';
       xhsPgyProjectName = '';
+      xhsPgySearchFilters = {
+        commercialCategory: '', relevance: '', intent: '',
+        classificationSource: '', reviewRequired: null,
+      };
       xhsPgyNoteExpanded = false;
     }
     return { ...xhsPgyDateRange };
@@ -1226,6 +1319,7 @@
       window.XhsReportModel && typeof window.XhsReportModel.aggregatePgyFacts === 'function'
     );
     const dateRange = currentXhsPgyDateRange(analysis, archivedPgy);
+    const classificationOptions = xhsPgyClassificationOptions(analysis, archivedPgy);
     let summary = archivedPgy;
     let aggregationError = '';
     if (factsAvailable && modelAvailable) {
@@ -1235,6 +1329,7 @@
           dateRange,
           spuName: xhsPgySpuName,
           asOf: currentShanghaiDate(),
+          searchClassification: classificationOptions,
         };
         summary = window.XhsReportModel.aggregatePgyFacts(input);
         if (['partial', 'unavailable'].includes(String(archivedPgy.coverage || ''))) {
@@ -1257,9 +1352,289 @@
       spuName: xhsPgySpuName,
       factsAvailable,
       modelAvailable,
+      classificationOptions,
       coverage: String(archivedPgy.coverage || ''),
       summary: xhsObject(summary),
     };
+  }
+
+  function xhsClassificationIdentity(analysis, pgy) {
+    const configuration = currentXhsStoreClassification(analysis);
+    return [
+      analysis && analysis.runId,
+      analysis && analysis.storeId,
+      pgy && pgy.collectedAt,
+      configuration && configuration.revision,
+      configuration && configuration.updatedAt,
+    ].map((value) => String(value == null ? '' : value)).join('|');
+  }
+
+  function normalizedXhsClassificationKeyword(value) {
+    return String(value == null ? '' : value).normalize('NFKC').trim()
+      .replace(/\s+/gu, ' ').toLocaleLowerCase('zh-CN').slice(0, 160);
+  }
+
+  function xhsCommercialCorrectionId(rowValue) {
+    const row = xhsObject(rowValue);
+    const classification = xhsObject(row.classificationV2);
+    const entity = String(xhsObject(classification.entity).relation || '');
+    if (['own_brand', 'competitor', 'own_product'].includes(entity)) return entity;
+    const topicId = String(xhsObject(xhsArray(classification.topicTags)[0]).id || '');
+    if (Object.prototype.hasOwnProperty.call(XHS_COMMERCIAL_CORRECTION, topicId)) return topicId;
+    const commercial = String(row.commercialCategory || '');
+    return {
+      '自有品牌词': 'own_brand',
+      '竞品词': 'competitor',
+      '自有产品词': 'own_product',
+      '品类需求词': 'need_pain_point',
+      '核心品类词': 'core_category',
+      '邻近品类/场景': 'adjacent_category',
+      '无关词': 'unrelated',
+      '待确认': 'unknown',
+    }[commercial] || (commercial.startsWith('泛') ? 'industry_interest' : 'unknown');
+  }
+
+  function currentXhsSearchKeywordRow(keyword) {
+    const analysis = xhsObject(xhsAnalysis);
+    const pgy = xhsObject(analysis.pgy);
+    try {
+      const view = xhsPgyReportView(analysis, pgy);
+      return xhsArray(xhsPgySearchKeywordSummary(view).searchKeywords).find((row) => (
+        String(row && row.keyword || '') === String(keyword || '')
+      )) || null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function openXhsKeywordCorrection(keyword) {
+    const dialog = document.getElementById('xhsClassificationCorrectionDialog');
+    const form = dialog && dialog.querySelector('[data-xhs-classification-correction-form]');
+    if (!dialog || !form) return;
+    const row = currentXhsSearchKeywordRow(keyword);
+    xhsClassificationCorrectionKeyword = String(keyword || '').slice(0, 160);
+    const keywordNode = dialog.querySelector('[data-xhs-classification-correction-keyword]');
+    const errorNode = dialog.querySelector('[data-xhs-classification-correction-error]');
+    if (keywordNode) keywordNode.textContent = xhsClassificationCorrectionKeyword || '未命名关键词';
+    if (errorNode) errorNode.textContent = '';
+    const commercialControl = form.elements.namedItem('commercialCategory');
+    const relevanceControl = form.elements.namedItem('relevance');
+    const intentControl = form.elements.namedItem('intent');
+    const reasonControl = form.elements.namedItem('reason');
+    if (commercialControl) commercialControl.value = xhsCommercialCorrectionId(row);
+    const classification = xhsObject(row && row.classificationV2);
+    const relevanceId = String(xhsObject(classification.relevance).id || '') ||
+      XHS_RELEVANCE_CORRECTION[String(row && row.relevance || '')] || 'review';
+    const primaryIntent = xhsArray(classification.intents).find((intent) => (
+      intent && intent.isPrimary === true
+    )) || xhsArray(classification.intents)[0];
+    const intentId = String(primaryIntent && primaryIntent.id || '') ||
+      XHS_INTENT_CORRECTION[String(row && row.intent || '')] || 'unclear';
+    if (relevanceControl) relevanceControl.value = relevanceId;
+    if (intentControl) intentControl.value = intentId;
+    if (reasonControl) reasonControl.value = '';
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  }
+
+  function closeXhsKeywordCorrection() {
+    const dialog = document.getElementById('xhsClassificationCorrectionDialog');
+    if (!dialog) return;
+    xhsClassificationCorrectionKeyword = '';
+    if (typeof dialog.close === 'function') dialog.close();
+    else dialog.removeAttribute('open');
+  }
+
+  async function saveXhsKeywordCorrection(form) {
+    const analysis = xhsObject(xhsAnalysis);
+    const store = currentXhsStore(analysis);
+    if (!store) throw new Error('未找到当前店铺，无法保存人工分类。');
+    const keyword = String(xhsClassificationCorrectionKeyword || '').slice(0, 160);
+    const normalizedKeyword = normalizedXhsClassificationKeyword(keyword);
+    if (!normalizedKeyword) throw new Error('关键词为空，无法保存。');
+    const commercialId = String(form.elements.namedItem('commercialCategory').value || '');
+    const commercial = XHS_COMMERCIAL_CORRECTION[commercialId];
+    const relevance = String(form.elements.namedItem('relevance').value || '');
+    const intentId = String(form.elements.namedItem('intent').value || '');
+    if (!commercial || !['strong', 'medium', 'weak', 'none', 'review'].includes(relevance) ||
+        !['purchase_decision', 'comparison', 'problem_solving', 'usage',
+          'brand_product_lookup', 'category_exploration', 'interest_browsing', 'unclear'].includes(intentId)) {
+      throw new Error('请为三个维度各选择一个有效标签。');
+    }
+    const topicTagId = commercial.topicTagId;
+    const scopeKey = analysis.storeId ? 'store:' + String(analysis.storeId) : '*';
+    const reasonControl = form.elements.namedItem('reason');
+    const reason = String(reasonControl && reasonControl.value || '').trim().slice(0, 160);
+    const now = Date.now();
+    const oldClassification = xhsObject(store.classification);
+    const oldOverrides = xhsArray(oldClassification.manualOverrides);
+    const manualOverride = {
+      id: 'manual:' + xhsDetailHash(scopeKey + '|' + normalizedKeyword),
+      scopeKey,
+      keyword,
+      normalizedKeyword,
+      active: true,
+      reason: reason || '报告页人工纠正',
+      patch: {
+        entityRelation: commercial.entityRelation,
+        topicTagIds: topicTagId ? [topicTagId] : [],
+        intentIds: [intentId],
+        primaryIntentId: intentId,
+        relevance,
+      },
+      updatedAt: now,
+    };
+    const manualOverrides = oldOverrides.filter((item) => !(
+      normalizedXhsClassificationKeyword(item && (item.normalizedKeyword || item.keyword)) ===
+        normalizedKeyword && String(item && item.scopeKey || '*') === scopeKey
+    )).slice(-499).concat(manualOverride);
+    const classification = {
+      schema: 1,
+      profileId: String(oldClassification.profileId || 'auto').slice(0, 96),
+      customIndustry: String(oldClassification.customIndustry || '').slice(0, 120),
+      ownBrandTerms: xhsArray(oldClassification.ownBrandTerms).slice(0, 200),
+      ownProductTerms: xhsArray(oldClassification.ownProductTerms).slice(0, 200),
+      competitorTerms: xhsArray(oldClassification.competitorTerms).slice(0, 200),
+      semantic: { enabled: false },
+      manualOverrides,
+      revision: Math.min(2147483647, Math.max(0, Number(oldClassification.revision) || 0) + 1),
+      updatedAt: now,
+    };
+    const stores = xhsArray(projectDirectory && projectDirectory.stores).map((candidate) => (
+      String(candidate && candidate.id || '') === String(store.id || '')
+        ? { ...candidate, classification, updatedAt: new Date(now).toISOString() }
+        : candidate
+    ));
+    const nextDirectory = {
+      ...xhsObject(projectDirectory),
+      schema: 1,
+      stores,
+      updatedAt: now,
+    };
+    await requestBridge('setProjectDirectory', { directory: nextDirectory }, 45000);
+    projectDirectory = nextDirectory;
+    xhsClassificationAttemptKey = '';
+    closeXhsKeywordCorrection();
+    renderXhs();
+    await runXhsSearchClassification(true);
+  }
+
+  async function runXhsSearchClassification(force) {
+    if (xhsClassificationRunning) {
+      xhsClassificationRerunRequested = true;
+      xhsClassificationRerunForce = xhsClassificationRerunForce || Boolean(force);
+      return;
+    }
+    const analysis = xhsObject(xhsAnalysis);
+    const pgy = xhsObject(analysis.pgy);
+    const facts = xhsArray(pgy.facts);
+    const model = window.XhsReportModel;
+    const client = window.XhsSearchClassificationClient;
+    if (!facts.length || !model || !client ||
+        typeof model.aggregatePgySearchKeywords !== 'function' ||
+        typeof client.classifyRows !== 'function') return;
+    const classificationOptions = xhsPgyClassificationOptions(analysis, pgy);
+    const existingArchive = xhsObject(pgy.searchClassification);
+    xhsClassificationRunning = true;
+    xhsClassificationErrorCode = '';
+    xhsClassificationArchiveSaveFailed = false;
+    renderXhs();
+    try {
+      const rules = model.aggregatePgySearchKeywords(facts, {
+        ...classificationOptions,
+        classificationArchive: {},
+      });
+      const storeClassification = currentXhsStoreClassification(analysis);
+      const result = await client.classifyRows({
+        rows: xhsArray(rules.keywords),
+        storeClassification,
+        profileId: String(rules.profile && rules.profile.id ||
+          classificationOptions.profileId || 'cross-industry-generic-v1'),
+        scopeKey: classificationOptions.scopeKey,
+        archive: force ? null : existingArchive,
+        force: Boolean(force),
+        preferFrozenArchive: Boolean(ARCHIVE_RUN_ID && !force),
+        fetchImpl: window.fetch.bind(window),
+      });
+      pgy.searchClassification = result.archive;
+      analysis.pgy = pgy;
+      xhsAnalysis = analysis;
+      xhsClassificationErrorCode = String(result.modelErrorCode || '');
+      const archivePatch = {
+        runId: ARCHIVE_RUN_ID,
+        analysisRunId: String(analysis.runId || ''),
+        storeId: String(analysis.storeId || ''),
+        archive: result.archive,
+      };
+      let archiveSaved = false;
+      for (let attempt = 0; attempt < 3 && !archiveSaved; attempt += 1) {
+        try {
+          await requestBridge('patchXhsSearchClassification', archivePatch, 45000);
+          archiveSaved = true;
+        } catch (error) {
+          if (attempt < 2) {
+            await new Promise((resolve) => window.setTimeout(resolve, 300 * (attempt + 1)));
+          }
+        }
+      }
+      xhsClassificationArchiveSaveFailed = !archiveSaved;
+    } catch (error) {
+      xhsClassificationErrorCode = 'CLASSIFICATION_FAILED';
+    } finally {
+      const rerunRequested = xhsClassificationRerunRequested;
+      const rerunForce = xhsClassificationRerunForce;
+      xhsClassificationRerunRequested = false;
+      xhsClassificationRerunForce = false;
+      xhsClassificationRunning = false;
+      renderXhs();
+      if (rerunRequested) {
+        window.setTimeout(() => {
+          runXhsSearchClassification(rerunForce);
+        }, 0);
+      }
+    }
+  }
+
+  function scheduleXhsSearchClassification() {
+    if (BUILDER_MODE) return;
+    const analysis = xhsObject(xhsAnalysis);
+    const pgy = xhsObject(analysis.pgy);
+    if (!xhsArray(pgy.facts).length) return;
+    const existingSearchClassification = xhsObject(pgy.searchClassification);
+    const archivedClassificationReady = existingSearchClassification.schema ===
+        'xhsSearchClassificationArchiveV1' &&
+      Number(existingSearchClassification.schemaVersion) === 1 &&
+      Array.isArray(existingSearchClassification.entries);
+    const archivedEngine = xhsObject(existingSearchClassification.engine);
+    const archivedRulesetReady = String(archivedEngine.provider || '') === 'rules' &&
+      String(archivedEngine.rulesetVersion || '') === 'xhs-search-sheba-style-v3';
+    const archivedStatus = String(existingSearchClassification.status || '');
+    const archivedSemanticRun = xhsObject(existingSearchClassification.semanticRun);
+    const archivedErrorCode = String(archivedSemanticRun.errorCode || '');
+    const archivedCandidateCount = Math.max(0, Number(archivedSemanticRun.candidateCount) || 0);
+    const archivedAttemptedCount = Math.max(0, Number(archivedSemanticRun.attemptedCount) || 0);
+    const archivedNeedsReviewCount = xhsArray(existingSearchClassification.entries).filter((entry) => (
+      xhsObject(xhsObject(entry).effective).needsReview === true
+    )).length;
+    const terminalSemanticError = archivedErrorCode === 'MODEL_CANDIDATE_BUDGET_REACHED';
+    const archivedRulesOnlyFinal = archivedStatus === 'rules_only' && (
+      terminalSemanticError ||
+      (!archivedErrorCode && (
+        archivedAttemptedCount > 0 ||
+        (archivedCandidateCount === 0 && archivedNeedsReviewCount === 0)
+      ))
+    );
+    const archivedClassificationFinal = archivedClassificationReady && archivedRulesetReady && (
+      archivedStatus === 'complete' ||
+      (archivedStatus === 'partial' && (!archivedErrorCode || terminalSemanticError)) ||
+      archivedRulesOnlyFinal
+    );
+    if (ARCHIVE_RUN_ID && archivedClassificationFinal) return;
+    const identity = xhsClassificationIdentity(analysis, pgy);
+    if (!identity || identity === xhsClassificationAttemptKey) return;
+    xhsClassificationAttemptKey = identity;
+    const forceSemanticRetry = Boolean(ARCHIVE_RUN_ID && archivedClassificationReady);
+    window.setTimeout(() => { runXhsSearchClassification(forceSemanticRetry); }, 0);
   }
 
   function xhsNoteSnapshotIdentity(analysis) {
@@ -1390,6 +1765,346 @@
       bars + '<span class="xhs-sr-only">平均合作费用仅包含合作金额，不包含平台服务费。</span></figure>';
   }
 
+  function formatXhsCompactPercent(value) {
+    const number = asNumber(value);
+    if (number === null) return '—';
+    return (number * 100).toLocaleString('zh-CN', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    }) + '%';
+  }
+
+  function xhsPgySearchKeywordSummary(view) {
+    const base = xhsObject(view && view.summary);
+    const facts = xhsArray(base.facts);
+    const selectedProject = String(xhsPgyProjectName || '');
+    if (!selectedProject) return base;
+    const filtered = facts.filter((fact) => (
+      String(fact && fact.crossDomainProjectName || '') === selectedProject
+    ));
+    const model = window.XhsReportModel;
+    try {
+      if (model && typeof model.aggregatePgySearchKeywords === 'function') {
+        const search = model.aggregatePgySearchKeywords(filtered, {
+          ...xhsObject(view.classificationOptions),
+          profileId: String(xhsObject(view.classificationOptions).profileId ||
+            base.searchKeywordProfile && base.searchKeywordProfile.id || ''),
+        });
+        return {
+          searchKeywords: search.keywords,
+          searchKeywordCoverage: search.coverage,
+          searchKeywordProfile: search.profile,
+          searchKeywordSummaries: search.summaries,
+          searchKeywordTotalCount: search.totalKeywordCount,
+          searchKeywordTruncated: search.truncated,
+        };
+      }
+      if (model && typeof model.aggregatePgyFacts === 'function') {
+        return model.aggregatePgyFacts({
+          facts: filtered,
+          dateRange: view.dateRange,
+          spuName: view.spuName,
+          asOf: base.asOf,
+          searchClassification: {
+            ...xhsObject(view.classificationOptions),
+            profileId: String(xhsObject(view.classificationOptions).profileId ||
+              base.searchKeywordProfile && base.searchKeywordProfile.id || ''),
+          },
+        });
+      }
+    } catch (error) {
+      return {
+        searchKeywords: [],
+        searchKeywordCoverage: {},
+        searchKeywordProfile: {},
+        searchKeywordSummaries: {},
+      };
+    }
+    return {
+      searchKeywords: [],
+      searchKeywordCoverage: {},
+      searchKeywordProfile: {},
+      searchKeywordSummaries: {},
+    };
+  }
+
+  function xhsPgySearchKeywordNotes(row) {
+    const notes = xhsArray(row && row.notes);
+    if (!notes.length) return '<span class="xhs-muted">暂无笔记明细</span>';
+    const rows = notes.map((note) => {
+      const title = escapeHtml(note && note.title || '未命名笔记');
+      const noteUrl = xhsNoteDetailUrl(note);
+      const titleMarkup = noteUrl
+        ? '<a class="xhs-note-detail-link" href="' + escapeHtml(noteUrl) +
+          '" target="_blank" rel="noopener noreferrer">' + title + '</a>'
+        : '<span>' + title + '</span><small class="xhs-note-link-unavailable">暂缺平台官方链接</small>';
+      return '<tr data-xhs-pgy-search-note-id="' + escapeHtml(note && note.noteId || '') + '"><td>' +
+        escapeHtml(note && note.publishDate || '—') + '</td><td>' + titleMarkup + '</td><td>' +
+        formatInteger(note && note.impressions) + '</td><td>' + formatInteger(note && note.reads) +
+        '</td><td>' + formatXhsCompactPercent(note && note.clickRate) + '</td><td>' +
+        formatXhsCompactPercent(note && note.impressionContribution) + '</td></tr>';
+    }).join('');
+    return '<details class="xhs-pgy-keyword-notes"><summary>查看 ' + formatInteger(notes.length) +
+      ' 篇</summary><div><table><thead><tr><th>发布日期</th><th>笔记</th><th>该词曝光</th>' +
+      '<th>该词阅读</th><th>点击率</th><th>曝光贡献</th></tr></thead><tbody>' + rows +
+      '</tbody></table></div></details>';
+  }
+
+  function normalizedXhsPgySearchFilters(value) {
+    const source = xhsObject(value);
+    const filters = XHS_PGY_SEARCH_DIMENSIONS.reduce((result, dimension) => {
+      result[dimension.key] = String(source[dimension.key] || '');
+      return result;
+    }, {});
+    filters.classificationSource = String(source.classificationSource || '');
+    filters.reviewRequired = typeof source.reviewRequired === 'boolean'
+      ? source.reviewRequired
+      : null;
+    return filters;
+  }
+
+  function xhsPgySearchKeywordTotal(keywords) {
+    const rows = xhsArray(keywords);
+    const impressionsComplete = rows.every((row) => asNumber(row && row.impressions) !== null);
+    const readsComplete = rows.every((row) => asNumber(row && row.reads) !== null);
+    const impressions = impressionsComplete
+      ? rows.reduce((sum, row) => sum + Number(row.impressions), 0)
+      : null;
+    const reads = readsComplete ? rows.reduce((sum, row) => sum + Number(row.reads), 0) : null;
+    const noteIds = new Set();
+    let keywordNotePairs = 0;
+    rows.forEach((row) => xhsArray(row && row.notes).forEach((note) => {
+      const noteId = String(note && note.noteId || '');
+      if (noteId) noteIds.add(noteId);
+      keywordNotePairs += 1;
+    }));
+    return {
+      keywordCount: rows.length,
+      impressions,
+      reads,
+      clickRate: impressions !== null && reads !== null && impressions > 0 ? reads / impressions : null,
+      noteCount: noteIds.size,
+      keywordNotePairs,
+    };
+  }
+
+  function xhsPgySearchKeywordView(keywordsValue, filtersValue) {
+    const keywords = xhsArray(keywordsValue);
+    const filters = normalizedXhsPgySearchFilters(filtersValue);
+    const model = window.XhsReportModel;
+    if (model && typeof model.filterPgySearchKeywords === 'function') {
+      return model.filterPgySearchKeywords(keywords, filters);
+    }
+    const filtered = keywords.filter((row) => XHS_PGY_SEARCH_DIMENSIONS.every((dimension) => (
+      !filters[dimension.key] || String(row && row[dimension.key] || '') === filters[dimension.key]
+    )) && (!filters.classificationSource || String(row && row.classificationSource || '') ===
+      filters.classificationSource) && (filters.reviewRequired === null ||
+      Boolean(row && row.needsReview) === filters.reviewRequired));
+    return { filters, keywords: filtered, summaries: {}, total: xhsPgySearchKeywordTotal(filtered) };
+  }
+
+  function xhsPgySearchMetricCards(totalValue) {
+    const total = xhsObject(totalValue);
+    const cards = [
+      ['keywordCount', '总搜索词数', formatInteger(total.keywordCount), '当前筛选聚合关键词数'],
+      ['noteCount', '笔记数', formatInteger(total.noteCount), '当前筛选贡献笔记（去重）'],
+      ['impressions', '曝光量', formatInteger(total.impressions), '当前筛选搜索词归因曝光'],
+      ['reads', '阅读量', formatInteger(total.reads), '当前筛选搜索词归因阅读'],
+      ['clickRate', '点击率', formatXhsCompactPercent(total.clickRate), '阅读量 ÷ 曝光量'],
+    ];
+    return '<div class="xhs-metric-grid xhs-pgy-search-metrics" data-xhs-pgy-search-metrics ' +
+      'role="group" aria-label="当前筛选搜索关键词汇总" aria-live="polite">' + cards.map((card) => (
+        '<div class="xhs-metric-card"><span>' + escapeHtml(card[1]) + '</span><strong ' +
+        'data-xhs-pgy-search-metric="' + escapeHtml(card[0]) + '">' + escapeHtml(card[2]) +
+        '</strong><small>' + escapeHtml(card[3]) + '</small></div>'
+      )).join('') + '</div>';
+  }
+
+  function formatXhsSearchScore(value) {
+    const number = asNumber(value);
+    return number === null || number < 0 ? '-' : formatInteger(number);
+  }
+
+  function xhsPgySearchFilterSelect(dimension, summary) {
+    const rows = xhsArray(xhsObject(summary).rows).filter((row) => Number(row && row.keywordCount) > 0);
+    const selected = String(xhsPgySearchFilters[dimension.key] || '');
+    const options = ['<option value=""' + (selected ? '' : ' selected') + '>' +
+      escapeHtml(dimension.allLabel) + '</option>'].concat(rows.map((row) => {
+      const value = String(row && row.value || '未分类');
+      return '<option value="' + escapeHtml(value) + '"' + (value === selected ? ' selected' : '') + '>' +
+        escapeHtml(value) + '（' + formatInteger(row && row.keywordCount) + '）</option>';
+    })).join('');
+    return '<span class="xhs-pgy-keyword-column-label">' + escapeHtml(dimension.label) + '</span>' +
+      '<select data-xhs-pgy-search-filter="' + escapeHtml(dimension.key) + '" aria-label="按' +
+      escapeHtml(dimension.label) + '筛选关键词">' + options + '</select>';
+  }
+
+  function xhsPgySearchDimensionTable(summary, key, label, selectedValue) {
+    const dimension = xhsObject(summary);
+    const rows = xhsArray(dimension.rows).filter((row) => Number(row && row.keywordCount) > 0);
+    const totalRow = '<tr class="xhs-total-row" data-xhs-pgy-search-total="' + escapeHtml(key) +
+      '"><th scope="row">可选词汇总</th><td>' + formatInteger(dimension.totalKeywords || 0) + '</td><td>' +
+      formatInteger(dimension.totalImpressions) + ' <small>(100%)</small></td><td>' +
+      formatInteger(dimension.totalReads) + '</td><td>' + formatXhsCompactPercent(dimension.totalClickRate) +
+      '</td><td>' + formatInteger(dimension.totalNoteCount || 0) + '</td></tr>';
+    const body = rows.length ? rows.map((row) => {
+      const value = String(row && row.value || '未分类');
+      return '<tr><th scope="row"><button type="button" class="xhs-pgy-keyword-filter-button" ' +
+      'data-xhs-pgy-search-filter="' + escapeHtml(key) + '" data-xhs-pgy-search-value="' +
+      escapeHtml(value) + '" aria-pressed="' + String(value === selectedValue) + '">' +
+      escapeHtml(value) + '</button></th><td>' +
+      formatInteger(row && row.keywordCount) + '</td><td>' + formatInteger(row && row.impressions) +
+      ' <small>(' + formatXhsCompactPercent(row && row.exposureShare) + ')</small></td><td>' +
+      formatInteger(row && row.reads) + '</td><td>' + formatXhsCompactPercent(row && row.clickRate) +
+      '</td><td>' + formatInteger(row && row.noteCount) + '</td></tr>'
+    }).join('') : '<tr><td colspan="6">暂无可比较数据。</td></tr>';
+    return '<article class="xhs-pgy-keyword-comparison"><header><h5>按' + escapeHtml(label) +
+      '</h5><span data-xhs-export-pgy-search-summary-rate="' + escapeHtml(key) +
+      '">整体加权点击率 ' + formatXhsCompactPercent(dimension.totalClickRate) +
+      '</span></header><div><table><thead><tr><th>' + escapeHtml(label) + '</th><th>关键词数</th>' +
+      '<th>曝光及占比</th><th>阅读</th><th>加权点击率</th><th>贡献笔记</th></tr></thead>' +
+      '<tbody data-xhs-export-pgy-search-summary-body="' + escapeHtml(key) + '">' + totalRow + body +
+      '</tbody></table></div></article>';
+  }
+
+  function xhsClassificationSourceLabel(value) {
+    return {
+      override: '人工', manual: '人工', fact: '店铺事实', hybrid: '历史联合分类',
+      qwen: '历史模型分类', openai: '历史模型分类', rule: '行业规则', heuristic: '行业规则',
+    }[String(value || '')] || '规则';
+  }
+
+  function xhsPgyClassificationToolbar(allKeywords, view) {
+    const archive = xhsObject(xhsObject(view.classificationOptions).classificationArchive);
+    const status = String(archive.status || '');
+    const archivedErrorCode = String(xhsObject(archive.semanticRun).errorCode || '');
+    const effectiveErrorCode = xhsClassificationErrorCode || archivedErrorCode;
+    const reviewCount = xhsArray(allKeywords).filter((row) => row && row.needsReview === true).length;
+    let statusCopy = '等待生成稳定分类目录';
+    if (xhsClassificationRunning) statusCopy = '正在按店铺词典与行业规则分类…';
+    else if (xhsClassificationArchiveSaveFailed) {
+      statusCopy = '分类已完成，但归档保存失败；请稍后重新分类以保存结果';
+    } else if (status === 'complete' || status === 'rules_only') statusCopy = '行业规则分类完成';
+    else if (status === 'partial') statusCopy = '行业规则分类完成，部分词建议复核';
+    const sources = [...new Set(xhsArray(allKeywords).map((row) => String(
+      row && row.classificationSource || ''
+    )).filter(Boolean))];
+    const sourceOptions = ['<option value="">全部来源</option>'].concat(sources.map((source) => (
+      '<option value="' + escapeHtml(source) + '"' +
+      (source === xhsPgySearchFilters.classificationSource ? ' selected' : '') + '>' +
+      escapeHtml(xhsClassificationSourceLabel(source)) + '</option>'
+    ))).join('');
+    return '<div class="xhs-classification-toolbar" data-xhs-classification-toolbar>' +
+      '<span class="xhs-classification-state">' + escapeHtml(statusCopy) +
+      ' · 待复核 ' + formatInteger(reviewCount) + ' 个</span>' +
+      '<label><span>分类来源</span><select data-xhs-classification-source>' + sourceOptions +
+      '</select></label><label class="xhs-review-toggle"><input type="checkbox" data-xhs-review-only' +
+      (xhsPgySearchFilters.reviewRequired === true ? ' checked' : '') +
+      '><span>仅看待复核</span></label><button type="button" data-xhs-reclassify' +
+      (xhsClassificationRunning ? ' disabled' : '') + '>按当前规则重新分类</button></div>';
+  }
+
+  function buildXhsPgySearchKeywordTable(view) {
+    if (!view.factsAvailable) return '';
+    const summary = xhsPgySearchKeywordSummary(view);
+    const allKeywords = xhsArray(summary.searchKeywords);
+    const coverage = xhsObject(summary.searchKeywordCoverage);
+    const profile = xhsObject(summary.searchKeywordProfile);
+    const allSummaries = xhsObject(summary.searchKeywordSummaries);
+    XHS_PGY_SEARCH_DIMENSIONS.forEach((dimension) => {
+      const requested = String(xhsPgySearchFilters[dimension.key] || '');
+      if (requested && !allKeywords.some((row) => String(row && row[dimension.key] || '') === requested)) {
+        xhsPgySearchFilters[dimension.key] = '';
+      }
+    });
+    const filteredView = xhsPgySearchKeywordView(allKeywords, xhsPgySearchFilters);
+    const keywords = xhsArray(filteredView.keywords);
+    const keywordTotal = xhsObject(filteredView.total);
+    const metricCards = xhsPgySearchMetricCards(keywordTotal);
+    const classificationToolbar = xhsPgyClassificationToolbar(allKeywords, view);
+    const total = Math.max(0, Number(coverage.totalNoteCount) || 0);
+    const covered = Math.max(0, Number(coverage.coveredNoteCount) || 0);
+    const missing = Math.max(0, total - covered);
+    const coverageCopy = '搜索词采集覆盖 ' + formatInteger(covered) + ' / ' +
+      formatInteger(total) + ' 篇';
+    const detailCopy = missing > 0
+      ? '；另有 ' + formatInteger(missing) + ' 篇采集失败或来自未采集该字段的旧归档，未计入表内。'
+      : '；请求成功但无搜索流量的笔记也计为已覆盖。';
+    let emptyCopy = '当前筛选范围暂无搜索关键词数据。';
+    if (total === 0) emptyCopy = '当前筛选条件暂无蒲公英笔记数据。';
+    else if (covered === 0 && (
+      Number(coverage.unavailableNoteCount) > 0 || Number(coverage.failedNoteCount) > 0
+    )) {
+      emptyCopy = '旧归档未采集搜索来源词，或当前笔记的搜索词请求均失败。';
+    }
+    const keywordRows = keywords.length ? keywords.map((row) => (
+      '<tr data-xhs-pgy-search-keyword="' + escapeHtml(row && row.keyword || '') + '"><th scope="row">' +
+      escapeHtml(row && row.keyword || '—') + '</th><td>' +
+      formatXhsSearchScore(row && row.searchScore) + '</td><td>' +
+      escapeHtml(row && row.commercialCategory || '待确认') + '</td><td>' +
+      escapeHtml(row && row.relevance || '待确认') + '</td><td>' +
+      escapeHtml(row && row.intent || '意图不明确') + '</td><td><span class="xhs-classification-badge" data-source="' +
+      escapeHtml(row && row.classificationSource || 'rule') + '">' +
+      escapeHtml(xhsClassificationSourceLabel(row && row.classificationSource)) + '</span>' +
+      (row && row.needsReview ? '<small class="xhs-review-required">待复核</small>' : '') + '</td><td title="' +
+      escapeHtml((row && row.classificationReason || '') + '；' + (row && row.intentReason || '')) + '">' +
+      escapeHtml(row && row.confidence || '低') + ' ' +
+      formatXhsCompactPercent(row && row.confidenceScore) + '</td><td>' +
+      formatInteger(row && row.impressions) + '</td><td>' + formatInteger(row && row.reads) + '</td><td>' +
+      formatXhsCompactPercent(row && row.clickRate) + '</td><td>' + xhsPgySearchKeywordNotes(row) +
+      '</td><td><button type="button" class="xhs-keyword-correct" data-xhs-correct-keyword="' +
+      escapeHtml(row && row.keyword || '') + '">纠正</button></td></tr>'
+    )).join('') : '<tr><td colspan="12">' + escapeHtml(emptyCopy) + '</td></tr>';
+    const totalRow = '<tr class="xhs-total-row" data-xhs-pgy-search-total="keywords"><th scope="row">当前筛选汇总 · ' +
+      formatInteger(keywordTotal.keywordCount || 0) + ' 个词</th><td>-</td><td colspan="5">' +
+      (keywords.length === allKeywords.length ? '全部关键词' : '已按分类维度筛选') + '</td><td>' +
+      formatInteger(keywordTotal.impressions) + '</td><td>' + formatInteger(keywordTotal.reads) + '</td><td>' +
+      formatXhsCompactPercent(keywordTotal.clickRate) + '</td><td>' +
+      formatInteger(keywordTotal.noteCount || 0) + ' 篇</td><td>—</td></tr>';
+    const profileId = String(profile.id || 'cross-industry-generic-v1');
+    const profileLabel = String(profile.label || '通用行业分类标准');
+    const profileScope = String(profile.scope || '未能稳定识别行业时使用保守兜底规则');
+    const interestCategory = String(profile.interestCategory || '泛行业兴趣词');
+    const usageIntent = String(profile.usageIntent || '使用方法');
+    const comparisons = '<div class="xhs-pgy-keyword-comparison-grid">' +
+      XHS_PGY_SEARCH_DIMENSIONS.map((dimension) => {
+        const facetFilters = { ...xhsPgySearchFilters, [dimension.key]: '' };
+        const facetView = xhsPgySearchKeywordView(allKeywords, facetFilters);
+        return xhsPgySearchDimensionTable(
+          xhsObject(facetView.summaries)[dimension.key],
+          dimension.key,
+          dimension.label,
+          String(xhsPgySearchFilters[dimension.key] || '')
+        );
+      }).join('') + '</div>';
+    const filterActive = XHS_PGY_SEARCH_DIMENSIONS.some((dimension) => xhsPgySearchFilters[dimension.key]) ||
+      Boolean(xhsPgySearchFilters.classificationSource) || xhsPgySearchFilters.reviewRequired === true;
+    return '<div class="report-table-block xhs-pgy-search-keywords"><div class="xhs-table-heading"><h4>搜索来源关键词（全部词）</h4>' +
+      '<span data-xhs-export-pgy-search-coverage>' + escapeHtml(coverageCopy) + '</span></div>' +
+      '<p class="xhs-control-note" data-xhs-export-pgy-search-note>' +
+      escapeHtml('已展示 ' + keywords.length + ' / ' + allKeywords.length +
+        ' 个聚合词，按曝光降序排列' + detailCopy) +
+      '</p>' + metricCards + classificationToolbar +
+      '<details class="xhs-pgy-keyword-rules"><summary>分类标准与规则口径 · ' +
+      escapeHtml(profileId) + '</summary><p><strong>当前行业模板：</strong>' +
+      escapeHtml(profileLabel) + '；' + escapeHtml(profileScope) + '。</p>' +
+      '<p><strong>唯一标签优先级：</strong>每个维度每个词只保留一个标签；商业分类按自有品牌、竞品、自有产品、品类需求、核心品类、邻近场景、' +
+      escapeHtml(interestCategory) + '、无关或待确认区分。</p><p><strong>品类相关度：</strong>核心商业词为强相关，' +
+      '相邻品类和使用场景为中相关，' + escapeHtml(interestCategory) +
+      '为弱相关；明确跨品类为无关，证据不足保留待确认。</p>' +
+      '<p><strong>搜索意图：</strong>优先识别购买决策、对比评估、' + escapeHtml(usageIntent) +
+      '、问题解决；无动作词时按品牌查找、' +
+      '品类探索、兴趣浏览或意图不明确归类。未命中稳定规则的词保留待确认，分类并非蒲公英官方指标。</p></details>' +
+      comparisons + '<table class="xhs-pgy-keyword-table"><thead><tr><th><span>关键词</span>' +
+      '<button type="button" class="xhs-pgy-keyword-filter-clear" data-xhs-pgy-search-clear' +
+      (filterActive ? '' : ' disabled') + '>清除筛选</button></th><th>搜索热度</th>' +
+      XHS_PGY_SEARCH_DIMENSIONS.map((dimension) => '<th>' + xhsPgySearchFilterSelect(
+        dimension, allSummaries[dimension.key]
+      ) + '</th>').join('') +
+      '<th>来源/复核</th><th>置信度</th><th>曝光</th><th>阅读</th><th>点击率</th><th>贡献笔记</th><th>操作</th></tr></thead>' +
+      '<tbody data-xhs-export-pgy-search-body>' + totalRow + keywordRows + '</tbody></table></div>';
+  }
+
   function buildXhsPgyNoteAnalysis(view, staticExport, interactiveExport) {
     if (!view.factsAvailable) return '';
     const facts = xhsArray(view.summary && view.summary.facts);
@@ -1408,6 +2123,12 @@
           dateRange: view.dateRange,
           spuName: view.spuName,
           asOf: view.summary && view.summary.asOf,
+          searchClassification: {
+            ...xhsObject(view.classificationOptions),
+            profileId: String(xhsObject(view.classificationOptions).profileId ||
+              view.summary && view.summary.searchKeywordProfile &&
+              view.summary.searchKeywordProfile.id || ''),
+          },
         });
         if (['partial', 'unavailable'].includes(String(view.coverage || ''))) {
           total = {
@@ -1917,13 +2638,19 @@
   function buildXhsStarNotes(order) {
     const notes = xhsArray(order && order.notes);
     if (!notes.length) return '<p class="xhs-empty-state">该订单暂无可联表的星河笔记。</p>';
-    return '<div class="xhs-note-node-list"><h6>订单笔记 <span>' + notes.length + ' 篇</span></h6>' + notes.map((note) => (
-      '<article class="xhs-note-node" data-xhs-star-note="' + escapeHtml(note && note.noteId || '') + '">' +
-      '<header><div><span>笔记</span><h6>' + escapeHtml(note && note.title || note && note.noteId || '未命名笔记') +
-      '</h6><code>' + escapeHtml(note && note.noteId || '—') + '</code></div><b>' +
-      escapeHtml(note && note.publishDate || '暂无发布日期') + '</b></header>' +
-      buildXhsStarUnitCosts(note && note.costs) + buildXhsStarUnitMetrics(note) + '</article>'
-    )).join('') + '</div>';
+    return '<div class="xhs-note-node-list"><h6>订单笔记 <span>' + notes.length + ' 篇</span></h6>' + notes.map((note) => {
+      const title = escapeHtml(note && note.title || note && note.noteId || '未命名笔记');
+      const noteUrl = xhsNoteDetailUrl(note);
+      const titleMarkup = noteUrl
+        ? '<a class="xhs-note-detail-link" href="' + escapeHtml(noteUrl) +
+          '" target="_blank" rel="noopener noreferrer">' + title + '</a>'
+        : title;
+      return '<article class="xhs-note-node" data-xhs-star-note="' + escapeHtml(note && note.noteId || '') + '">' +
+        '<header><div><span>笔记</span><h6>' + titleMarkup +
+        '</h6><code>' + escapeHtml(note && note.noteId || '—') + '</code></div><b>' +
+        escapeHtml(note && note.publishDate || '暂无发布日期') + '</b></header>' +
+        buildXhsStarUnitCosts(note && note.costs) + buildXhsStarUnitMetrics(note) + '</article>';
+    }).join('') + '</div>';
   }
 
   function xhsStarOrderPublicIdentity(order) {
@@ -1947,9 +2674,15 @@
       '<span>' + notes.length + ' 篇</span></div><div class="xhs-unassigned-note-list">' +
       notes.map((note) => {
         const candidateCount = xhsArray(note && note.candidateOrderIds).length;
+        const title = escapeHtml(note && note.title || note && note.noteId || '未命名笔记');
+        const noteUrl = xhsNoteDetailUrl(note);
+        const titleMarkup = noteUrl
+          ? '<a class="xhs-note-detail-link" href="' + escapeHtml(noteUrl) +
+            '" target="_blank" rel="noopener noreferrer">' + title + '</a>'
+          : title;
         return '<article class="xhs-note-node xhs-unassigned-note" data-xhs-star-note="' +
           escapeHtml(note && note.noteId || '') + '"><header><div><span>待归属笔记</span><h5>' +
-          escapeHtml(note && note.title || note && note.noteId || '未命名笔记') + '</h5><code>' +
+          titleMarkup + '</h5><code>' +
           escapeHtml(note && note.noteId || '—') + '</code></div><b>未计入项目或订单成本合计</b></header>' +
           '<p>' + escapeHtml(reasonLabel(note && note.reason)) + ' · 候选订单 ' + candidateCount + ' 个</p>' +
           buildXhsStarUnitCosts(note && note.costs) + '</article>';
@@ -2362,10 +3095,45 @@
 
   function xhsNoteDetailUrl(note) {
     const source = xhsObject(note);
-    const explicit = String(source.noteUrl || '').trim();
-    if (/^https:\/\/([a-z0-9-]+\.)*xiaohongshu\.com\//i.test(explicit)) return explicit;
     const noteId = String(source.noteId || '').trim();
-    return noteId ? 'https://www.xiaohongshu.com/explore/' + encodeURIComponent(noteId) : '';
+    const explicit = String(source.noteUrl || '').trim();
+    const contract = window.XhsContract;
+    if (contract && typeof contract.sanitizeOfficialNoteUrl === 'function') {
+      const official = contract.sanitizeOfficialNoteUrl(explicit, noteId);
+      if (official) return official;
+    }
+    if (explicit) {
+      try {
+        const url = new URL(explicit);
+        const match = url.pathname.match(/^\/explore\/([^/]+)\/?$/i);
+        const pathNoteId = match ? decodeURIComponent(match[1]) : '';
+        const keys = [...url.searchParams.keys()];
+        const token = String(url.searchParams.get('xsec_token') || '').trim();
+        if (url.protocol === 'https:' && url.hostname.toLowerCase() === 'www.xiaohongshu.com' &&
+            !url.username && !url.password && !url.hash && noteId && pathNoteId === noteId &&
+            token.length >= 8 && url.searchParams.get('xsec_source') === 'pc_pgyexport' &&
+            keys.length === 2 && keys.includes('xsec_token') && keys.includes('xsec_source')) {
+          return explicit;
+        }
+      } catch (error) {
+        // Fail closed. A bare /explore/{noteId} URL is redirected by Xiaohongshu
+        // desktop web to its 404/QR page; only the PGY-exported signed URL is usable.
+      }
+    }
+    return '';
+  }
+
+  function buildXhsPgyLinkCoverageNotice(view) {
+    if (!view || !view.factsAvailable) return '';
+    const facts = xhsArray(view.summary && view.summary.facts);
+    if (!facts.length) return '';
+    const usable = facts.filter((fact) => Boolean(xhsNoteDetailUrl(fact))).length;
+    if (usable === facts.length) return '';
+    const missing = facts.length - usable;
+    return '<p class="xhs-inline-warning" role="alert" data-xhs-pgy-link-coverage>' +
+      '笔记链接仅 ' + formatInteger(usable) + ' / ' + formatInteger(facts.length) +
+      ' 可用，缺少 ' + formatInteger(missing) + ' 条蒲公英官方导出签名链接。' +
+      '请重载扩展后重新取数；旧归档不能只凭笔记 ID 补出可浏览链接。</p>';
   }
 
   function buildXhsNotesTable(analysis, options) {
@@ -2647,6 +3415,7 @@
     const pgyExportMetric = (path) => interactiveExport ? path : '';
     const pgyPanel = '<section class="xhs-report-panel" data-xhs-panel="pgy-analysis">' +
       xhsPanelHeading('PUGONGYING', '蒲公英分析', '仅统计所选时间内发布的笔记；合作金额与平台服务费分开展示', '发布日期口径') +
+      buildXhsPgyLinkCoverageNotice(pgyView) +
       buildXhsPgyDateControls(pgyView, staticExport && !interactiveExport, interactiveExport) +
       xhsKpiMarkup([
         ['时间筛选内笔记数', formatInteger(xhsFirstValue(pgy.noteCount, pgy.reportedNoteCount)), '', pgyExportMetric('pgy.noteCount')],
@@ -2668,6 +3437,7 @@
         ['淘宝购买率(15天)', formatPercent(pgyTaobao15d.purchaseRate, 2), '', pgyExportMetric('pgy.taobao15d.purchaseRate')],
       ], 'xhs-pgy-metrics') + '<div class="xhs-chart-grid">' + buildXhsMonthlyChart(pgy.monthly) +
       buildXhsFollowerChart(pgy.followerTiers) + '</div>' +
+      buildXhsPgySearchKeywordTable(pgyView) +
       buildXhsPgyNoteAnalysis(pgyView, staticExport, interactiveExport) + '</section>';
 
     const spotlight = xhsObject(analysis.spotlight);
@@ -2980,15 +3750,17 @@
     '.xhs-report-panel{margin:0 18px 22px;overflow:hidden;border:1px solid #dfe4ea;border-radius:6px;background:#f7f9fc}' +
     '.xhs-panel-heading{display:flex;min-height:88px;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:14px;padding:18px 20px;border-bottom:1px solid #d6e2f3;background:#eaf2ff}' +
     '.xhs-panel-heading span{color:#0b67d1;font-size:10px;font-weight:800}.xhs-panel-heading h3{margin:4px 0;color:#182230;font-size:21px}.xhs-panel-heading p{margin:0;color:#667085;font-size:11px}.xhs-panel-heading>b{color:#34558d;font-size:10px}' +
-    '.xhs-metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin:0 16px 16px;border:1px solid #dfe4ea;background:#dfe4ea}.xhs-metric-card{padding:12px;background:#fff}.xhs-metric-card span,.xhs-metric-card strong,.xhs-metric-card small{display:block}.xhs-metric-card span,.xhs-metric-card small{color:#667085;font-size:9px}.xhs-metric-card strong{margin-top:4px;font-size:17px}' +
+    '.xhs-metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin:0 16px 16px;border:1px solid #dfe4ea;background:#dfe4ea}.xhs-metric-card{padding:12px;background:#fff}.xhs-metric-card span,.xhs-metric-card strong,.xhs-metric-card small{display:block}.xhs-metric-card span,.xhs-metric-card small{color:#667085;font-size:9px}.xhs-metric-card strong{margin-top:4px;font-size:17px}.xhs-pgy-search-metrics{margin:0 14px 14px}' +
     '.xhs-account-metrics{grid-template-columns:repeat(7,minmax(0,1fr))}.xhs-pgy-metrics,.xhs-star-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}.xhs-star-task-metrics{grid-template-columns:repeat(6,minmax(0,1fr))}' +
     '.xhs-chart-grid{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:14px;margin:0 16px 16px}.xhs-bar-chart{margin:0;padding:14px;border:1px solid #dfe4ea;background:#fff}.xhs-bar-chart figcaption{margin-bottom:12px;font-weight:750}.xhs-bar-row{display:grid;min-height:32px;grid-template-columns:82px minmax(80px,1fr) auto;align-items:center;gap:9px}.xhs-bar-track{height:9px;overflow:hidden;border-radius:9px;background:#e9eef5}.xhs-bar-fill{display:block;width:var(--xhs-bar,0%);height:100%;background:#0b67d1}.xhs-chart-value{font-size:10px;text-align:right}.xhs-chart-value small{display:block;color:#667085;font-size:8px}' +
     '.xhs-control-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 16px 16px;padding:12px;border:1px solid #dfe4ea;background:#fff}.xhs-control-grid label>span,.xhs-control-grid legend{display:block;margin-bottom:5px;color:#667085;font-size:9px}.xhs-control-grid select{width:100%;height:32px}.xhs-control-grid fieldset{grid-column:1/-1}.xhs-check-list{display:flex;gap:8px}.xhs-check-option>span{padding:4px 7px;border:1px solid #cfd8e5;border-radius:10px}' +
     '.xhs-star-summary,.xhs-star-projects{margin:0 16px 16px;border:1px solid #dfe4ea;background:#fff}.xhs-subsection-heading{display:flex;justify-content:space-between;padding:12px 14px}.xhs-subsection-heading h4{margin:0}.xhs-project-tree{padding:0 12px 12px}.xhs-project-node{margin-top:10px;padding:12px;border:1px solid #cdd9ea;border-left:4px solid #0b67d1;background:#f8fbff}.xhs-project-node>header,.xhs-order-node>header{display:flex;justify-content:space-between}.xhs-project-node h4,.xhs-order-node h5{margin:3px 0}.xhs-unit-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}.xhs-unit-metrics div{padding:6px;border:1px solid #e3e8ef;background:#fff}.xhs-unit-metrics dt{color:#667085;font-size:8px}.xhs-unit-metrics dd{margin:2px 0 0;font-size:10px;font-weight:700}.xhs-order-list{margin:12px 0 0 12px;padding-left:12px;border-left:2px solid #cdd9ea}.xhs-order-node{margin-top:7px;padding:10px;border:1px solid #dfe4ea;background:#fff}' +
     '.xhs-star-detail-toggle{display:flex;width:100%;align-items:center;justify-content:space-between;gap:16px;padding:13px 15px;border:0;border-top:1px solid #dfe4ea;background:#f8fbff;color:#0b67d1;font:inherit;font-size:12px;font-weight:750;text-align:left;cursor:pointer}.xhs-star-detail-toggle span{color:#667085;font-size:10px;font-weight:600}.xhs-star-detail-toggle:focus-visible{outline:2px solid #0b67d1;outline-offset:-2px}.xhs-star-detail-report[hidden]{display:none}.xhs-star-detail-report .xhs-star-controls{margin-top:16px}' +
     '.xhs-unit-costs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:10px 0}.xhs-unit-costs div{padding:7px;border:1px solid #b9d5fb;background:#eef5ff}.xhs-unit-costs dt{color:#475467;font-size:8px}.xhs-unit-costs dd{margin:2px 0 0;color:#0b4fa8;font-size:10px;font-weight:750}.xhs-note-node-list{margin:12px 0 0 14px;padding-left:14px;border-left:2px solid #d8dee8}.xhs-note-node{margin-top:7px;padding:9px;border:1px dashed #cfd8e5;background:#fbfcfe}.xhs-note-node>header{display:flex;justify-content:space-between;gap:10px}.xhs-note-node h6{margin:3px 0}.xhs-order-unverified{border-color:#f4b740;background:#fffaf0}.xhs-unassigned-notes{margin-top:14px;padding:12px;border:1px solid #f4b740;background:#fffaf0}.xhs-unassigned-note-list{display:grid;gap:7px}.xhs-unassigned-note>header b{color:#b54708}' +
+    '.xhs-pgy-keyword-rules{margin:0 14px 14px;padding:10px 12px;border:1px solid #dfe4ea;background:#f8fafc;color:#475467;font-size:11px}.xhs-pgy-keyword-rules summary{color:#243b72;font-weight:750;cursor:pointer}.xhs-pgy-keyword-rules p{margin:8px 0 0;line-height:1.65}.xhs-pgy-keyword-comparison-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0 14px 16px}.xhs-pgy-keyword-comparison{min-width:0;overflow:hidden;border:1px solid #dfe4ea;background:#fff}.xhs-pgy-keyword-comparison>header{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:10px 11px;border-bottom:1px solid #e3eaf4}.xhs-pgy-keyword-comparison h5{margin:0;color:#243b72;font-size:12px}.xhs-pgy-keyword-comparison header span{color:#667085;font-size:9px}.xhs-pgy-keyword-comparison>div{overflow:auto}.xhs-pgy-keyword-comparison table{min-width:560px;font-size:10px}.xhs-pgy-keyword-filter-button{padding:3px 7px;border:1px solid transparent;border-radius:999px;background:transparent;color:#0b67d1;font:inherit;font-weight:750;cursor:pointer}.xhs-pgy-keyword-filter-button[aria-pressed="true"]{border-color:#0b67d1;background:#eaf2ff}.xhs-pgy-keyword-table{min-width:1420px!important}.xhs-pgy-keyword-table thead th{vertical-align:bottom}.xhs-pgy-keyword-column-label{display:block;margin-bottom:5px}.xhs-pgy-keyword-table thead select{display:block;width:100%;min-width:140px;height:30px;border:1px solid #b7c7df;border-radius:4px;background:#fff;color:#344054;font-size:10px}.xhs-pgy-keyword-filter-clear{display:block;margin-top:5px;padding:3px 7px;border:1px solid #b7c7df;border-radius:4px;background:#fff;color:#0b67d1;font-size:9px;cursor:pointer}.xhs-pgy-keyword-filter-clear:disabled{opacity:.45;cursor:default}.xhs-pgy-keyword-table>tbody>tr>td:last-child{min-width:120px;white-space:normal}.xhs-pgy-keyword-notes summary{display:inline-flex;padding:4px 8px;border:1px solid #b7c7df;border-radius:4px;background:#fff;color:#0b67d1;font-size:10px;font-weight:700;cursor:pointer}.xhs-pgy-keyword-notes>div{max-width:760px;margin-top:8px;overflow:auto;border:1px solid #dfe4ea}.xhs-pgy-keyword-notes table{min-width:720px;font-size:10px}.xhs-pgy-keyword-notes td:nth-child(2){min-width:220px;white-space:normal}.xhs-note-link-unavailable{display:block;margin-top:3px;color:#98a2b3;font-size:9px}' +
     '.xhs-sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}' +
-    '@media(max-width:900px){.xhs-account-metrics,.xhs-pgy-metrics,.xhs-star-metrics,.xhs-star-task-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.xhs-chart-grid{grid-template-columns:1fr}.xhs-control-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}';
+    '@media(max-width:900px){.xhs-account-metrics,.xhs-pgy-metrics,.xhs-pgy-search-metrics,.xhs-star-metrics,.xhs-star-task-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.xhs-chart-grid,.xhs-pgy-keyword-comparison-grid{grid-template-columns:1fr}.xhs-control-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}' +
+    '@media(max-width:620px){.xhs-pgy-search-metrics{grid-template-columns:1fr}}';
 
   function normalizeWxtMarketingMarkup(markup) {
     return String(markup || '')
@@ -3218,6 +3990,8 @@
         dateRange: currentXhsPgyDateRange(analysis, pgy),
         spuName: xhsPgySpuName,
         projectName: xhsPgyProjectName,
+        searchKeywordProfile: xhsObject(pgy.searchKeywordProfile),
+        searchFilters: normalizedXhsPgySearchFilters(xhsPgySearchFilters),
         asOf: currentShanghaiDate(),
         coverage: String(pgy.coverage || ''),
       },
@@ -3252,6 +4026,19 @@
     if (!snapshot || snapshot.schema !== 'xhsInteractiveExportV1') return;
     var model = window.XhsReportModel;
     var pgyProjectName = String(snapshot.pgy && snapshot.pgy.projectName || '');
+    var pgySearchProfileId = String(snapshot.pgy && snapshot.pgy.searchKeywordProfile &&
+      snapshot.pgy.searchKeywordProfile.id || '');
+    var pgySearchDimensions = ['commercialCategory', 'relevance', 'intent'];
+    var pgySearchTotalAttributes = {
+      commercialCategory: 'data-xhs-pgy-search-total="commercialCategory"',
+      relevance: 'data-xhs-pgy-search-total="relevance"',
+      intent: 'data-xhs-pgy-search-total="intent"',
+    };
+    var pgySearchFilters = pgySearchDimensions.reduce(function (filters, key) {
+      filters[key] = String(snapshot.pgy && snapshot.pgy.searchFilters &&
+        snapshot.pgy.searchFilters[key] || '');
+      return filters;
+    }, {});
     var list = function (value) { return Array.isArray(value) ? value : []; };
     var object = function (value) {
       return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -3271,6 +4058,10 @@
       var parsed = number(value);
       return parsed === null ? '—' : Math.round(parsed).toLocaleString('zh-CN');
     };
+    var searchScore = function (value) {
+      var parsed = number(value);
+      return parsed === null || parsed < 0 ? '-' : integer(parsed);
+    };
     var money = function (value) {
       var parsed = number(value);
       return parsed === null ? '—' : '¥' + parsed.toLocaleString('zh-CN', {
@@ -3282,6 +4073,12 @@
       var precision = digits == null ? 1 : Number(digits);
       return parsed === null ? '—' : (parsed * 100).toLocaleString('zh-CN', {
         minimumFractionDigits: precision, maximumFractionDigits: precision,
+      }) + '%';
+    };
+    var compactPercent = function (value) {
+      var parsed = number(value);
+      return parsed === null ? '—' : (parsed * 100).toLocaleString('zh-CN', {
+        minimumFractionDigits: 0, maximumFractionDigits: 2,
       }) + '%';
     };
     var decimal = function (value, digits) {
@@ -3311,10 +4108,22 @@
       });
     };
     var safeNoteUrl = function (fact) {
-      var explicit = String(fact && fact.noteUrl || '').trim();
-      if (/^https:\/\/([a-z0-9-]+\.)*xiaohongshu\.com\//i.test(explicit)) return explicit;
       var noteId = String(fact && fact.noteId || '').trim();
-      return noteId ? 'https://www.xiaohongshu.com/explore/' + encodeURIComponent(noteId) : '';
+      var explicit = String(fact && fact.noteUrl || '').trim();
+      try {
+        var url = new URL(explicit);
+        var match = url.pathname.match(/^\/explore\/([^/]+)\/?$/i);
+        var pathNoteId = match ? decodeURIComponent(match[1]) : '';
+        var token = String(url.searchParams.get('xsec_token') || '').trim();
+        var keys = Array.from(url.searchParams.keys());
+        if (url.protocol === 'https:' && url.hostname.toLowerCase() === 'www.xiaohongshu.com' &&
+            !url.username && !url.password && !url.hash && noteId && pathNoteId === noteId &&
+            token.length >= 8 && url.searchParams.get('xsec_source') === 'pc_pgyexport' &&
+            keys.length === 2 && keys.indexOf('xsec_token') >= 0 && keys.indexOf('xsec_source') >= 0) {
+          return explicit;
+        }
+      } catch (error) {}
+      return '';
     };
 
     function renderPgyChart(kind, rows) {
@@ -3337,6 +4146,195 @@
             Math.max(count ? 3 : 0, count / maximum * 100).toFixed(2) + '%"></i></div><strong class="xhs-chart-value">' +
             escape(integer(count)) + ' 篇' + suffix + '</strong></div>';
         }).join('') : '<p class="xhs-empty-state">' + empty + '</p>');
+    }
+
+    function renderPgySearchKeywordNotes(row) {
+      var notes = list(row && row.notes);
+      if (!notes.length) return '<span class="xhs-muted">暂无笔记明细</span>';
+      var rows = notes.map(function (note) {
+        var noteUrl = safeNoteUrl(note);
+        var title = escape(note && note.title || '未命名笔记');
+        var titleMarkup = noteUrl ? '<a class="xhs-note-detail-link" href="' + escape(noteUrl) +
+          '" target="_blank" rel="noopener noreferrer">' + title + '</a>' :
+          '<span>' + title + '</span><small class="xhs-note-link-unavailable">暂缺平台官方链接</small>';
+        return '<tr data-xhs-pgy-search-note-id="' + escape(note && note.noteId || '') + '"><td>' +
+          escape(note && note.publishDate || '—') + '</td><td>' + titleMarkup + '</td><td>' +
+          integer(note && note.impressions) + '</td><td>' + integer(note && note.reads) + '</td><td>' +
+          compactPercent(note && note.clickRate) + '</td><td>' +
+          compactPercent(note && note.impressionContribution) + '</td></tr>';
+      }).join('');
+      return '<details class="xhs-pgy-keyword-notes"><summary>查看 ' + integer(notes.length) +
+        ' 篇</summary><div><table><thead><tr><th>发布日期</th><th>笔记</th><th>该词曝光</th>' +
+        '<th>该词阅读</th><th>点击率</th><th>曝光贡献</th></tr></thead><tbody>' + rows +
+        '</tbody></table></div></details>';
+    }
+
+    function pgySearchKeywordTotal(keywords) {
+      var rows = list(keywords);
+      var impressionsComplete = rows.every(function (row) {
+        return number(row && row.impressions) !== null;
+      });
+      var readsComplete = rows.every(function (row) { return number(row && row.reads) !== null; });
+      var impressions = impressionsComplete ? rows.reduce(function (sum, row) {
+        return sum + number(row && row.impressions);
+      }, 0) : null;
+      var reads = readsComplete ? rows.reduce(function (sum, row) {
+        return sum + number(row && row.reads);
+      }, 0) : null;
+      var noteIds = new Set();
+      rows.forEach(function (row) {
+        list(row && row.notes).forEach(function (note) {
+          var noteId = String(note && note.noteId || '');
+          if (noteId) noteIds.add(noteId);
+        });
+      });
+      return {
+        keywordCount: rows.length,
+        impressions: impressions,
+        reads: reads,
+        clickRate: impressions !== null && reads !== null && impressions > 0 ? reads / impressions : null,
+        noteCount: noteIds.size,
+      };
+    }
+
+    function pgySearchKeywordView(keywords, filters) {
+      if (typeof model.filterPgySearchKeywords === 'function') {
+        return model.filterPgySearchKeywords(keywords, filters);
+      }
+      var filtered = list(keywords).filter(function (row) {
+        return pgySearchDimensions.every(function (key) {
+          return !filters[key] || String(row && row[key] || '') === String(filters[key]);
+        });
+      });
+      return {
+        keywords: filtered,
+        summaries: typeof model.summarizePgySearchKeywords === 'function'
+          ? model.summarizePgySearchKeywords(filtered) : {},
+        total: pgySearchKeywordTotal(filtered),
+      };
+    }
+
+    function syncPgySearchFilterControls(keywords) {
+      pgySearchDimensions.forEach(function (key) {
+        if (pgySearchFilters[key] && !list(keywords).some(function (row) {
+          return String(row && row[key] || '') === pgySearchFilters[key];
+        })) pgySearchFilters[key] = '';
+      });
+      Array.from(document.querySelectorAll('[data-xhs-pgy-search-filter]')).forEach(function (control) {
+        var key = String(control.getAttribute('data-xhs-pgy-search-filter') || '');
+        if (!pgySearchDimensions.includes(key)) return;
+        if (control.hasAttribute('data-xhs-pgy-search-value')) {
+          control.setAttribute('aria-pressed', String(
+            pgySearchFilters[key] === String(control.getAttribute('data-xhs-pgy-search-value') || '')
+          ));
+        } else {
+          control.value = pgySearchFilters[key];
+        }
+      });
+      var clear = document.querySelector('[data-xhs-pgy-search-clear]');
+      if (clear) clear.disabled = !pgySearchDimensions.some(function (key) { return pgySearchFilters[key]; });
+    }
+
+    function renderPgySearchSummaryRows(keywords) {
+      pgySearchDimensions.forEach(function (key) {
+        var facetFilters = Object.assign({}, pgySearchFilters);
+        facetFilters[key] = '';
+        var facetView = pgySearchKeywordView(keywords, facetFilters);
+        var dimension = object(facetView.summaries && facetView.summaries[key]);
+        var body = document.querySelector('[data-xhs-export-pgy-search-summary-body="' + key + '"]');
+        var rate = document.querySelector('[data-xhs-export-pgy-search-summary-rate="' + key + '"]');
+        if (rate) rate.textContent = '整体加权点击率 ' + compactPercent(dimension.totalClickRate);
+        if (!body) return;
+        var rows = list(dimension.rows).filter(function (row) {
+          return (number(row && row.keywordCount) || 0) > 0;
+        });
+        var totalRow = '<tr class="xhs-total-row" ' + pgySearchTotalAttributes[key] +
+          '><th scope="row">可选词汇总</th><td>' + integer(dimension.totalKeywords || 0) + '</td><td>' +
+          integer(dimension.totalImpressions) + ' <small>(100%)</small></td><td>' +
+          integer(dimension.totalReads) + '</td><td>' + compactPercent(dimension.totalClickRate) +
+          '</td><td>' + integer(dimension.totalNoteCount || 0) + '</td></tr>';
+        body.innerHTML = totalRow + (rows.length ? rows.map(function (row) {
+          var value = String(row && row.value || '未分类');
+          return '<tr><th scope="row"><button type="button" class="xhs-pgy-keyword-filter-button" ' +
+            'data-xhs-pgy-search-filter="' + escape(key) + '" data-xhs-pgy-search-value="' +
+            escape(value) + '" aria-pressed="' + String(pgySearchFilters[key] === value) + '">' +
+            escape(value) + '</button></th><td>' +
+            integer(row && row.keywordCount) + '</td><td>' + integer(row && row.impressions) +
+            ' <small>(' + compactPercent(row && row.exposureShare) + ')</small></td><td>' +
+            integer(row && row.reads) + '</td><td>' + compactPercent(row && row.clickRate) +
+            '</td><td>' + integer(row && row.noteCount) + '</td></tr>';
+        }).join('') : '<tr><td colspan="6">暂无可比较数据。</td></tr>');
+      });
+    }
+
+    function renderPgySearchKeywordRows(summary) {
+      var body = document.querySelector('[data-xhs-export-pgy-search-body]');
+      if (!body) return;
+      var coverage = object(summary && summary.searchKeywordCoverage);
+      var allKeywords = list(summary && summary.searchKeywords);
+      syncPgySearchFilterControls(allKeywords);
+      var filteredView = pgySearchKeywordView(allKeywords, pgySearchFilters);
+      var keywords = list(filteredView.keywords);
+      var keywordTotal = object(filteredView.total);
+      var searchMetricFormatters = {
+        keywordCount: integer,
+        noteCount: integer,
+        impressions: integer,
+        reads: integer,
+        clickRate: compactPercent,
+      };
+      Object.keys(searchMetricFormatters).forEach(function (key) {
+        var metric = document.querySelector('[data-xhs-pgy-search-metric="' + key + '"]');
+        if (metric) metric.textContent = searchMetricFormatters[key](keywordTotal[key]);
+      });
+      var total = Math.max(0, number(coverage.totalNoteCount) || 0);
+      var covered = Math.max(0, number(coverage.coveredNoteCount) || 0);
+      var missing = Math.max(0, total - covered);
+      var coverageNode = document.querySelector('[data-xhs-export-pgy-search-coverage]');
+      if (coverageNode) coverageNode.textContent = '搜索词采集覆盖 ' + integer(covered) + ' / ' +
+        integer(total) + ' 篇';
+      var noteNode = document.querySelector('[data-xhs-export-pgy-search-note]');
+      if (noteNode) noteNode.textContent = '已展示 ' + integer(keywords.length) + ' / ' +
+        integer(allKeywords.length) + ' 个聚合词，按曝光降序排列' + (missing > 0
+        ? '；另有 ' + integer(missing) + ' 篇采集失败或来自未采集该字段的旧归档，未计入表内。'
+        : '；请求成功但无搜索流量的笔记也计为已覆盖。');
+      var emptyCopy = '当前筛选范围暂无搜索关键词数据。';
+      if (total === 0) emptyCopy = '当前筛选条件暂无蒲公英笔记数据。';
+      else if (covered === 0 && (
+        number(coverage.unavailableNoteCount) > 0 || number(coverage.failedNoteCount) > 0
+      )) {
+        emptyCopy = '旧归档未采集搜索来源词，或当前笔记的搜索词请求均失败。';
+      }
+      renderPgySearchSummaryRows(allKeywords);
+      var keywordRows = keywords.length ? keywords.map(function (row) {
+        return '<tr data-xhs-pgy-search-keyword="' + escape(row && row.keyword || '') + '"><th scope="row">' +
+          escape(row && row.keyword || '—') + '</th><td>' +
+          searchScore(row && row.searchScore) + '</td><td>' +
+          escape(row && row.commercialCategory || '待确认') + '</td><td>' +
+          escape(row && row.relevance || '待确认') + '</td><td>' +
+          escape(row && row.intent || '意图不明确') + '</td><td><span class="xhs-classification-badge" data-source="' +
+          escape(row && row.classificationSource || 'rule') + '">' +
+          escape({ override: '人工', manual: '人工', fact: '店铺事实', hybrid: '历史联合分类',
+            qwen: '历史模型分类', openai: '历史模型分类', rule: '行业规则', heuristic: '行业规则' }[
+            String(row && row.classificationSource || '')
+          ] || '规则') + '</span>' +
+          (row && row.needsReview ? '<small class="xhs-review-required">待复核</small>' : '') +
+          '</td><td title="' +
+          escape((row && row.classificationReason || '') + '；' + (row && row.intentReason || '')) + '">' +
+          escape(row && row.confidence || '低') + ' ' + compactPercent(row && row.confidenceScore) +
+          '</td><td>' + integer(row && row.impressions) + '</td><td>' + integer(row && row.reads) +
+          '</td><td>' + compactPercent(row && row.clickRate) + '</td><td>' +
+          renderPgySearchKeywordNotes(row) + '</td><td><button type="button" class="xhs-keyword-correct" ' +
+          'data-xhs-correct-keyword="' + escape(row && row.keyword || '') + '">纠正</button></td></tr>';
+      }).join('') : '<tr><td colspan="12">' + escape(emptyCopy) + '</td></tr>';
+      var totalRow = '<tr class="xhs-total-row" data-xhs-pgy-search-total="keywords"><th scope="row">' +
+        '当前筛选汇总 · ' + integer(keywordTotal.keywordCount || 0) + ' 个词</th><td>-</td><td colspan="5">' +
+        (keywords.length === allKeywords.length ? '全部关键词' : '已按分类维度筛选') + '</td><td>' +
+        integer(keywordTotal.impressions) + '</td><td>' + integer(keywordTotal.reads) + '</td><td>' +
+        compactPercent(keywordTotal.clickRate) + '</td><td>' + integer(keywordTotal.noteCount || 0) +
+        ' 篇</td><td>—</td></tr>';
+      body.innerHTML = totalRow + keywordRows;
+      syncPgySearchFilterControls(allKeywords);
     }
 
     function renderPgyNoteRows(summary, dateRange) {
@@ -3369,6 +4367,9 @@
       try {
         total = model.aggregatePgyFacts({
           facts: filtered, dateRange: dateRange, spuName: '', asOf: summary && summary.asOf,
+          searchClassification: {
+            profileId: pgySearchProfileId,
+          },
         });
         if (['partial', 'unavailable'].includes(String(snapshot.pgy.coverage || ''))) {
           total.costs = { cooperation: null, platformFee: null, total: null };
@@ -3376,6 +4377,7 @@
       } catch (error) {
         total = null;
       }
+      renderPgySearchKeywordRows(total);
       var totalCosts = object(total && total.costs);
       var totalMetrics = object(total && total.metrics);
       var totalTaobao = object(total && total.taobao15d);
@@ -3424,6 +4426,9 @@
       try {
         summary = model.aggregatePgyFacts({
           facts: facts, dateRange: dateRange, spuName: String(spu.value || ''), asOf: source.asOf,
+          searchClassification: {
+            profileId: pgySearchProfileId,
+          },
         });
       } catch (error) {
         status('pgy', '日期范围无效：' + String(error && error.message || error));
@@ -3476,6 +4481,34 @@
     });
     if (pgyProject && !pgyProject.disabled) pgyProject.addEventListener('change', function () {
       pgyProjectName = String(pgyProject.value || '');
+      renderPgy();
+    });
+    if (typeof document.addEventListener === 'function') document.addEventListener('change', function (event) {
+      var control = event.target && event.target.closest &&
+        event.target.closest('[data-xhs-pgy-search-filter]');
+      if (!control || control.hasAttribute('data-xhs-pgy-search-value') || control.disabled) return;
+      var key = String(control.getAttribute('data-xhs-pgy-search-filter') || '');
+      if (!pgySearchDimensions.includes(key)) return;
+      pgySearchFilters[key] = String(control.value || '');
+      renderPgy();
+    });
+    if (typeof document.addEventListener === 'function') document.addEventListener('click', function (event) {
+      var category = event.target && event.target.closest && (
+        event.target.closest('[data-xhs-pgy-search-value]') ||
+        event.target.closest('[data-xhs-pgy-search-filter][data-xhs-pgy-search-value]')
+      );
+      if (category && !category.disabled) {
+        var key = String(category.getAttribute('data-xhs-pgy-search-filter') || '');
+        if (!pgySearchDimensions.includes(key)) return;
+        var value = String(category.getAttribute('data-xhs-pgy-search-value') || '');
+        pgySearchFilters[key] = pgySearchFilters[key] === value ? '' : value;
+        renderPgy();
+        return;
+      }
+      var clear = event.target && event.target.closest &&
+        event.target.closest('[data-xhs-pgy-search-clear]');
+      if (!clear || clear.disabled) return;
+      pgySearchDimensions.forEach(function (key) { pgySearchFilters[key] = ''; });
       renderPgy();
     });
 
@@ -4146,6 +5179,7 @@
       xhsPgyDateRange: { ...xhsPgyDateRange },
       xhsPgySpuName,
       xhsPgyProjectName,
+      xhsPgySearchFilters: { ...xhsPgySearchFilters },
       xhsPgyNoteExpanded,
       xhsPgySnapshotKey,
     };
@@ -4179,6 +5213,7 @@
       xhsPgyDateRange = previous.xhsPgyDateRange;
       xhsPgySpuName = previous.xhsPgySpuName;
       xhsPgyProjectName = previous.xhsPgyProjectName;
+      xhsPgySearchFilters = previous.xhsPgySearchFilters;
       xhsPgyNoteExpanded = previous.xhsPgyNoteExpanded;
       xhsPgySnapshotKey = previous.xhsPgySnapshotKey;
     }
@@ -4208,6 +5243,30 @@
     buildFromArchive: buildExportFromArchive,
   });
 
+  const xhsCorrectionDialog = document.getElementById('xhsClassificationCorrectionDialog');
+  const xhsCorrectionForm = xhsCorrectionDialog && xhsCorrectionDialog.querySelector(
+    '[data-xhs-classification-correction-form]'
+  );
+  if (xhsCorrectionDialog && xhsCorrectionForm) {
+    xhsCorrectionDialog.querySelectorAll('[data-xhs-classification-correction-cancel]')
+      .forEach((button) => button.addEventListener('click', closeXhsKeywordCorrection));
+    xhsCorrectionForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const saveButton = xhsCorrectionForm.querySelector('[data-xhs-classification-correction-save]');
+      const errorNode = xhsCorrectionForm.querySelector('[data-xhs-classification-correction-error]');
+      if (saveButton && saveButton.disabled) return;
+      if (saveButton) saveButton.disabled = true;
+      if (errorNode) errorNode.textContent = '';
+      try {
+        await saveXhsKeywordCorrection(xhsCorrectionForm);
+      } catch (error) {
+        if (errorNode) errorNode.textContent = String(error && error.message || error || '保存失败');
+      } finally {
+        if (saveButton) saveButton.disabled = false;
+      }
+    });
+  }
+
   document.getElementById('refreshReportBtn').addEventListener('click', loadReport);
   document.getElementById('exportReportBtn').addEventListener('click', exportReport);
   document.getElementById('clearReportBtn').addEventListener('click', async () => {
@@ -4228,6 +5287,10 @@
       xhsPgyDateRange = { from: '', to: '' };
       xhsPgySpuName = '';
       xhsPgyProjectName = '';
+      xhsPgySearchFilters = {
+        commercialCategory: '', relevance: '', intent: '',
+        classificationSource: '', reviewRequired: null,
+      };
       xhsPgyNoteExpanded = false;
       xhsPgySnapshotKey = '';
       activeSection = 'flow';
@@ -4269,10 +5332,39 @@
     const spu = event.target && event.target.closest && event.target.closest('[data-xhs-pgy-spu]');
     const project = event.target && event.target.closest && event.target.closest('[data-xhs-pgy-project]');
     const date = event.target && event.target.closest && event.target.closest('[data-xhs-pgy-date]');
-    if (!spu && !project && !date) return;
-    if ((spu || project || date).disabled) return;
+    const keywordFilter = event.target && event.target.closest &&
+      event.target.closest('select[data-xhs-pgy-search-filter]');
+    const sourceFilter = event.target && event.target.closest &&
+      event.target.closest('[data-xhs-classification-source]');
+    const reviewOnly = event.target && event.target.closest &&
+      event.target.closest('[data-xhs-review-only]');
+    if (!spu && !project && !date && !keywordFilter && !sourceFilter && !reviewOnly) return;
+    if ((spu || project || date || keywordFilter || sourceFilter || reviewOnly).disabled) return;
     const analysis = xhsObject(xhsAnalysis);
     currentXhsPgyDateRange(analysis, xhsObject(analysis.pgy));
+    if (keywordFilter) {
+      const key = keywordFilter.getAttribute('data-xhs-pgy-search-filter');
+      if (!XHS_PGY_SEARCH_DIMENSIONS.some((dimension) => dimension.key === key)) return;
+      xhsPgySearchFilters = { ...xhsPgySearchFilters, [key]: String(keywordFilter.value || '') };
+      renderXhs();
+      return;
+    }
+    if (sourceFilter) {
+      xhsPgySearchFilters = {
+        ...xhsPgySearchFilters,
+        classificationSource: String(sourceFilter.value || ''),
+      };
+      renderXhs();
+      return;
+    }
+    if (reviewOnly) {
+      xhsPgySearchFilters = {
+        ...xhsPgySearchFilters,
+        reviewRequired: reviewOnly.checked ? true : null,
+      };
+      renderXhs();
+      return;
+    }
     if (spu) {
       xhsPgySpuName = String(spu.value || '');
       xhsPgyProjectName = '';
@@ -4294,6 +5386,40 @@
   });
 
   if (xhsPgyReport) xhsPgyReport.addEventListener("click", (event) => {
+    const category = event.target && event.target.closest && event.target.closest(
+      '[data-xhs-pgy-search-filter][data-xhs-pgy-search-value]'
+    );
+    const clear = event.target && event.target.closest && event.target.closest('[data-xhs-pgy-search-clear]');
+    const reclassify = event.target && event.target.closest && event.target.closest('[data-xhs-reclassify]');
+    const correction = event.target && event.target.closest &&
+      event.target.closest('[data-xhs-correct-keyword]');
+    if (correction && !correction.disabled) {
+      openXhsKeywordCorrection(correction.getAttribute('data-xhs-correct-keyword'));
+      return;
+    }
+    if (reclassify && !reclassify.disabled) {
+      runXhsSearchClassification(true);
+      return;
+    }
+    if (category && !category.disabled) {
+      const key = category.getAttribute('data-xhs-pgy-search-filter');
+      if (!XHS_PGY_SEARCH_DIMENSIONS.some((dimension) => dimension.key === key)) return;
+      const value = String(category.getAttribute('data-xhs-pgy-search-value') || '');
+      xhsPgySearchFilters = {
+        ...xhsPgySearchFilters,
+        [key]: xhsPgySearchFilters[key] === value ? '' : value,
+      };
+      renderXhs();
+      return;
+    }
+    if (clear && !clear.disabled) {
+          xhsPgySearchFilters = {
+            commercialCategory: '', relevance: '', intent: '',
+            classificationSource: '', reviewRequired: null,
+          };
+      renderXhs();
+      return;
+    }
     const toggle = event.target && event.target.closest && event.target.closest('[data-xhs-pgy-note-toggle]');
     if (!toggle || toggle.disabled) return;
     xhsPgyNoteExpanded = !xhsPgyNoteExpanded;

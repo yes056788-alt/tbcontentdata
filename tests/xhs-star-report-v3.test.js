@@ -19,6 +19,8 @@ function createReportHarness() {
     buildXhsProjectTree,
     buildXhsProjectSummary,
     buildXhsTaskSummary,
+    buildXhsStarNotes,
+    buildXhsUnassignedNotes,
     buildXhsNotesTable,
     setState(value) {
       xhsAnalysis = value && typeof value === 'object' ? value : null;
@@ -252,6 +254,55 @@ test('Star project area renders existing orders as summary-only tasks and never 
     '项目/任务汇总区不得再渲染任何笔记节点');
   assert.doesNotMatch(markup, />[^<]*订单[^<]*</,
     '新 UI 中业务 order 统一称为“任务”');
+});
+
+test('Star note titles use only signed PGY exports and reject bare or hostile URLs', () => {
+  const harness = createReportHarness();
+  const assignedUrl = 'https://www.xiaohongshu.com/explore/fictional-nested-note' +
+    '?xsec_token=fictional-assigned-note-token&xsec_source=pc_pgyexport';
+  const unassignedUrl = 'https://www.xiaohongshu.com/explore/fictional-unassigned-note' +
+    '?xsec_token=fictional-unassigned-note-token&xsec_source=pc_pgyexport';
+  const assignedMarkup = harness.buildXhsStarNotes({ notes: [{
+    noteId: 'fictional-nested-note',
+    title: '可跳转层级笔记',
+    noteUrl: assignedUrl,
+    publishDate: '2030-01-05',
+    costs: {},
+    metrics: {},
+  }, {
+    noteId: 'fictional-unsafe-note',
+    title: '不安全层级笔记',
+    noteUrl: 'https://attacker.example/explore/fictional-unsafe-note' +
+      '?xsec_token=fictional-attacker-token&xsec_source=pc_pgyexport',
+    publishDate: '2030-01-06',
+    costs: {},
+    metrics: {},
+  }] });
+  const unassignedMarkup = harness.buildXhsUnassignedNotes({ unassignedNotes: [{
+    noteId: 'fictional-unassigned-note',
+    title: '可跳转待归属笔记',
+    noteUrl: unassignedUrl,
+    candidateOrderIds: [],
+    reason: 'order_relation_missing',
+    costs: {},
+  }, {
+    noteId: 'fictional-bare-note',
+    title: '缺少官方签名的待归属笔记',
+    noteUrl: 'https://www.xiaohongshu.com/explore/fictional-bare-note',
+    candidateOrderIds: [],
+    reason: 'order_relation_missing',
+    costs: {},
+  }] });
+
+  assert.match(assignedMarkup,
+    /<a class="xhs-note-detail-link" href="https:\/\/www\.xiaohongshu\.com\/explore\/fictional-nested-note\?xsec_token=fictional-assigned-note-token&amp;xsec_source=pc_pgyexport" target="_blank" rel="noopener noreferrer">可跳转层级笔记<\/a>/);
+  assert.match(unassignedMarkup,
+    /<a class="xhs-note-detail-link" href="https:\/\/www\.xiaohongshu\.com\/explore\/fictional-unassigned-note\?xsec_token=fictional-unassigned-note-token&amp;xsec_source=pc_pgyexport" target="_blank" rel="noopener noreferrer">可跳转待归属笔记<\/a>/);
+  assert.doesNotMatch(assignedMarkup, /attacker\.example/);
+  assert.doesNotMatch(assignedMarkup,
+    /<a class="xhs-note-detail-link"[^>]*>不安全层级笔记<\/a>/);
+  assert.doesNotMatch(unassignedMarkup,
+    /<a class="xhs-note-detail-link"[^>]*>缺少官方签名的待归属笔记<\/a>/);
 });
 
 test('Star project analysis removes the unavailable project-period column while task periods remain', () => {
@@ -650,13 +701,13 @@ test('note explorer uses approved cost formulas and preserves unknown instead of
 test('note explorer makes each note title a safe Xiaohongshu detail link', () => {
   const harness = createReportHarness();
   const note = explorerNote('fictional-note-link', { title: '可跳转笔记标题' });
-  note.noteUrl = 'https://www.xiaohongshu.com/explore/fictional-note-link';
+  note.noteUrl = 'https://www.xiaohongshu.com/explore/fictional-note-link?xsec_token=fictional_token_123&xsec_source=pc_pgyexport';
   const row = noteRows(harness.buildXhsNotesTable({ star: starHierarchy(), notes: [note] }, {
     expanded: true,
   }))[0];
 
   assert.match(row.html,
-    /<a class="xhs-note-detail-link" href="https:\/\/www\.xiaohongshu\.com\/explore\/fictional-note-link" target="_blank" rel="noopener noreferrer">可跳转笔记标题<\/a>/);
+    /<a class="xhs-note-detail-link" href="https:\/\/www\.xiaohongshu\.com\/explore\/fictional-note-link\?xsec_token=fictional_token_123&amp;xsec_source=pc_pgyexport" target="_blank" rel="noopener noreferrer">可跳转笔记标题<\/a>/);
 });
 
 test('note explorer respects partial source coverage instead of promoting observed buckets to complete costs', () => {

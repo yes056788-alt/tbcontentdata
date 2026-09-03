@@ -6,8 +6,8 @@
   const embeddedInSycm = window.top !== window && ancestorOrigins.includes('https://sycm.taobao.com');
   const inheritedSycmFrame = embeddedInSycm && ['about:', 'blob:', 'data:'].includes(location.protocol);
   if (location.hostname !== 'sycm.taobao.com' && !embeddedInSycm && !inheritedSycmFrame) return;
-  if (window.__sycmDiagnosisScriptV2282) return;
-  window.__sycmDiagnosisScriptV2282 = true;
+  if (window.__sycmDiagnosisScriptV2284) return;
+  window.__sycmDiagnosisScriptV2284 = true;
 
   const PREFIX = '[生意参谋诊断]';
   const SYCM_CONTENT_ANALYSIS_PATH = '/xsite/contentanalysis/overview_new_v2';
@@ -20,9 +20,19 @@
   const GRASS_PRODUCT_MIN_DELAY_MS = 3200;
   const GRASS_PRODUCT_MAX_DELAY_MS = 4800;
   const GRASS_PRODUCT_PAGE_TIMEOUT_MS = 20000;
+  const GRASS_PRODUCT_PAGE_QUIET_MS = 1800;
+  const GRASS_PRODUCT_PAGE_STABLE_READS = 5;
+  const GRASS_PRODUCT_SCROLL_POLL_MS = 120;
+  const GRASS_PRODUCT_SCROLL_STABLE_READS = 3;
+  const GRASS_PRODUCT_SCROLL_SETTLE_TIMEOUT_MS = 3000;
+  const GRASS_PRODUCT_SCROLL_STEP_RATIO = 0.65;
   const CONTENT_CACHE_KEY = 'sycmContentDiagnosisSnapshotV1';
   const BUSINESS_DEFENSE_TRAFFIC_KEY = 'businessDefenseSycmTrafficSnapshotV1';
   const RETRY_AFTER_RELOAD_KEY = 'sycmDiagnosisRetryAfterExtensionReload';
+  const TRAFFIC_DATE_CONTROL_SELECTOR = [
+    'button', '[role="button"]', '[role="radio"]', '[role="tab"]',
+    'label', 'a', 'span', 'div',
+  ].join(', ');
   const CHANNELS = ['全部', '首猜', '逛逛', '搜索', '其他'];
   const REFERENCES = {
     shortVideoShare: 0.60,
@@ -43,6 +53,7 @@
     selectedFieldCount: 0,
     fieldCoverageComplete: false,
     paginationAuthoritative: false,
+    preservedSharedIdentityCount: 0,
     running: false,
     stopRequested: false,
     warning: '',
@@ -220,6 +231,21 @@
     return '';
   }
 
+  function dateModeFromDateRange(value) {
+    const dates = String(value || '').match(/20\d{2}[./-]\d{1,2}[./-]\d{1,2}/g) || [];
+    if (dates.length < 2) return '';
+    const timestamps = dates.slice(0, 2).map((date) => {
+      const parts = date.replace(/[./]/g, '-').split('-').map(Number);
+      return Date.UTC(parts[0], parts[1] - 1, parts[2]);
+    });
+    if (!timestamps.every(Number.isFinite) || timestamps[1] < timestamps[0]) return '';
+    const inclusiveDays = Math.round((timestamps[1] - timestamps[0]) / 86400000) + 1;
+    if (inclusiveDays === 30) return 'last30';
+    if (inclusiveDays === 7) return 'last7';
+    if (inclusiveDays === 1) return 'day';
+    return '';
+  }
+
   function findTrafficDateToolbar() {
     const customLabels = findTextElements(['自定义']).filter((element) => (
       getElementText(element) === '自定义' && isViewportInteractable(element)
@@ -254,7 +280,7 @@
   function dateModeActivationScore(element, toolbar) {
     let score = 0;
     let node = element;
-    for (let level = 0; level < 3 && node && toolbar.contains(node); level += 1, node = node.parentElement) {
+    for (let level = 0; level < 7 && node && toolbar.contains(node); level += 1, node = node.parentElement) {
       const className = String(node.className || '').toLowerCase();
       if (/active|selected|checked|current|primary/.test(className)) score += 20;
       if (node.getAttribute('aria-selected') === 'true') score += 20;
@@ -276,16 +302,20 @@
     const toolbar = findTrafficDateToolbar();
     const root = document.body;
     if (!root) return '';
-    const candidates = Array.from(root.querySelectorAll('button, [role="button"], [role="radio"], label, a, span')).filter((element) => (
+    const candidateRoot = toolbar || root;
+    const candidates = Array.from(candidateRoot.querySelectorAll(TRAFFIC_DATE_CONTROL_SELECTOR)).filter((element) => (
       isVisible(element) &&
       dateModeFromLabel(getElementText(element)) &&
       element.getBoundingClientRect().width <= 110 &&
       element.getBoundingClientRect().height <= 60
-    )).map((element) => ({
-      element,
-      mode: dateModeFromLabel(getElementText(element)),
-      score: dateModeActivationScore(element, toolbar || root),
-    })).filter((candidate) => candidate.mode);
+    )).map((labelElement) => {
+      const element = compactTextClickTarget(labelElement) || labelElement;
+      return {
+        element,
+        mode: dateModeFromLabel(getElementText(labelElement)),
+        score: dateModeActivationScore(element, toolbar || root),
+      };
+    }).filter((candidate) => candidate.mode);
     const best = candidates.sort((left, right) => right.score - left.score)[0];
     return best && best.score > 0 ? best.mode : '';
   }
@@ -294,17 +324,20 @@
     const toolbar = findTrafficDateToolbar();
     const root = document.body;
     if (!root) return null;
-    const candidates = Array.from(root.querySelectorAll('button, [role="button"], [role="radio"], label, a, span')).filter((element) => {
+    const candidateRoot = toolbar || root;
+    const candidates = Array.from(candidateRoot.querySelectorAll(TRAFFIC_DATE_CONTROL_SELECTOR)).filter((element) => {
       const text = getElementText(element);
       if (!isVisible(element) || dateModeFromLabel(text) !== 'last30') return false;
       const rect = element.getBoundingClientRect();
       return rect.width > 0 && rect.width <= 110 && rect.height > 0 && rect.height <= 60;
-    }).sort((left, right) => {
+    }).map((element) => compactTextClickTarget(element) || element).filter((element, index, values) => (
+      values.indexOf(element) === index && isVisible(element)
+    )).sort((left, right) => {
       const leftInToolbar = toolbar && toolbar.contains(left) ? 0 : 1;
       const rightInToolbar = toolbar && toolbar.contains(right) ? 0 : 1;
       if (leftInToolbar !== rightInToolbar) return leftInToolbar - rightInToolbar;
-      const leftSemantic = left.matches('button, [role="button"], [role="radio"]') ? 0 : 1;
-      const rightSemantic = right.matches('button, [role="button"], [role="radio"]') ? 0 : 1;
+      const leftSemantic = left.matches('button, [role="button"], [role="radio"], [role="tab"]') ? 0 : 1;
+      const rightSemantic = right.matches('button, [role="button"], [role="radio"], [role="tab"]') ? 0 : 1;
       if (leftSemantic !== rightSemantic) return leftSemantic - rightSemantic;
       const leftRect = left.getBoundingClientRect();
       const rightRect = right.getBoundingClientRect();
@@ -382,13 +415,16 @@
       ? labeledMatch[1] + '|' + (labeledMatch[2] || labeledMatch[1])
       : genericRange;
     const normalizedVisibleRange = normalizeText(visibleRange);
+    const detectedDateMode = isTrafficPage() ? detectTrafficDateMode() : '';
     return {
       dateRange: isTrafficPage()
         ? dateRange.replace(/%7C/ig, '|')
         : (normalizedVisibleRange || dateRange.replace(/%7C/ig, '|')),
       dateType,
       visibleRange: normalizedVisibleRange,
-      dateMode: isTrafficPage() ? detectTrafficDateMode() : '',
+      dateMode: isTrafficPage()
+        ? (detectedDateMode || dateModeFromDateRange(dateRange))
+        : '',
     };
   }
 
@@ -1400,7 +1436,7 @@
   }
 
   function grassProductCells(row) {
-    if (!row) return [];
+    if (!row || !row.children) return [];
     return Array.from(row.children).filter((cell) => (
       cell.classList.contains('table-cell') &&
       !cell.classList.contains('hide-column')
@@ -1446,8 +1482,11 @@
   function findGrassProductPagination(tableRoot) {
     let root = tableRoot;
     for (let level = 0; root && level < 8; level += 1, root = root.parentElement) {
-      const pagination = root.querySelector && root.querySelector('.ant-pagination');
-      if (pagination) return pagination;
+      const candidates = root.querySelectorAll
+        ? Array.from(root.querySelectorAll('.ant-pagination')).filter(isVisible)
+        : [];
+      if (candidates.length === 1) return candidates[0];
+      if (candidates.length > 1) return null;
     }
     return null;
   }
@@ -1544,20 +1583,49 @@
     };
   }
 
-  function readCurrentGrassProductPage() {
-    const headerRow = findGrassProductHeaderRow();
-    if (!headerRow) throw new Error('未找到商品颗粒数据表头。');
-    const tableRoot = findGrassProductTableRoot(headerRow);
-    const headers = grassProductCells(headerRow)
-      .map((cell) => normalizeGrassProductText(cell.innerText || cell.textContent, 120))
-      .filter(Boolean);
-    if (headers.length < 3 || headers[0] !== '商品id' || headers[1] !== '商品标题') {
-      throw new Error('商品颗粒数据表头结构不完整。');
-    }
+  function findGrassProductScroller(tableRoot, expectedColumnCount) {
+    if (!tableRoot) return null;
+    const rowsByScroller = new Map();
+    Array.from(tableRoot.querySelectorAll('.row.body-font')).forEach((row) => {
+      const scroller = row.closest('.scroll-y-container');
+      if (!scroller || !tableRoot.contains(scroller)) return;
+      if (!rowsByScroller.has(scroller)) rowsByScroller.set(scroller, []);
+      rowsByScroller.get(scroller).push(row);
+    });
+    const expectedColumns = Number(expectedColumnCount) || 0;
+    const ranked = Array.from(rowsByScroller.entries()).map(([scroller, rows]) => {
+      const cellCounts = rows.map((row) => grassProductCells(row).length);
+      const completeRows = expectedColumns > 0
+        ? cellCounts.filter((count) => count >= expectedColumns).length
+        : 0;
+      const maxColumns = cellCounts.length ? Math.max(...cellCounts) : 0;
+      return { scroller, rows, completeRows, maxColumns };
+    }).sort((left, right) => (
+      right.completeRows - left.completeRows ||
+      right.maxColumns - left.maxColumns ||
+      right.rows.length - left.rows.length
+    ));
+    if (!ranked.length) return null;
+    if (ranked.length === 1) return ranked[0].scroller;
+    const best = ranked[0];
+    const runnerUp = ranked[1];
+    if (
+      best.completeRows === runnerUp.completeRows &&
+      best.maxColumns === runnerUp.maxColumns &&
+      best.rows.length === runnerUp.rows.length
+    ) return null;
+    return best.scroller;
+  }
 
+  function readGrassProductWindow(tableRoot, headers) {
     const headerLabels = new Set(headers.slice(2));
-    const seenRows = new Set();
-    const rows = Array.from(tableRoot.querySelectorAll('.row.body-font')).map((row) => {
+    const scroller = findGrassProductScroller(tableRoot, headers.length);
+    const scrollerRect = scroller && scroller.getBoundingClientRect();
+    const rowScope = scroller || tableRoot;
+    const candidateRows = Array.from(rowScope.querySelectorAll('.row.body-font')).filter((row) => (
+      !scroller || row.closest('.scroll-y-container') === scroller
+    ));
+    const candidates = candidateRows.map((row) => {
       const values = grassProductCells(row).slice(0, headers.length).map(readGrassProductCell);
       if (values.length !== headers.length) return null;
       const itemId = String(values[0] || '').replace(/\.0+$/, '');
@@ -1565,12 +1633,58 @@
       values[0] = itemId;
       const echoedHeaderCount = values.slice(2).filter((value) => headerLabels.has(value)).length;
       if (echoedHeaderCount >= 2) return null;
-      const signature = values.join('\u001f');
-      if (seenRows.has(signature)) return null;
-      seenRows.add(signature);
-      return { values };
+      return { row, values, rect: row.getBoundingClientRect() };
     }).filter(Boolean);
-    if (!rows.length) throw new Error('当前页商品数据尚未加载完成。');
+    const heights = candidates.map((entry) => entry.rect.height).filter((height) => height > 0).sort((a, b) => a - b);
+    const orderedTops = candidates.map((entry) => entry.rect.top).sort((a, b) => a - b);
+    const pitches = orderedTops.slice(1).map((top, index) => top - orderedTops[index])
+      .filter((pitch) => pitch > 0).sort((a, b) => a - b);
+    const rowHeight = pitches.length
+      ? pitches[Math.floor(pitches.length / 2)]
+      : heights.length ? heights[Math.floor(heights.length / 2)] : 0;
+    const geometryAvailable = Boolean(scroller && scrollerRect && rowHeight > 0);
+    const explicitOrdinals = candidates.map((entry) => {
+      const explicit = ['aria-rowindex', 'data-row-index', 'data-index'].map((name) => {
+        const attribute = entry.row.getAttribute(name);
+        return attribute === null || attribute === '' ? NaN : Number(attribute);
+      }).find((value) => Number.isInteger(value) && value >= 0);
+      return Number.isInteger(explicit) ? explicit : null;
+    });
+    const useExplicitOrdinals = !geometryAvailable && explicitOrdinals.every(Number.isInteger);
+    const rows = candidates.map((entry, index) => {
+      const rawOrdinal = geometryAvailable
+        ? Math.round((entry.rect.top - scrollerRect.top + scroller.scrollTop) / rowHeight)
+        : useExplicitOrdinals ? explicitOrdinals[index] : index + 1;
+      return { values: entry.values, rawOrdinal };
+    });
+    const hasViewportRows = !scroller || candidates.some((entry) => (
+      entry.rect.bottom > scrollerRect.top && entry.rect.top < scrollerRect.bottom
+    ));
+    return {
+      rows,
+      rowHeight,
+      hasViewportRows,
+      scrollTop: scroller ? scroller.scrollTop : 0,
+      scrollLeft: scroller ? scroller.scrollLeft : 0,
+      scrollHeight: scroller ? scroller.scrollHeight : 0,
+      clientHeight: scroller ? scroller.clientHeight : 0,
+    };
+  }
+
+  function readGrassProductPageIdentity(preferredHeaderRow, preferredTableRoot) {
+    const headerRow = preferredHeaderRow && preferredHeaderRow.isConnected !== false
+      ? preferredHeaderRow
+      : findGrassProductHeaderRow();
+    if (!headerRow) throw new Error('未找到商品颗粒数据表头。');
+    const tableRoot = preferredTableRoot && preferredTableRoot.isConnected !== false
+      ? preferredTableRoot
+      : findGrassProductTableRoot(headerRow);
+    const headers = grassProductCells(headerRow)
+      .map((cell) => normalizeGrassProductText(cell.innerText || cell.textContent, 120))
+      .filter(Boolean);
+    if (headers.length < 3 || headers[0] !== '商品id' || headers[1] !== '商品标题') {
+      throw new Error('商品颗粒数据表头结构不完整。');
+    }
 
     const pagination = readGrassProductPagination(tableRoot);
     if (!pagination.pageNo) throw new Error('未识别当前页码。');
@@ -1590,8 +1704,9 @@
       filterContext,
     ].join('\u001e');
     return {
+      headerRow,
+      tableRoot,
       headers,
-      rows,
       pageNo: pagination.pageNo,
       pageSize: pagination.pageSize,
       totalExpected: pagination.totalExpected,
@@ -1602,29 +1717,360 @@
       filterContext,
       dateRange,
       fingerprint,
+    };
+  }
+
+  function readGrassProductStatusMetadata() {
+    let live = {};
+    try {
+      live = readGrassProductPageIdentity() || {};
+    } catch (error) {
+      live = {};
+    }
+    const storedHeaders = Array.isArray(grassProductCollection.headers)
+      ? grassProductCollection.headers
+      : [];
+    return {
+      headers: (storedHeaders.length ? storedHeaders : Array.isArray(live.headers) ? live.headers : []).slice(),
+      totalExpected: grassProductCollection.totalExpected || Number(live.totalExpected) || 0,
+      pageSize: grassProductCollection.pageSize || Number(live.pageSize) || 0,
+      pageCountExpected: grassProductCollection.pageCountExpected || Number(live.pageCountExpected) || 0,
+      selectedFieldCount: grassProductCollection.selectedFieldCount || Number(live.selectedFieldCount) || 0,
+    };
+  }
+
+  function readCurrentGrassProductPage() {
+    const identity = readGrassProductPageIdentity();
+    const windowData = readGrassProductWindow(identity.tableRoot, identity.headers);
+    if (!windowData.rows.length) throw new Error('当前页商品数据尚未加载完成。');
+    return {
+      headers: identity.headers,
+      rows: windowData.rows,
+      pageNo: identity.pageNo,
+      pageSize: identity.pageSize,
+      totalExpected: identity.totalExpected,
+      pageCountExpected: identity.pageCountExpected,
+      selectedFieldCount: identity.selectedFieldCount,
+      fieldCoverageComplete: identity.fieldCoverageComplete,
+      paginationAuthoritative: identity.paginationAuthoritative,
+      filterContext: identity.filterContext,
+      dateRange: identity.dateRange,
+      fingerprint: identity.fingerprint,
+      windowRowHeight: windowData.rowHeight,
+      windowHasViewportRows: windowData.hasViewportRows,
+      windowScrollTop: windowData.scrollTop,
+      windowScrollLeft: windowData.scrollLeft,
+      windowScrollHeight: windowData.scrollHeight,
+      windowClientHeight: windowData.clientHeight,
       capturedAt: Date.now(),
     };
   }
 
+  function grassProductRowSignature(row) {
+    return row && Array.isArray(row.values) ? row.values.join('\u001f') : '';
+  }
+
+  function grassProductRowIdentitySignature(row) {
+    if (!row || !Array.isArray(row.values)) return '';
+    const itemId = String(row.values[0] || '').replace(/\.0+$/, '').trim();
+    let title = String(row.values[1] || '').replace(/\s+/g, ' ').trim();
+    for (let pass = 0; pass < 3; pass += 1) title = title.replace(/&amp;/gi, '&');
+    title = title.replace(/&#0*38;|&#x0*26;/gi, '&');
+    return itemId && title ? itemId + '\u001f' + title : '';
+  }
+
   function grassProductPageSignature(page) {
     if (!page || !Array.isArray(page.rows)) return '';
-    return page.rows.map((row) => row.values.join('\u001f')).join('\u001e');
+    return page.rows.map(grassProductRowSignature).join('\u001e');
+  }
+
+  function grassProductWindowSignature(page) {
+    if (!page || !Array.isArray(page.rows)) return '';
+    return page.rows.slice().sort((left, right) => left.rawOrdinal - right.rawOrdinal)
+      .map((row) => String(row.rawOrdinal) + '\u001d' + grassProductRowSignature(row)).join('\u001e');
+  }
+
+  function grassProductWindowContentSignature(page) {
+    if (!page || !Array.isArray(page.rows)) return '';
+    return page.rows.slice().sort((left, right) => left.rawOrdinal - right.rawOrdinal)
+      .map(grassProductRowSignature).join('\u001e');
+  }
+
+  function grassProductCanonicalPageSignature(page) {
+    if (!page || !Array.isArray(page.rows) || !page.rows.length) return '';
+    const rowSignatures = page.rows.map(grassProductRowSignature).sort();
+    return String(rowSignatures.length) + '\u001c' + rowSignatures.join('\u001e');
+  }
+
+  function grassProductSharedIdentityCount(leftPage, rightPage) {
+    if (!leftPage || !rightPage || !Array.isArray(leftPage.rows) || !Array.isArray(rightPage.rows)) return 0;
+    const available = new Map();
+    rightPage.rows.forEach((row) => {
+      const identity = grassProductRowIdentitySignature(row);
+      if (identity) available.set(identity, (available.get(identity) || 0) + 1);
+    });
+    return leftPage.rows.reduce((count, row) => {
+      const identity = grassProductRowIdentitySignature(row);
+      const remaining = identity ? available.get(identity) || 0 : 0;
+      if (!remaining) return count;
+      if (remaining === 1) available.delete(identity);
+      else available.set(identity, remaining - 1);
+      return count + 1;
+    }, 0);
+  }
+
+  function assertGrassProductCrossPageIdentityReady(page, previousPage, historicalPages) {
+    const sharedIdentityCount = grassProductSharedIdentityCount(page, previousPage);
+    const candidateSignature = grassProductCanonicalPageSignature(page);
+    const priorPages = [];
+    if (previousPage) priorPages.push(previousPage);
+    const historicalList = historicalPages && typeof historicalPages.values === 'function'
+      ? Array.from(historicalPages.values())
+      : Array.from(historicalPages || []);
+    historicalList.forEach((priorPage) => {
+      if (!priorPage || priorPages.includes(priorPage)) return;
+      priorPages.push(priorPage);
+    });
+    const replayedPage = candidateSignature && priorPages.find((priorPage) => (
+      priorPage && priorPage.pageNo !== page.pageNo &&
+      grassProductCanonicalPageSignature(priorPage) === candidateSignature
+    ));
+    if (replayedPage) {
+      throw new Error('第 ' + (page && page.pageNo || '?') + ' 页完整内容与已采集第 ' +
+        (replayedPage.pageNo || '?') + ' 页相同或仅顺序不同，已停止且本页不会保存。');
+    }
+    return sharedIdentityCount;
+  }
+
+  function createGrassProductRenderGate() {
+    const headerRow = findGrassProductHeaderRow();
+    const tableRoot = headerRow && findGrassProductTableRoot(headerRow);
+    const expectedColumnCount = grassProductCells(headerRow).length;
+    const scroller = tableRoot && findGrassProductScroller(tableRoot, expectedColumnCount);
+    const rowScope = scroller || tableRoot;
+    const rows = rowScope ? Array.from(rowScope.querySelectorAll('.row.body-font')).filter((row) => (
+      !scroller || row.closest('.scroll-y-container') === scroller
+    )) : [];
+    const rowLayer = rows[0] && rows[0].parentElement;
+    if (!rowLayer) throw new Error('未找到商品行渲染层，不能安全翻页。');
+    const renderRowSignature = (row) => {
+      const cells = grassProductCells(row).slice(0, expectedColumnCount);
+      if (!expectedColumnCount || cells.length !== expectedColumnCount) return '';
+      return cells.map(readGrassProductCell).join('\u001f');
+    };
+    const originalRowSignatures = rows.map(renderRowSignature);
+    const originalRows = new Set(rows);
+    const mutatedRows = new Set();
+    let lastObservedRows = rows.slice();
+    let lastObservedLayer = rowLayer;
+    let lastObservedScroller = scroller;
+    let mutationVersion = 0;
+    let lastMutationAt = 0;
+    const rowFromMutationNode = (node) => {
+      let element = node;
+      if (element && typeof element.closest !== 'function') element = element.parentElement;
+      return element && typeof element.closest === 'function'
+        ? element.closest('.row.body-font')
+        : null;
+    };
+    const observer = new MutationObserver((records) => {
+      mutationVersion += 1;
+      lastMutationAt = Date.now();
+      Array.from(records || []).forEach((record) => {
+        [record.target]
+          .concat(Array.from(record.addedNodes || []), Array.from(record.removedNodes || []))
+          .map(rowFromMutationNode)
+          .filter(Boolean)
+          .forEach((row) => mutatedRows.add(row));
+      });
+    });
+    observer.observe(rowLayer, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['title'],
+    });
+    const readCurrentRenderState = () => {
+      const currentHeader = findGrassProductHeaderRow();
+      const currentRoot = currentHeader && findGrassProductTableRoot(currentHeader);
+      const currentColumnCount = grassProductCells(currentHeader).length;
+      const currentScroller = currentRoot && findGrassProductScroller(currentRoot, currentColumnCount);
+      const currentScope = currentScroller || currentRoot;
+      const currentRows = currentScope ? Array.from(currentScope.querySelectorAll('.row.body-font')).filter((row) => (
+        !currentScroller || row.closest('.scroll-y-container') === currentScroller
+      )) : [];
+      const currentLayer = currentRows[0] && currentRows[0].parentElement;
+      return { currentScroller, currentLayer, currentRows };
+    };
+    const currentRenderState = () => {
+      const state = readCurrentRenderState();
+      const changedSinceLastRead = state.currentScroller !== lastObservedScroller ||
+        state.currentLayer !== lastObservedLayer ||
+        state.currentRows.length !== lastObservedRows.length ||
+        state.currentRows.some((row, index) => row !== lastObservedRows[index]);
+      if (changedSinceLastRead) {
+        lastObservedScroller = state.currentScroller;
+        lastObservedLayer = state.currentLayer;
+        lastObservedRows = state.currentRows.slice();
+        mutationVersion += 1;
+        lastMutationAt = Date.now();
+      }
+      return state;
+    };
+    const structurallyChanged = (state) => {
+      const { currentScroller, currentLayer, currentRows } = state || currentRenderState();
+      return currentScroller !== scroller ||
+        currentLayer !== rowLayer ||
+        currentRows.length !== rows.length ||
+        currentRows.some((row, index) => row !== rows[index]);
+    };
+    const refreshCoverage = () => {
+      const { currentScroller, currentLayer, currentRows } = currentRenderState();
+      if (!currentRows.length) return 0;
+      if (currentScroller !== scroller || currentLayer !== rowLayer) return 1;
+      const refreshedCount = currentRows.reduce((count, row) => (
+        count + (!originalRows.has(row) || mutatedRows.has(row) ? 1 : 0)
+      ), 0);
+      return refreshedCount / currentRows.length;
+    };
+    const semanticRefreshCoverage = () => {
+      const { currentRows } = currentRenderState();
+      if (!currentRows.length || !expectedColumnCount) return 0;
+      const refreshedCount = currentRows.reduce((count, row, index) => {
+        const originalSignature = originalRowSignatures[index] || '';
+        const currentSignature = renderRowSignature(row);
+        return count + (originalSignature && currentSignature && currentSignature !== originalSignature ? 1 : 0);
+      }, 0);
+      return refreshedCount / currentRows.length;
+    };
+    return {
+      hasChanged() {
+        const state = currentRenderState();
+        return mutationVersion > 0 || structurallyChanged(state);
+      },
+      coverage() {
+        return refreshCoverage();
+      },
+      semanticCoverage() {
+        return semanticRefreshCoverage();
+      },
+      version() {
+        currentRenderState();
+        return mutationVersion;
+      },
+      quietFor() {
+        currentRenderState();
+        return lastMutationAt ? Math.max(0, Date.now() - lastMutationAt) : 0;
+      },
+      disconnect() {
+        observer.disconnect();
+      },
+    };
+  }
+
+  function grassProductExpectedRowCount(page) {
+    if (!page || !page.paginationAuthoritative || !page.pageSize || !page.totalExpected || !page.pageNo) return 0;
+    const remaining = page.totalExpected - ((page.pageNo - 1) * page.pageSize);
+    return Math.max(0, Math.min(page.pageSize, remaining));
+  }
+
+  function mergeGrassProductOrdinalRows(target, windowRows, rawBase, expectedCount) {
+    const ordered = Array.from(windowRows || []).slice().sort((left, right) => left.rawOrdinal - right.rawOrdinal);
+    let previousRawOrdinal = null;
+    ordered.forEach((row) => {
+      if (!Number.isInteger(row.rawOrdinal)) throw new Error('无法识别虚拟表商品行的绝对位置，已停止。');
+      if (previousRawOrdinal !== null && row.rawOrdinal !== previousRawOrdinal + 1) {
+        throw new Error('虚拟表当前窗口行号不连续，已停止以避免缺行。');
+      }
+      previousRawOrdinal = row.rawOrdinal;
+      const ordinal = row.rawOrdinal - rawBase + 1;
+      if (!Number.isInteger(ordinal) || ordinal < 1 || ordinal > expectedCount) {
+        throw new Error('虚拟表商品行位置超出当前页范围，已停止。');
+      }
+      const existing = target.get(ordinal);
+      if (existing && grassProductRowSignature(existing) !== grassProductRowSignature(row)) {
+        throw new Error('虚拟表同一行位置在滚动中发生变化，已停止以避免混入错行。');
+      }
+      if (!existing) target.set(ordinal, { values: row.values.slice() });
+    });
+    return target;
+  }
+
+  function grassProductRowsFromOrdinalMap(target, expectedCount) {
+    const rows = [];
+    for (let ordinal = 1; ordinal <= expectedCount; ordinal += 1) {
+      const row = target.get(ordinal);
+      if (!row) throw new Error('页内滚动后仍缺少第 ' + ordinal + ' 行，当前页不会保存。');
+      rows.push({ values: row.values.slice() });
+    }
+    if (target.size !== expectedCount) throw new Error('页内商品行数与分页信息不一致，当前页不会保存。');
+    return rows;
+  }
+
+  function validateCompleteGrassProductWindowRows(windowRows, expectedCount) {
+    const rawOrdinals = Array.from(windowRows || []).map((row) => row.rawOrdinal);
+    const rawBase = rawOrdinals.length ? Math.min(...rawOrdinals) : NaN;
+    if (!Number.isInteger(rawBase)) throw new Error('无法识别当前页首行位置，当前页不会保存。');
+    const ordinalRows = new Map();
+    mergeGrassProductOrdinalRows(ordinalRows, windowRows, rawBase, expectedCount);
+    return grassProductRowsFromOrdinalMap(ordinalRows, expectedCount);
+  }
+
+  function grassProductScrollPositions(metrics) {
+    const clientHeight = Math.max(0, Number(metrics && metrics.clientHeight) || 0);
+    const scrollHeight = Math.max(0, Number(metrics && metrics.scrollHeight) || 0);
+    const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
+    if (!maxScrollTop) return [0];
+    const step = Math.max(64, Math.floor(clientHeight * GRASS_PRODUCT_SCROLL_STEP_RATIO));
+    const positions = [0];
+    for (let top = step; top < maxScrollTop; top += step) positions.push(top);
+    if (positions[positions.length - 1] !== maxScrollTop) positions.push(maxScrollTop);
+    return positions;
+  }
+
+  function grassProductWindowCoversScrollTarget(page, targetTop) {
+    if (!page || !Array.isArray(page.rows) || !page.rows.length || !(page.windowRowHeight > 0)) return false;
+    const rawOrdinals = page.rows.map((row) => row.rawOrdinal).filter(Number.isInteger);
+    if (!rawOrdinals.length) return false;
+    const maxScrollTop = Math.max(0, page.windowScrollHeight - page.windowClientHeight);
+    const clampedTarget = Math.min(Math.max(0, targetTop), maxScrollTop);
+    const targetCenterRaw = (clampedTarget + (page.windowClientHeight / 2)) / page.windowRowHeight;
+    return targetCenterRaw >= Math.min(...rawOrdinals) - 0.5 &&
+      targetCenterRaw <= Math.max(...rawOrdinals) + 0.5;
   }
 
   function grassProductPageHasExpectedRows(page) {
     if (!page || !Array.isArray(page.rows) || !page.rows.length) return false;
-    if (!page.paginationAuthoritative || !page.pageSize || !page.totalExpected || !page.pageNo) return false;
-    const remaining = page.totalExpected - ((page.pageNo - 1) * page.pageSize);
-    const expected = Math.max(0, Math.min(page.pageSize, remaining));
+    const expected = grassProductExpectedRowCount(page);
     return expected > 0 && page.rows.length === expected;
   }
 
-  function assertGrassProductPageReady(page) {
+  function grassProductRowsHaveCompleteValues(page) {
+    const columnCount = page && Array.isArray(page.headers) ? page.headers.length : 0;
+    return columnCount > 0 && Array.isArray(page.rows) && page.rows.length > 0 && page.rows.every((row) => (
+      row && Array.isArray(row.values) && row.values.length === columnCount &&
+      row.values.every((value, index) => {
+        const text = String(value == null ? '' : value).trim();
+        if (!text) return false;
+        return index < 2 || !/^-?[\d,.]+\s*[\u4e07亿]$/.test(text);
+      })
+    ));
+  }
+
+  function assertGrassProductPaginationReady(page) {
     if (!page || !page.paginationAuthoritative) {
       throw new Error('未读取到权威的总条数和每页条数，请等待分页区加载完成后重试。');
     }
+  }
+
+  function assertGrassProductPageReady(page) {
+    assertGrassProductPaginationReady(page);
     if (!grassProductPageHasExpectedRows(page)) {
-      throw new Error('当前页商品行仍在加载，或页面存在重复行；为避免缺行，请等待表格稳定后重试。');
+      throw new Error('当前页已挂载的商品行数与分页不一致；请等待表格稳定，或使用页内滚动采集。');
+    }
+    if (!grassProductRowsHaveCompleteValues(page)) {
+      throw new Error('当前页存在尚未渲染完成的空白单元格，本页不会保存。');
     }
   }
 
@@ -1638,6 +2084,7 @@
     grassProductCollection.selectedFieldCount = 0;
     grassProductCollection.fieldCoverageComplete = false;
     grassProductCollection.paginationAuthoritative = false;
+    grassProductCollection.preservedSharedIdentityCount = 0;
     grassProductCollection.stopRequested = false;
     grassProductCollection.warning = '';
   }
@@ -1733,34 +2180,270 @@
     return GRASS_PRODUCT_MIN_DELAY_MS + Math.round(Math.random() * Math.max(0, range));
   }
 
-  async function waitForGrassProductPage(expectedPageNo, previousSignature) {
+  function setGrassProductScrollerPosition(scroller, top, left) {
+    const options = { top, left, behavior: 'auto' };
+    if (typeof scroller.scrollTo === 'function') scroller.scrollTo(options);
+    else {
+      scroller.scrollTop = top;
+      scroller.scrollLeft = left;
+    }
+  }
+
+  async function waitForGrassProductWindow(
+    scroller,
+    targetTop,
+    expectedPageNo,
+    expectedFingerprint,
+    expectedScrollHeight,
+    previousUncoveredSignature
+  ) {
     const startedAt = Date.now();
     let stableSignature = '';
     let stableReads = 0;
+    while (Date.now() - startedAt < GRASS_PRODUCT_SCROLL_SETTLE_TIMEOUT_MS) {
+      if (grassProductCollection.stopRequested) {
+        throw new Error('已按要求停止；当前未完成页不会保存，也不会点击下一页。');
+      }
+      const riskMessage = grassProductRiskMessage();
+      if (riskMessage) throw new Error(riskMessage);
+      let page;
+      try {
+        page = readCurrentGrassProductPage();
+      } catch (error) {
+        await sleep(GRASS_PRODUCT_SCROLL_POLL_MS);
+        continue;
+      }
+      const headerRow = findGrassProductHeaderRow();
+      const tableRoot = headerRow && findGrassProductTableRoot(headerRow);
+      const currentScroller = tableRoot && findGrassProductScroller(tableRoot, grassProductCells(headerRow).length);
+      if (currentScroller !== scroller || scroller.isConnected === false) {
+        throw new Error('商品表结构在页内滚动时发生变化，已停止。');
+      }
+      if (page.pageNo !== expectedPageNo || page.fingerprint !== expectedFingerprint) {
+        throw new Error('页内滚动时页码、筛选项、排序或字段发生变化，已停止。');
+      }
+      if (Math.abs(page.windowScrollHeight - expectedScrollHeight) > 2) {
+        throw new Error('商品表高度在页内滚动时发生变化，已停止以避免漏行。');
+      }
+      const maxScrollTop = Math.max(0, page.windowScrollHeight - page.windowClientHeight);
+      const clampedTarget = Math.min(targetTop, maxScrollTop);
+      const signature = grassProductWindowSignature(page);
+      if (
+        Math.abs(page.windowScrollTop - clampedTarget) <= 3 &&
+        page.windowHasViewportRows &&
+        grassProductWindowCoversScrollTarget(page, clampedTarget) &&
+        (!previousUncoveredSignature || signature !== previousUncoveredSignature) &&
+        signature
+      ) {
+        if (signature === stableSignature) stableReads += 1;
+        else {
+          stableSignature = signature;
+          stableReads = 1;
+        }
+        if (stableReads >= GRASS_PRODUCT_SCROLL_STABLE_READS) return page;
+      } else {
+        stableSignature = '';
+        stableReads = 0;
+      }
+      await sleep(GRASS_PRODUCT_SCROLL_POLL_MS);
+    }
+    throw new Error('等待当前页虚拟商品行稳定超时，当前页不会保存。');
+  }
+
+  async function collectCompleteGrassProductPage(expectedPageNo, expectedFingerprint) {
+    const initialPage = readCurrentGrassProductPage();
+    assertGrassProductPaginationReady(initialPage);
+    if (expectedPageNo && initialPage.pageNo !== expectedPageNo) {
+      throw new Error('当前页码与待采集页不一致，已停止。');
+    }
+    if (expectedFingerprint && initialPage.fingerprint !== expectedFingerprint) {
+      throw new Error('筛选项、排序、日期、每页条数或字段发生变化，已停止。');
+    }
+    const expectedCount = grassProductExpectedRowCount(initialPage);
+    if (!expectedCount) throw new Error('无法计算当前页应有商品行数。');
+    if (initialPage.rows.length === expectedCount) {
+      const restoredWindowSignature = grassProductWindowSignature(initialPage);
+      initialPage.rows = validateCompleteGrassProductWindowRows(initialPage.rows, expectedCount);
+      assertGrassProductPageReady(initialPage);
+      initialPage.restoredWindowSignature = restoredWindowSignature;
+      initialPage.restoredScrollTop = initialPage.windowScrollTop;
+      return initialPage;
+    }
+
+    const headerRow = findGrassProductHeaderRow();
+    const tableRoot = headerRow && findGrassProductTableRoot(headerRow);
+    const scroller = tableRoot && findGrassProductScroller(tableRoot, grassProductCells(headerRow).length);
+    if (!scroller || initialPage.windowScrollHeight <= initialPage.windowClientHeight + 1) {
+      throw new Error('当前页商品行未完整挂载，且未找到对应的虚拟表滚动容器。');
+    }
+    const originalTop = scroller.scrollTop;
+    const originalLeft = scroller.scrollLeft;
+    const originalScrollHeight = scroller.scrollHeight;
+    const positions = grassProductScrollPositions({
+      clientHeight: scroller.clientHeight,
+      scrollHeight: originalScrollHeight,
+    });
+    const scanPositions = positions.concat(positions.slice().reverse());
+    const ordinalRows = new Map();
+    let rawBase = null;
+    let completedPage = null;
+    let failure = null;
+    try {
+      for (let index = 0; index < scanPositions.length; index += 1) {
+        const targetTop = scanPositions[index];
+        if (grassProductCollection.stopRequested) {
+          throw new Error('已按要求停止；当前未完成页不会保存，也不会点击下一页。');
+        }
+        const riskMessage = grassProductRiskMessage();
+        if (riskMessage) throw new Error(riskMessage);
+        const beforeScrollPage = readCurrentGrassProductPage();
+        const previousUncoveredSignature = grassProductWindowCoversScrollTarget(beforeScrollPage, targetTop)
+          ? ''
+          : grassProductWindowSignature(beforeScrollPage);
+        setGrassProductScrollerPosition(scroller, targetTop, originalLeft);
+        const windowPage = await waitForGrassProductWindow(
+          scroller,
+          targetTop,
+          initialPage.pageNo,
+          initialPage.fingerprint,
+          originalScrollHeight,
+          previousUncoveredSignature
+        );
+        const rawOrdinals = windowPage.rows.map((row) => row.rawOrdinal);
+        if (index === 0) rawBase = Math.min(...rawOrdinals);
+        if (!Number.isInteger(rawBase)) throw new Error('无法识别虚拟表首行位置，已停止。');
+        mergeGrassProductOrdinalRows(ordinalRows, windowPage.rows, rawBase, expectedCount);
+        grassProductCollection.warning = '正在页内读取第 ' + initialPage.pageNo + ' 页：已定位 ' +
+          ordinalRows.size + '/' + expectedCount + ' 行；仅滚动当前表格。';
+        renderGrassProductCollectorState();
+      }
+      const finalMeta = readCurrentGrassProductPage();
+      if (finalMeta.pageNo !== initialPage.pageNo || finalMeta.fingerprint !== initialPage.fingerprint) {
+        throw new Error('页内读取结束前页面条件发生变化，当前页不会保存。');
+      }
+      completedPage = Object.assign({}, finalMeta, {
+        rows: grassProductRowsFromOrdinalMap(ordinalRows, expectedCount),
+        restoredScrollTop: originalTop,
+      });
+      assertGrassProductPageReady(completedPage);
+    } catch (error) {
+      failure = error;
+    } finally {
+      try {
+        if (scroller.isConnected !== false && tableRoot.contains(scroller)) {
+          setGrassProductScrollerPosition(scroller, originalTop, originalLeft);
+          if (!failure) {
+            const currentIdentity = readGrassProductPageIdentity(headerRow, tableRoot);
+            if (
+              currentIdentity.pageNo === initialPage.pageNo &&
+              currentIdentity.fingerprint === initialPage.fingerprint
+            ) {
+              const restoredPage = await waitForGrassProductWindow(
+                scroller,
+                originalTop,
+                initialPage.pageNo,
+                initialPage.fingerprint,
+                originalScrollHeight
+              );
+              completedPage.restoredWindowSignature = grassProductWindowSignature(restoredPage);
+            } else {
+              failure = new Error('页面在恢复表格位置前发生变化，当前页不会保存。');
+            }
+          }
+        } else if (!failure) {
+          failure = new Error('商品表在采集期间被替换，当前页不会保存。');
+        }
+      } catch (error) {
+        if (!failure) failure = error;
+      }
+    }
+    if (failure) throw failure;
+    return completedPage;
+  }
+
+  async function waitForGrassProductPage(
+    expectedPageNo,
+    expectedFingerprint,
+    previousPage,
+    renderGate,
+    previousWindowContentSignature
+  ) {
+    const startedAt = Date.now();
+    let stableSignature = '';
+    let stableReads = 0;
+    let stableSince = 0;
+    let lastObservation = '';
     while (Date.now() - startedAt < GRASS_PRODUCT_PAGE_TIMEOUT_MS) {
       if (grassProductCollection.stopRequested) return null;
       const riskMessage = grassProductRiskMessage();
       if (riskMessage) throw new Error(riskMessage);
       try {
         const page = readCurrentGrassProductPage();
-        const signature = grassProductPageSignature(page);
+        const signature = grassProductWindowSignature(page);
+        const contentSignature = grassProductWindowContentSignature(page);
+        const renderChanged = Boolean(
+          renderGate && typeof renderGate.hasChanged === 'function' && renderGate.hasChanged()
+        );
+        const renderCoverage = renderGate && typeof renderGate.coverage === 'function'
+          ? renderGate.coverage()
+          : 0;
+        const semanticRenderCoverage = renderGate && typeof renderGate.semanticCoverage === 'function'
+          ? renderGate.semanticCoverage()
+          : 0;
+        const quietFor = renderGate && typeof renderGate.quietFor === 'function'
+          ? renderGate.quietFor()
+          : 0;
+        const sharedIdentityCount = grassProductSharedIdentityCount(page, previousPage);
+        const observerEvidenceReady = Boolean(
+          renderChanged &&
+          quietFor >= GRASS_PRODUCT_PAGE_QUIET_MS
+        );
+        const windowContentChanged = Boolean(
+          previousWindowContentSignature &&
+          contentSignature &&
+          contentSignature !== previousWindowContentSignature
+        );
+        lastObservation = '最后检测页码 ' + (page.pageNo || '?') + '，DOM ' + page.rows.length +
+          ' 行，跨页重合 ' + sharedIdentityCount + ' 行，DOM 刷新 ' +
+          Math.round(Math.max(0, Math.min(1, renderCoverage)) * 100) + '%，槽位值变化 ' +
+          Math.round(Math.max(0, Math.min(1, semanticRenderCoverage)) * 100) + '%，窗口内容' +
+          (windowContentChanged ? '已变化。' : '尚未变化。');
+        if (page.pageNo === expectedPageNo && page.fingerprint !== expectedFingerprint) {
+          throw new Error('第 ' + expectedPageNo + ' 页加载后页面条件发生变化，已停止。');
+        }
         if (
           page.pageNo === expectedPageNo &&
-          grassProductPageHasExpectedRows(page) &&
+          page.fingerprint === expectedFingerprint &&
           signature &&
-          signature !== previousSignature
+          grassProductRowsHaveCompleteValues(page) &&
+          page.rows.length > 0
         ) {
           if (signature === stableSignature) stableReads += 1;
           else {
             stableSignature = signature;
             stableReads = 1;
+            stableSince = Date.now();
           }
-          if (stableReads >= 3) return page;
+          const stableFor = Date.now() - stableSince;
+          if (
+            stableReads >= GRASS_PRODUCT_PAGE_STABLE_READS &&
+            (observerEvidenceReady || stableFor >= GRASS_PRODUCT_PAGE_QUIET_MS)
+          ) {
+            page.transitionSemanticRenderCoverage = semanticRenderCoverage;
+            return page;
+          }
+        } else {
+          stableSignature = '';
+          stableReads = 0;
+          stableSince = 0;
         }
-      } catch (error) {}
+      } catch (error) {
+        if (error && /页面条件发生变化/.test(error.message || '')) throw error;
+      }
       await sleep(300);
     }
-    throw new Error('等待第 ' + expectedPageNo + ' 页数据稳定超时，已停止且不会重试请求。');
+    throw new Error('等待第 ' + expectedPageNo + ' 页数据稳定超时，已停止且不会重试请求。' +
+      (lastObservation ? ' ' + lastObservation : ''));
   }
 
   function setGrassProductWarning(message) {
@@ -1811,10 +2494,11 @@
     const root = document.getElementById(PANEL_ID);
     if (!root || root.getAttribute('data-sycm-panel-kind') !== 'grass-products') return;
     const rows = grassProductCollectionRows();
-    const pageCount = grassProductCollection.pageCountExpected || '?';
-    const total = grassProductCollection.totalExpected || '?';
-    const selectedFieldCount = grassProductCollection.selectedFieldCount || '?';
-    const capturedFieldCount = grassProductCollection.headers.length || 0;
+    const statusMetadata = readGrassProductStatusMetadata();
+    const pageCount = statusMetadata.pageCountExpected || '?';
+    const total = statusMetadata.totalExpected || '?';
+    const selectedFieldCount = statusMetadata.selectedFieldCount || '?';
+    const capturedFieldCount = statusMetadata.headers.length || 0;
     const complete = grassProductCollectionComplete();
     const status = root.querySelector('[data-sycm-product-status]');
     const warning = root.querySelector('[data-sycm-product-warning]');
@@ -1827,8 +2511,11 @@
       status.textContent = (grassProductCollection.running ? '正在低频顺序采集。' : '') +
         '已采集 ' + grassProductCollection.pages.size + '/' + pageCount + ' 页，' + rows.length + '/' + total + ' 条；' +
         '字段 ' + capturedFieldCount + '/' + selectedFieldCount + '；' +
-        (grassProductCollection.pageSize ? '当前每页 ' + grassProductCollection.pageSize + ' 条。' : '尚未识别权威分页信息。') +
-        (complete ? ' 数据完整。' : ' 可导出部分数据。');
+        (statusMetadata.pageSize ? '当前每页 ' + statusMetadata.pageSize + ' 条。' : '尚未识别权威分页信息。') +
+        (complete ? ' 页面行数完整。' : ' 可导出部分数据。') +
+        (grassProductCollection.preservedSharedIdentityCount > 0
+          ? ' 已原样保留跨页重复商品身份 ' + grassProductCollection.preservedSharedIdentityCount + ' 条。'
+          : '');
     }
     if (warning) {
       warning.textContent = grassProductCollection.warning;
@@ -1845,24 +2532,36 @@
     renderGrassProductPreview(root);
   }
 
-  function captureCurrentGrassProductPage() {
+  async function captureCurrentGrassProductPage() {
+    if (grassProductCollection.running) return null;
     const riskMessage = grassProductRiskMessage();
     if (riskMessage) throw new Error(riskMessage);
-    const page = readCurrentGrassProductPage();
-    assertGrassProductPageReady(page);
-    storeGrassProductPage(page);
-    grassProductCollection.warning = page.fieldCoverageComplete
-      ? ''
-      : '页面只渲染了 ' + page.headers.length + '/' + (page.selectedFieldCount || '?') +
-        ' 个已选字段；本页按部分数据保存。未出现在商品表 DOM 的列不会猜测或补零。';
+    const preview = readCurrentGrassProductPage();
+    assertGrassProductPaginationReady(preview);
+    grassProductCollection.running = true;
+    grassProductCollection.stopRequested = false;
+    grassProductCollection.warning = '正在读取当前页；若为虚拟表，将只在表格内部滚动并恢复原位置。';
     renderGrassProductCollectorState();
-    return page;
+    try {
+      const page = await collectCompleteGrassProductPage(preview.pageNo, preview.fingerprint);
+      assertGrassProductPageReady(page);
+      storeGrassProductPage(page);
+      grassProductCollection.warning = page.fieldCoverageComplete
+        ? ''
+        : '页面只渲染了 ' + page.headers.length + '/' + (page.selectedFieldCount || '?') +
+          ' 个已选字段；本页按部分数据保存。未出现在商品表 DOM 的列不会猜测或补零。';
+      return page;
+    } finally {
+      grassProductCollection.running = false;
+      grassProductCollection.stopRequested = false;
+      renderGrassProductCollectorState();
+    }
   }
 
   async function captureAllGrassProductPages() {
     if (grassProductCollection.running) return;
     const firstPage = readCurrentGrassProductPage();
-    assertGrassProductPageReady(firstPage);
+    assertGrassProductPaginationReady(firstPage);
     if (firstPage.pageNo !== 1) {
       throw new Error('为避免漏页，请先手动回到第 1 页再开始全量采集。');
     }
@@ -1889,7 +2588,8 @@
     resetGrassProductCollection();
     grassProductCollection.running = true;
     try {
-      let page = firstPage;
+      let page = await collectCompleteGrassProductPage(1, firstPage.fingerprint);
+      assertGrassProductPageReady(page);
       storeGrassProductPage(page);
       renderGrassProductCollectorState();
       for (let expectedPage = 2; expectedPage <= firstPage.pageCountExpected; expectedPage += 1) {
@@ -1907,39 +2607,68 @@
         const delayedRiskMessage = grassProductRiskMessage();
         if (delayedRiskMessage) throw new Error(delayedRiskMessage);
         const beforeClick = readCurrentGrassProductPage();
-        assertGrassProductPageReady(beforeClick);
-        const previousSignature = grassProductPageSignature(page);
+        const previousWindowSignature = page.restoredWindowSignature;
         if (
           beforeClick.pageNo !== page.pageNo ||
           beforeClick.fingerprint !== page.fingerprint ||
-          grassProductPageSignature(beforeClick) !== previousSignature
+          Math.abs(beforeClick.windowScrollTop - page.restoredScrollTop) > 3 ||
+          grassProductWindowSignature(beforeClick) !== previousWindowSignature
         ) {
           throw new Error('等待期间页码、筛选项、排序或表格内容发生变化；为避免混页，已停止且不会继续点击。');
         }
         const nextButton = findGrassProductNextButton();
         if (!nextButton) throw new Error('未找到可用的下一页按钮，已停止。');
-        nextButton.click();
-        page = await waitForGrassProductPage(expectedPage, previousSignature);
-        if (!page) {
+        const previousCompletedPage = page;
+        const renderGate = createGrassProductRenderGate();
+        let pagePreview;
+        try {
+          nextButton.click();
+          pagePreview = await waitForGrassProductPage(
+            expectedPage,
+            firstPage.fingerprint,
+            previousCompletedPage,
+            renderGate,
+            grassProductWindowContentSignature(beforeClick)
+          );
+        } finally {
+          renderGate.disconnect();
+        }
+        if (!pagePreview) {
           grassProductCollection.warning = '已按要求停止；当前已采集内容仍可导出。';
           break;
         }
+        page = await collectCompleteGrassProductPage(expectedPage, firstPage.fingerprint);
         assertGrassProductPageReady(page);
+        const sharedIdentityCount = assertGrassProductCrossPageIdentityReady(
+          page,
+          previousCompletedPage,
+          grassProductCollection.pages
+        );
+        if (page.restoredWindowSignature !== grassProductWindowSignature(pagePreview)) {
+          throw new Error('第 ' + expectedPage + ' 页商品行在完整扫描期间发生变化，已停止且本页不会保存。');
+        }
         if (!page.fieldCoverageComplete && !allowPartialFields) {
           throw new Error('第 ' + expectedPage + ' 页渲染字段不完整，已停止；已采集内容仍可导出。');
         }
         storeGrassProductPage(page);
+        grassProductCollection.preservedSharedIdentityCount += sharedIdentityCount;
         renderGrassProductCollectorState();
       }
-      if (grassProductCollectionComplete()) grassProductCollection.warning = '';
-      else if (
-        allowPartialFields &&
+      const allPagesAndRowsCollected =
         grassProductCollection.pages.size === grassProductCollection.pageCountExpected &&
-        grassProductCollectionRows().length === grassProductCollection.totalExpected
-      ) {
-        grassProductCollection.warning = '所有商品行已采集，但页面仅提供 ' +
-          grassProductCollection.headers.length + '/' + (grassProductCollection.selectedFieldCount || '?') +
-          ' 个已选字段；CSV 将以“部分”标记。';
+        grassProductCollectionRows().length === grassProductCollection.totalExpected;
+      if (grassProductCollectionComplete() || (allowPartialFields && allPagesAndRowsCollected)) {
+        const warnings = [];
+        if (allowPartialFields && !grassProductCollection.fieldCoverageComplete) {
+          warnings.push('所有商品行已采集，但页面仅提供 ' +
+            grassProductCollection.headers.length + '/' + (grassProductCollection.selectedFieldCount || '?') +
+            ' 个已选字段；CSV 将以“部分”标记。');
+        }
+        if (grassProductCollection.preservedSharedIdentityCount > 0) {
+          warnings.push('已按页面原样保留 ' + grassProductCollection.preservedSharedIdentityCount +
+            ' 条跨页重复商品身份（商品id+标题相同）；这些行来自完整页 DOM 复扫，CSV 不会自动去重。');
+        }
+        grassProductCollection.warning = warnings.join(' ');
       }
     } finally {
       grassProductCollection.running = false;
@@ -1994,11 +2723,12 @@
     const helperText = currentPage
       ? '当前为第 ' + currentPage.pageNo + '/' + (currentPage.pageCountExpected || '?') +
         ' 页，每页 ' + (currentPage.pageSize || '?') + ' 条，已渲染字段 ' + currentPage.headers.length +
-        '/' + (currentPage.selectedFieldCount || '?') + '。'
+        '/' + (currentPage.selectedFieldCount || '?') + '；当前 DOM 挂载 ' + currentPage.rows.length +
+        '/' + (grassProductExpectedRowCount(currentPage) || '?') + ' 行。'
       : '请等待商品颗粒表加载完成。';
     showPanel(
       '商品颗粒取数',
-      '<p class="sycm-context">仅读取页面已渲染的商品表。当前页采集不发请求；全量模式只按页面“下一页”低频顺序点击，不并发、不改接口、不重放请求。</p>' +
+      '<p class="sycm-context">仅读取页面商品表 DOM。插件自身不发业务请求；虚拟表会在当前表格内正向、反向各扫描一遍并恢复原位置。全量模式只按页面“下一页”低频顺序点击，不并发、不改接口、不重放请求。跨页重复数和刷新百分比仅作诊断，不作为停采阈值。</p>' +
         '<p class="sycm-context">' + escapeHtml(helperText) + ' 若总页数超过 ' + GRASS_PRODUCT_MAX_AUTO_PAGES + '，请先手动切换为 100/200 条每页并回到第 1 页。</p>' +
         '<div class="sycm-product-status" role="status" aria-live="polite" data-sycm-product-status></div>' +
         '<p class="sycm-warning" role="alert" data-sycm-product-warning hidden></p>' +
@@ -2025,11 +2755,9 @@
       grassProductCollection.stopRequested = true;
     });
     root.querySelector('[data-sycm-product-current]').addEventListener('click', () => {
-      try {
-        captureCurrentGrassProductPage();
-      } catch (error) {
+      captureCurrentGrassProductPage().catch((error) => {
         setGrassProductWarning(error && error.message ? error.message : '当前页采集失败。');
-      }
+      });
     });
     root.querySelector('[data-sycm-product-all]').addEventListener('click', () => {
       captureAllGrassProductPages().catch((error) => {

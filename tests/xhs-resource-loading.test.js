@@ -61,6 +61,7 @@ test('cloud extension ZIP keeps the complete existing XHS runtime module set', (
 
   for (const modulePath of [
     'xhs/contract.js',
+    'xhs/pgy-export-links.js',
     'xhs/identity.js',
     'xhs/analysis.js',
     'xhs/metrics.js',

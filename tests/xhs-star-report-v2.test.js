@@ -387,6 +387,10 @@ test('uses native Star summaries, derives store/task KPIs, and nests orders with
 
 test('rolls real note costs through order and project hierarchy when publish date selects one candidate', () => {
   const input = reportV2Input();
+  const officialNoteUrl = 'https://www.xiaohongshu.com/explore/fictional-note-a' +
+    '?xsec_token=fictional-hierarchy-note-token&xsec_source=pc_pgyexport';
+  input.collections.pgy.notes.find((note) => note.noteId === 'fictional-note-a').noteUrl =
+    officialNoteUrl;
   input.collections.adstar.contentRows.push(
     starContent('fictional-note-a', 'fictional-order-2', 'fictional-project-1', '20300116', {
       readUv: 10,
@@ -413,6 +417,8 @@ test('rolls real note costs through order and project hierarchy when publish dat
   assert.equal(placements.length, 1, '同笔记多订单关联时成本只能归属一次');
   assert.equal(placements[0].orderId, 'fictional-order-1',
     '发布日仅命中一个候选订单周期时，归属该订单');
+  assert.equal(placements[0].note.noteUrl, officialNoteUrl,
+    '项目/任务层级中的笔记必须保留蒲公英官方链路');
   assert.deepEqual(placements[0].note.ownership, {
     projectId: 'fictional-project-1',
     orderId: 'fictional-order-1',
@@ -858,6 +864,10 @@ test('keeps unmatched project-report notes visible beside verified orders in the
 
 test('exposes missing order relations as a safe unassigned bucket and nulls the affected project cost', () => {
   const input = reportV2Input();
+  const officialNoteUrl = 'https://www.xiaohongshu.com/explore/fictional-note-a' +
+    '?xsec_token=fictional-unassigned-note-token&xsec_source=pc_pgyexport';
+  input.collections.pgy.notes.find((note) => note.noteId === 'fictional-note-a').noteUrl =
+    officialNoteUrl;
   const starRow = input.collections.adstar.contentRows.find((row) => (
     row.noteId === 'fictional-note-a'
   ));
@@ -876,6 +886,7 @@ test('exposes missing order relations as a safe unassigned bucket and nulls the 
   assert.deepEqual(unassigned, {
     noteId: 'fictional-note-a',
     title: '虚构笔记 fictional-note-a',
+    noteUrl: officialNoteUrl,
     publishDate: '2030-01-05',
     projectIds: ['fictional-project-1'],
     candidateOrderIds: [],

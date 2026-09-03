@@ -47,6 +47,9 @@ function pgyFact({
   crossDomainProjectName = null,
   taobaoSamplingRatio = null,
   taobao15d = null,
+  searchKeywords = [],
+  searchKeywordFetchStatus = 'empty',
+  searchKeywordErrorCode,
 }) {
   return {
     noteId: `fictional-pgy-v3-note-${id}`,
@@ -60,6 +63,9 @@ function pgyFact({
     spus,
     taobaoTaskId,
     taskEndDate,
+    searchKeywords,
+    searchKeywordFetchStatus,
+    ...(searchKeywordErrorCode ? { searchKeywordErrorCode } : {}),
     author: {
       id: authorId || `fictional-pgy-v3-creator-${id}`,
       name: `虚构蒲公英 V3 达人 ${id}`,
@@ -95,12 +101,17 @@ function reportFacts() {
       id: 'below-1k-start-boundary', publishDate: '2030-01-01', followerCount: 999,
       taobaoTaskId: 'fictional-taobao-task-start-boundary',
       cooperation: 10, platformFee: 100, impressions: 100, reads: 10, interactions: 1,
+      searchKeywordFetchStatus: 'complete',
+      searchKeywords: [{
+        keyword: '虚构归档搜索词', impressions: 100, reads: 10, clickRate: 0.1,
+      }],
     }),
     pgyFact({
       id: '1k', publishDate: '2030-01-15', followerCount: 1000,
       authorId: 'fictional-pgy-v3-repeat-creator',
       taobaoTaskId: 'fictional-taobao-task-1k', taskEndDate: '2030-01-31',
       cooperation: 20, platformFee: 200, impressions: 100, reads: 90, interactions: 9,
+      searchKeywordFetchStatus: 'failed',
     }),
     pgyFact({
       id: '4999-repeat', publishDate: '2030-01-20', followerCount: 4999,
@@ -261,6 +272,337 @@ test('aggregatePgyFacts applies an inclusive publication-date range and recomput
     readRate: 0.4,
     engagementRate: 0.15,
   });
+});
+
+test('aggregatePgySearchKeywords applies sheba-cat-food-v1 and returns dimension summaries with note drilldowns', () => {
+  const officialUrl = 'https://www.xiaohongshu.com/explore/fictional-pgy-v3-note-keyword-a?xsec_token=fictional&xsec_source=pc_pgyexport';
+  const result = reportModel().aggregatePgySearchKeywords([
+    pgyFact({
+      id: 'keyword-a', publishDate: '2030-01-05', followerCount: 5000,
+      cooperation: 100, platformFee: 10, impressions: 100, reads: 20, interactions: 2,
+      noteUrl: officialUrl,
+      searchKeywordFetchStatus: 'complete',
+      searchKeywords: [
+        { keyword: '希宝主食罐头推荐', impressions: 100, reads: 20, clickRate: 0.2 },
+        { keyword: '猫砂盆推荐', impressions: 50, reads: 5, clickRate: 0.1 },
+      ],
+    }),
+    pgyFact({
+      id: 'keyword-b', publishDate: '2030-01-06', followerCount: 5000,
+      cooperation: 200, platformFee: 20, impressions: 300, reads: 90, interactions: 9,
+      searchKeywordFetchStatus: 'complete',
+      searchKeywords: [
+        { keyword: '希宝主食罐头推荐', impressions: 300, reads: 90, clickRate: 0.3 },
+      ],
+    }),
+  ]);
+
+  assert.equal(result.profile.id, 'sheba-cat-food-v1');
+  assert.equal(result.totalKeywordCount, 2);
+  const owned = result.keywords.find((row) => row.keyword === '希宝主食罐头推荐');
+  assert.equal(owned.commercialCategory, '自有品牌词');
+  assert.equal(owned.relevance, '强相关');
+  assert.equal(owned.intent, '对比评估');
+  assert.equal(owned.impressions, 400);
+  assert.equal(owned.reads, 110);
+  assert.equal(owned.clickRate, 0.275);
+  assert.equal(owned.noteCount, 2);
+  assert.deepEqual(owned.notes.map((note) => note.noteId), [
+    'fictional-pgy-v3-note-keyword-b',
+    'fictional-pgy-v3-note-keyword-a',
+  ]);
+  assert.equal(owned.notes[1].noteUrl, officialUrl);
+  assert.equal(owned.notes[0].impressionContribution, 0.75);
+  assert.equal(owned.notes[1].impressionContribution, 0.25);
+
+  const commercial = result.summaries.commercialCategory;
+  const ownedSummary = commercial.rows.find((row) => row.value === '自有品牌词');
+  assert.deepEqual({
+    keywordCount: ownedSummary.keywordCount,
+    impressions: ownedSummary.impressions,
+    reads: ownedSummary.reads,
+    clickRate: ownedSummary.clickRate,
+    noteCount: ownedSummary.noteCount,
+  }, {
+    keywordCount: 1,
+    impressions: 400,
+    reads: 110,
+    clickRate: 0.275,
+    noteCount: 2,
+  });
+  assert.equal(result.summaries.relevance.rows[0].value, '强相关');
+  assert.equal(result.summaries.intent.rows[0].value, '对比评估');
+});
+
+test('analysis and keyword aggregation preserve real searchScore while missing heat stays null', () => {
+  const facts = [
+    pgyFact({
+      id: 'search-heat-real', publishDate: '2030-01-05', followerCount: 5000,
+      cooperation: 100, platformFee: 10, impressions: 100, reads: 20, interactions: 2,
+      searchKeywordFetchStatus: 'complete',
+      searchKeywords: [
+        { keyword: '虚构有搜索热度词', searchScore: 8765, impressions: 90, reads: 18 },
+        { keyword: '虚构缺失搜索热度词', impressions: 80, reads: 8765 },
+      ],
+    }),
+    pgyFact({
+      id: 'search-heat-repeat', publishDate: '2030-01-06', followerCount: 5000,
+      cooperation: 100, platformFee: 10, impressions: 100, reads: 20, interactions: 2,
+      searchKeywordFetchStatus: 'complete',
+      searchKeywords: [
+        { keyword: '虚构有搜索热度词', searchScore: 8765, impressions: 10, reads: 2 },
+      ],
+    }),
+  ];
+  const snapshot = createXhsAnalysisSnapshot({
+    runId: 'fictional-pgy-search-heat-run',
+    storeId: 'fictional-pgy-search-heat-store',
+    selectedPlatforms: ['pgy'],
+    dateRange: { ...RANGE },
+    generatedAt: '2030-04-20T00:02:00.000Z',
+    asOf: '2030-04-20',
+    collections: { pgy: pgyCollection(facts) },
+  });
+
+  assert.equal(snapshot.pgy.facts[0].searchKeywords[0].searchScore, 8765,
+    '真实搜索热度必须进入紧凑归档事实');
+  const result = reportModel().aggregatePgySearchKeywords(snapshot.pgy.facts);
+  const withHeat = result.keywords.find((row) => row.keyword === '虚构有搜索热度词');
+  const withoutHeat = result.keywords.find((row) => row.keyword === '虚构缺失搜索热度词');
+  assert.equal(withHeat.searchScore, 8765,
+    '同词多篇笔记的全站搜索热度不得求和');
+  assert.equal(withoutHeat.searchScore, null,
+    '未采集搜索热度时必须保持 null，不得回退到阅读量');
+});
+
+test('legacy keyword classification uses brand then competitor then product priority', () => {
+  const result = reportModel().aggregatePgySearchKeywords([{
+    noteId: 'fictional-commercial-priority-note',
+    title: '希宝与皇家主食罐头对比',
+    spuName: '主食罐头',
+    searchKeywordFetchStatus: 'complete',
+    searchKeywords: [
+      { keyword: '希宝皇家主食罐头', impressions: 30, reads: 6 },
+      { keyword: '皇家主食罐头', impressions: 20, reads: 4 },
+      { keyword: '主食罐头', impressions: 10, reads: 2 },
+    ],
+  }], { profileId: 'sheba-cat-food-v1' });
+
+  const categories = Object.fromEntries(result.keywords.map((row) => [
+    row.keyword, row.commercialCategory,
+  ]));
+  assert.deepEqual(categories, {
+    '希宝皇家主食罐头': '自有品牌词',
+    '皇家主食罐头': '竞品词',
+    '主食罐头': '自有产品词',
+  });
+});
+
+test('aggregatePgySearchKeywords returns all 1005 aggregated words by default without truncation', () => {
+  const searchKeywords = Array.from({ length: 1005 }, (_, index) => ({
+    keyword: `虚构全量聚合词-${String(index + 1).padStart(4, '0')}`,
+    impressions: index + 1,
+    reads: 1,
+    clickRate: 1 / (index + 1),
+  }));
+  const result = reportModel().aggregatePgySearchKeywords([{
+    noteId: 'fictional-all-keywords-note',
+    title: '虚构全量搜索词笔记',
+    searchKeywordFetchStatus: 'complete',
+    searchKeywords,
+  }]);
+
+  assert.equal(result.totalKeywordCount, 1005);
+  assert.equal(result.keywords.length, 1005,
+    '默认报表必须返回全部聚合词，不得在 1000 条处截断');
+  assert.equal(result.truncated, false);
+  assert.equal(result.keywords[0].keyword, '虚构全量聚合词-1005');
+  assert.equal(result.keywords.at(-1).keyword, '虚构全量聚合词-0001');
+  assert.equal(result.summaries.commercialCategory.totalKeywords, 1005);
+  assert.equal(result.summaries.commercialCategory.totalImpressions, 505515);
+  assert.equal(result.summaries.commercialCategory.totalReads, 1005);
+});
+
+test('filterPgySearchKeywords applies three dimensions with AND semantics and recomputes weighted summaries', () => {
+  const model = reportModel();
+  assert.equal(typeof model.filterPgySearchKeywords, 'function',
+    'XhsReportModel must expose one shared keyword-filter helper for online and offline reports');
+  const keywords = [
+    {
+      keyword: '命中词 A', commercialCategory: '竞品词', relevance: '强相关', intent: '对比评估',
+      impressions: 100, reads: 30, notes: [{ noteId: 'note-a' }],
+    },
+    {
+      keyword: '命中词 B', commercialCategory: '竞品词', relevance: '强相关', intent: '对比评估',
+      impressions: 300, reads: 60, notes: [{ noteId: 'note-b' }],
+    },
+    {
+      keyword: '仅商业分类不匹配', commercialCategory: '自有产品词', relevance: '强相关', intent: '对比评估',
+      impressions: 900, reads: 450, notes: [{ noteId: 'note-c' }],
+    },
+    {
+      keyword: '仅相关度不匹配', commercialCategory: '竞品词', relevance: '中相关', intent: '对比评估',
+      impressions: 800, reads: 320, notes: [{ noteId: 'note-d' }],
+    },
+    {
+      keyword: '仅搜索意图不匹配', commercialCategory: '竞品词', relevance: '强相关', intent: '品类探索',
+      impressions: 700, reads: 210, notes: [{ noteId: 'note-e' }],
+    },
+  ];
+
+  const filtered = model.filterPgySearchKeywords(keywords, {
+    commercialCategory: '竞品词',
+    relevance: '强相关',
+    intent: '对比评估',
+  });
+
+  assert.deepEqual(filtered.keywords.map((row) => row.keyword), ['命中词 A', '命中词 B'],
+    '三个维度必须按 AND 取交集，任一维度不匹配的词都应排除');
+  for (const dimension of ['commercialCategory', 'relevance', 'intent']) {
+    assert.equal(filtered.summaries[dimension].totalKeywords, 2, `${dimension} 汇总词数`);
+    assert.equal(filtered.summaries[dimension].totalImpressions, 400, `${dimension} 汇总曝光`);
+    assert.equal(filtered.summaries[dimension].totalReads, 90, `${dimension} 汇总阅读`);
+    assert.equal(filtered.summaries[dimension].totalClickRate, 0.225,
+      `${dimension} 点击率必须用筛选后总阅读 / 总曝光加权重算`);
+  }
+});
+
+test('analysis preserves bounded search-keyword failure codes and the report summarizes them', () => {
+  const failedFact = pgyFact({
+    id: 'keyword-failure-code', publishDate: '2030-01-05', followerCount: 5000,
+    cooperation: 100, platformFee: 10, impressions: 100, reads: 20, interactions: 2,
+    searchKeywordFetchStatus: 'failed',
+    searchKeywordErrorCode: 'PGY_API_ERROR',
+  });
+  const snapshot = createXhsAnalysisSnapshot({
+    runId: 'fictional-pgy-search-failure-run',
+    storeId: 'fictional-pgy-search-failure-store',
+    selectedPlatforms: ['pgy'],
+    dateRange: { ...RANGE },
+    generatedAt: '2030-04-20T00:02:00.000Z',
+    asOf: '2030-04-20',
+    collections: { pgy: pgyCollection([failedFact]) },
+  });
+
+  assert.equal(snapshot.pgy.facts[0].searchKeywordErrorCode, 'PGY_API_ERROR');
+  const searchSummary = reportModel().aggregatePgySearchKeywords(snapshot.pgy.facts);
+  assert.deepEqual(searchSummary.coverage.failureCodeCounts, {
+    PGY_API_ERROR: 1,
+  });
+});
+
+test('aggregatePgySearchKeywords auto-selects furniture and supplement industry profiles', () => {
+  const furniture = reportModel().aggregatePgySearchKeywords([{
+    noteId: 'fictional-furniture-note',
+    title: '小户型家具与护腰床垫选购',
+    spuName: '护腰床垫',
+    searchKeywordFetchStatus: 'complete',
+    searchKeywords: [
+      { keyword: '护腰床垫怎么选', impressions: 120, reads: 36, clickRate: 0.3 },
+      { keyword: '小户型沙发推荐', impressions: 80, reads: 16, clickRate: 0.2 },
+    ],
+  }]);
+
+  assert.equal(furniture.profile.id, 'home-furnishing-v1');
+  assert.equal(furniture.keywords.find((row) => row.keyword === '护腰床垫怎么选').commercialCategory,
+    '自有产品词');
+  assert.equal(furniture.keywords.find((row) => row.keyword === '小户型沙发推荐').intent,
+    '对比评估');
+  assert.ok(furniture.keywords.every((row) => row.commercialCategory !== '泛宠物兴趣词'));
+
+  const supplements = reportModel().aggregatePgySearchKeywords([{
+    noteId: 'fictional-supplement-note',
+    title: '日常营养补充与保健品科普',
+    spuName: '深海鱼油软胶囊',
+    searchKeywordFetchStatus: 'complete',
+    searchKeywords: [
+      { keyword: '深海鱼油什么时候吃', impressions: 100, reads: 25, clickRate: 0.25 },
+      { keyword: '益生菌怎么选', impressions: 60, reads: 12, clickRate: 0.2 },
+    ],
+  }]);
+
+  assert.equal(supplements.profile.id, 'health-supplements-v1');
+  assert.equal(supplements.keywords.find((row) => row.keyword === '深海鱼油什么时候吃').commercialCategory,
+    '自有产品词');
+  assert.equal(supplements.keywords.find((row) => row.keyword === '深海鱼油什么时候吃').intent,
+    '服用/使用');
+  assert.ok(supplements.keywords.every((row) => row.commercialCategory !== '泛宠物兴趣词'));
+});
+
+test('furniture uses the Sheba-style priority and covers common desk, room and irrelevant terms', () => {
+  const result = reportModel().aggregatePgySearchKeywords([{
+    noteId: 'fictional-furniture-taxonomy-note',
+    title: '三梦家具升降桌与书房布置',
+    searchKeywordFetchStatus: 'complete',
+    searchKeywords: [
+      { keyword: '三梦乐歌升降桌', impressions: 60, reads: 12 },
+      { keyword: '乐歌升降桌', impressions: 50, reads: 10 },
+      { keyword: '电动升降桌', impressions: 40, reads: 8 },
+      { keyword: '腰突', impressions: 30, reads: 6 },
+      { keyword: '次卧电竞角', impressions: 20, reads: 4 },
+      { keyword: '开放式耳机推荐', impressions: 10, reads: 2 },
+    ],
+  }], {
+    profileId: 'home-furnishing-v1',
+    ownBrandTerms: ['三梦'],
+    factsConfigured: true,
+  });
+  const labels = Object.fromEntries(result.keywords.map((row) => [
+    row.keyword, row.commercialCategory,
+  ]));
+  assert.deepEqual(labels, {
+    '三梦乐歌升降桌': '自有品牌词',
+    '乐歌升降桌': '竞品词',
+    '电动升降桌': '核心品类词',
+    '腰突': '品类需求词',
+    '次卧电竞角': '邻近品类/场景',
+    '开放式耳机推荐': '无关词',
+  });
+  assert.ok(result.keywords.every((row) => (
+    typeof row.commercialCategory === 'string' &&
+    typeof row.relevance === 'string' &&
+    typeof row.intent === 'string'
+  )));
+});
+
+test('an explicit false factsConfigured flag keeps legacy SPU product inference enabled', () => {
+  const result = reportModel().aggregatePgySearchKeywords([{
+    noteId: 'fictional-unconfigured-store-note',
+    title: '护腰床垫测评',
+    spuName: '护腰床垫',
+    searchKeywordFetchStatus: 'complete',
+    searchKeywords: [{ keyword: '护腰床垫怎么选', impressions: 50, reads: 10 }],
+  }], {
+    profileId: 'home-furnishing-v1',
+    factsConfigured: false,
+    ownBrandTerms: [],
+    ownProductTerms: [],
+    competitorTerms: [],
+  });
+
+  assert.equal(result.keywords[0].commercialCategory, '自有产品词');
+});
+
+test('search classification accepts a stable explicit profile and rejects unknown profiles', () => {
+  const facts = [{
+    noteId: 'fictional-profile-stability-note',
+    title: '家具与健康跨界活动',
+    spuName: '护腰床垫',
+    searchKeywordFetchStatus: 'complete',
+    searchKeywords: [
+      { keyword: '益生菌联名沙发', impressions: 20, reads: 4, clickRate: 0.2 },
+    ],
+  }];
+  const furniture = reportModel().aggregatePgySearchKeywords(facts, {
+    profileId: 'home-furnishing-v1',
+  });
+
+  assert.equal(furniture.profile.id, 'home-furnishing-v1');
+  assert.equal(furniture.profile.selection, 'explicit');
+  assert.ok(furniture.keywords.every((row) => row.commercialCategory !== '泛宠物兴趣词'));
+  assert.throws(() => reportModel().aggregatePgySearchKeywords(facts, {
+    profileId: 'fictional-unknown-profile',
+  }), /unknown.*profile/i);
 });
 
 test('aggregatePgyFacts derives task and overdue counts from PGY facts inside the selected publication range', () => {

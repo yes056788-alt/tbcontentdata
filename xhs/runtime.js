@@ -313,6 +313,7 @@
       : null;
     const stateMutationPromises = new Set();
     const activePlatformTabIds = new Map();
+    const taskOwnedPlatformTabIds = new Map();
     const concurrentJuguangTabIds = new Set();
     const successfulPlatformResponses = new Set();
 
@@ -365,7 +366,7 @@
       const expected = PLATFORM_CONFIG[platform];
       const ambiguous = code === 'XHS_PLATFORM_TAB_AMBIGUOUS';
       const error = new Error(ambiguous
-        ? `检测到多个已登录的${expected.name}页面，请关闭重复标签页后重试，仅保留一个 ${expected.origin} 页面。`
+        ? `检测到多个${expected.name}同源页面（可能位于其他窗口、折叠标签组或来自旧任务），请关闭重复标签页后重试，仅保留一个 ${expected.origin} 页面。`
         : `未找到已登录的${expected.name}页面，请先打开 ${expected.origin}。`);
       error.code = ambiguous ? 'XHS_PLATFORM_TAB_AMBIGUOUS' : 'XHS_PLATFORM_TAB_MISSING';
       error.retryable = false;
@@ -404,19 +405,32 @@
       return Number.isInteger(active) ? active : Number(fallback);
     }
 
+    function requestedTaskOwnedTabId(source, platform) {
+      const values = isObject(source && source.taskOwnedTabIds) ? source.taskOwnedTabIds : {};
+      const tabId = Number(values[platform]);
+      return Number.isInteger(tabId) && tabId > 0 ? tabId : null;
+    }
+
     function isPinnedPlatformRequest(source) {
+      const platform = String(source && source.platform || '');
       return source && (source.pinnedTabId === true ||
+        taskOwnedPlatformTabIds.get(platform) === Number(source.tabId) ||
         concurrentJuguangTabIds.has(Number(source.tabId)));
     }
 
     async function resolvePinnedPlatformTab(platform, tabId, signal) {
       throwIfAborted(signal);
       let tab = null;
-      if (chromeApi.tabs && typeof chromeApi.tabs.get === 'function') {
-        tab = await raceWithSignal(chromeApi.tabs.get(Number(tabId)), signal);
-      } else {
-        const tabs = await raceWithSignal(chromeApi.tabs.query({}), signal);
-        tab = (tabs || []).find((entry) => Number(entry && entry.id) === Number(tabId)) || null;
+      try {
+        if (chromeApi.tabs && typeof chromeApi.tabs.get === 'function') {
+          tab = await raceWithSignal(chromeApi.tabs.get(Number(tabId)), signal);
+        } else {
+          const tabs = await raceWithSignal(chromeApi.tabs.query({}), signal);
+          tab = (tabs || []).find((entry) => Number(entry && entry.id) === Number(tabId)) || null;
+        }
+      } catch (error) {
+        if (isAbortError(error, signal)) throw abortError(signal);
+        tab = null;
       }
       if (!tab || exactPlatformTabs([tab], platform).length !== 1) {
         throw platformTabChangedError(platform);
@@ -951,7 +965,11 @@
       await recoverJuguangBridgeAfterNavigation(
         tabId, expectation, lifecycle, deadlineAt, signal
       );
-      return requestJuguangCurrent(tabId, target, deadlineAt, signal);
+      // A newly created background tab can finish its document navigation before the
+      // advertiser identity has converged from the main account to the requested child.
+      // Keep probing for the remainder of the same bounded transition budget instead of
+      // treating the first short retry batch as a permanent tab-isolation failure.
+      return requestJuguangCurrentUntilDeadline(tabId, target, deadlineAt, signal);
     }
 
     async function returnToJuguangMainAccount(input) {
@@ -1409,6 +1427,7 @@
       }
 
       activePlatformTabIds.clear();
+      taskOwnedPlatformTabIds.clear();
       successfulPlatformResponses.clear();
 
       for (const platform of requested) {
@@ -1442,7 +1461,14 @@
         let tab = null;
         let tabError = null;
         try {
-          tab = await queryUniquePlatformTab(platform, signal);
+          const taskOwnedTabId = requestedTaskOwnedTabId(source, platform);
+          if (taskOwnedTabId !== null) {
+            tab = await resolvePinnedPlatformTab(platform, taskOwnedTabId, signal);
+            taskOwnedPlatformTabIds.set(platform, taskOwnedTabId);
+            activePlatformTabIds.set(platform, taskOwnedTabId);
+          } else {
+            tab = await queryUniquePlatformTab(platform, signal);
+          }
         } catch (error) {
           if (isAbortError(error, signal)) throw abortError(signal);
           if (['XHS_PLATFORM_TAB_MISSING', 'XHS_PLATFORM_TAB_AMBIGUOUS'].includes(error && error.code)) {
@@ -1604,6 +1630,7 @@
             tabIds: Array.from(concurrentJuguangTabIds),
           }).catch(() => {});
         }
+        taskOwnedPlatformTabIds.clear();
       }
     }
 
@@ -1698,7 +1725,9 @@
         if (!senderAllowed(chromeApi, sender)) {
           return { ok: false, code: 'XHS_SENDER_DENIED', error: '小红书取数请求来源不受信任。' };
         }
-        return { ok: true, result: await run(message.payload) };
+        const payload = isObject(message.payload) ? Object.assign({}, message.payload) : message.payload;
+        if (isObject(payload)) delete payload.taskOwnedTabIds;
+        return { ok: true, result: await run(payload) };
       } catch (error) {
         const failure = errorRecord(error, error && error.code || 'XHS_RUN_INVALID');
         return { ok: false, code: failure.code, error: failure.message };

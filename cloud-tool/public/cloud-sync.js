@@ -10,7 +10,9 @@
   const MAX_RUN_BYTES = 24 * 1024 * 1024;
   const MAX_XHS_SNAPSHOT_BYTES = 8 * 1024 * 1024;
   const XHS_DETAIL_KEY_PREFIX = 'xhsAnalysisDetailChunkV1:';
-  const XHS_SNAPSHOT_KEYS = new Set(['xhsAnalysisSnapshotV1', 'xhsCollectionStatusV1']);
+  const XHS_SNAPSHOT_KEYS = new Set([
+    'xhsAnalysisSnapshotV1', 'xhsCollectionStatusV1', 'xhsCommentInsightSummaryV1',
+  ]);
   const SENSITIVE_RUN_KEYS = new Set([
     'password', 'masterpassword', 'authorization', 'cookie', 'cookies',
     'token', 'accesstoken', 'refreshtoken', 'signature', 'sign', 'secret',
@@ -20,6 +22,52 @@
     'raw', 'rawresponse', 'rawresponses', 'rawpayload', 'rawpages',
     'checkpoint', 'checkpoints', 'pages', 'cache', 'cachekey', 'fingerprint',
     'indexeddb', 'datasets',
+  ]);
+  const COMMENT_ARCHIVE_SNAPSHOT_KEY = 'xhsCommentInsightSummaryV1';
+  const COMMENT_ARCHIVE_RUN_KEYS = new Set([
+    'schema', 'runId', 'batchId', 'taskType', 'runMode', 'account',
+    'startedAt', 'finishedAt', 'updatedAt', 'xinghe', 'status', 'failures', 'snapshots',
+  ]);
+  const COMMENT_ARCHIVE_ACCOUNT_KEYS = new Set([
+    'id', 'name', 'platform', 'storeId', 'storeName', 'usernameMasked', 'roleKeyword',
+    'accountGroupId', 'accountGroupName', 'storeGroupId', 'storeGroupName',
+  ]);
+  const COMMENT_ARCHIVE_COUNT_KEYS = new Set([
+    'commentCount', 'classifiedCommentCount', 'unclassifiedCommentCount', 'newCommentCount',
+    'capturedCommentCount', 'candidateCount', 'completedCount', 'pendingContinuationCount',
+    'failureCount', 'noteCount', 'newNoteCount', 'hotNoteCount', 'negativeFeedbackCount',
+    'purchaseConcernCount', 'unansweredQuestionCount',
+  ]);
+  const COMMENT_ARCHIVE_CATEGORY_LABELS = Object.freeze({
+    purchase_motivation: '购买动机', product_experience: '产品体验',
+    price_promotion: '价格促销', fit_compatibility: '规格适配',
+    usage_guidance: '使用方法', competitor_comparison: '竞品比较',
+    shipping_after_sales: '物流售后', complaint_risk: '投诉风险',
+  });
+  const COMMENT_ARCHIVE_METRIC_COUNT_KEYS = new Set([
+    'impressionCount', 'commentCount', 'interactionCount', 'readCount',
+    'likeCount', 'collectCount', 'shareCount', 'capturedCount',
+  ]);
+  const COMMENT_ARCHIVE_METRIC_DELTA_KEYS = new Set([
+    'commentDelta', 'nonCommentInteractionDelta', 'readDelta',
+  ]);
+  const COMMENT_ARCHIVE_METRIC_DATE_KEYS = new Set([
+    'publishedAt', 'platformUpdatedAt', 'lastCommentCheckedAt', 'capturedAt', 'updatedAt',
+  ]);
+  const COMMENT_ARCHIVE_CAPTURE_STATUSES = new Set([
+    'baseline', 'complete', 'completed', 'continuation', 'failed', 'partial', 'paused',
+    'waiting_login', 'waiting_verification', 'needs_login', 'needs_verification',
+    'pending', 'running', 'queued',
+  ]);
+  const COMMENT_ARCHIVE_DISCOVERY_STATUSES = new Set([
+    'new_note', 'existing', 'historical_backfill',
+  ]);
+  const COMMENT_ARCHIVE_REASON_VALUES = new Set([
+    'new_note', 'comment_growth', 'hot_top_20pct_due', 'metric_missing',
+    'platform_correction', 'continuation',
+  ]);
+  const COMMENT_ARCHIVE_SEMANTIC_CATEGORY_IDS = Object.freeze([
+    ...Object.keys(COMMENT_ARCHIVE_CATEGORY_LABELS), 'other',
   ]);
   const SYNC_KEYS = new Set([VAULT_KEY, DIRECTORY_KEY, RUN_INDEX_KEY]);
   const TEAM_ORIGIN = 'https://tbdata.aizicheng.com';
@@ -68,6 +116,206 @@
   function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value) &&
       Object.prototype.toString.call(value) === '[object Object]';
+  }
+
+  function commentArchiveHasOnlyKeys(value, allowedKeys) {
+    return isPlainObject(value) && Object.keys(value).every((key) => allowedKeys.has(key));
+  }
+
+  function commentArchiveText(value, maximum, required) {
+    return typeof value === 'string' && value.length <= maximum && (!required || value.length > 0);
+  }
+
+  function commentArchiveSafeEvidenceText(value, maximum) {
+    const normalized = String(value == null ? '' : value).normalize('NFKC').trim()
+      .replace(/\s+/gu, ' ')
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu, '[邮箱]')
+      .replace(/(^|[^\d])\s*1[3-9]\d{9}(?!\d)/gu, '$1[手机号]')
+      .replace(/(^|[^\d])\s*\d{17}[\dXx](?!\d)/gu, '$1[证件号]')
+      .replace(/(?:微信号?|微信|vx|wechat)\s*[:：]?[\s_-]*(?:(?:微信号?|微信|vx|wechat)\s*[:：]?[\s_-]*)?[A-Za-z][A-Za-z0-9_-]{5,19}/giu, '[微信号]');
+    return Array.from(normalized).slice(0, maximum).join('');
+  }
+
+  function commentArchiveCounter(value) {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  }
+
+  function commentArchiveTimestamp(value) {
+    return commentArchiveText(value, 80, true) && Number.isFinite(Date.parse(value));
+  }
+
+  function commentArchiveOptional(value, validator) {
+    return value === undefined || validator(value);
+  }
+
+  function commentArchiveStringList(value, allowed, maximumItems) {
+    return Array.isArray(value) && value.length <= maximumItems &&
+      value.every((item) => typeof item === 'string' && allowed.has(item)) &&
+      new Set(value).size === value.length;
+  }
+
+  function commentArchiveEvidence(value) {
+    const allowed = new Set(['excerpt', 'noteId', 'commentId']);
+    return commentArchiveHasOnlyKeys(value, allowed) &&
+      commentArchiveText(value.excerpt, 160, true) &&
+      value.excerpt === commentArchiveSafeEvidenceText(value.excerpt, 160) &&
+      commentArchiveOptional(value.noteId, (item) => commentArchiveText(item, 160, true)) &&
+      commentArchiveOptional(value.commentId, (item) => commentArchiveText(item, 240, true));
+  }
+
+  function commentArchiveCategories(value) {
+    const ids = Object.keys(COMMENT_ARCHIVE_CATEGORY_LABELS);
+    if (!commentArchiveHasOnlyKeys(value, new Set(ids)) ||
+        !ids.every((id) => Object.prototype.hasOwnProperty.call(value, id))) return false;
+    let evidenceCount = 0;
+    for (const id of ids) {
+      const category = value[id];
+      if (!commentArchiveHasOnlyKeys(category, new Set(['label', 'count', 'evidence'])) ||
+          category.label !== COMMENT_ARCHIVE_CATEGORY_LABELS[id] ||
+          !commentArchiveCounter(category.count) || !Array.isArray(category.evidence) ||
+          category.evidence.length > 3 || !category.evidence.every(commentArchiveEvidence)) return false;
+      evidenceCount += category.evidence.length;
+    }
+    return evidenceCount <= 24;
+  }
+
+  function commentArchiveMetric(value) {
+    const allowed = new Set([
+      'noteId', 'title', ...COMMENT_ARCHIVE_METRIC_DATE_KEYS,
+      ...COMMENT_ARCHIVE_METRIC_COUNT_KEYS, ...COMMENT_ARCHIVE_METRIC_DELTA_KEYS,
+      'discovery', 'heatPinned', 'heatTop20', 'heatScore', 'heatPercentiles',
+      'corrections', 'missingMetrics', 'reasons', 'captureStatus',
+    ]);
+    if (!commentArchiveHasOnlyKeys(value, allowed) ||
+        !commentArchiveText(value.noteId, 160, true) ||
+        !commentArchiveOptional(value.title, (item) => commentArchiveText(item, 500, true))) return false;
+    for (const key of COMMENT_ARCHIVE_METRIC_DATE_KEYS) {
+      if (!commentArchiveOptional(value[key], commentArchiveTimestamp)) return false;
+    }
+    for (const key of COMMENT_ARCHIVE_METRIC_COUNT_KEYS) {
+      if (!commentArchiveOptional(value[key], commentArchiveCounter)) return false;
+    }
+    for (const key of COMMENT_ARCHIVE_METRIC_DELTA_KEYS) {
+      if (value[key] !== undefined && value[key] !== null && !commentArchiveCounter(value[key])) return false;
+    }
+    if (!commentArchiveOptional(value.discovery, (item) => COMMENT_ARCHIVE_DISCOVERY_STATUSES.has(item)) ||
+        !commentArchiveOptional(value.heatPinned, (item) => typeof item === 'boolean') ||
+        !commentArchiveOptional(value.heatTop20, (item) => typeof item === 'boolean') ||
+        !commentArchiveOptional(value.heatScore, (item) => commentArchiveCounter(item) && item <= 1) ||
+        !commentArchiveOptional(value.captureStatus, (item) => COMMENT_ARCHIVE_CAPTURE_STATUSES.has(item))) return false;
+    if (value.heatPercentiles !== undefined) {
+      const allowedPercentiles = new Set(['comments', 'nonCommentInteractions', 'reads']);
+      if (!commentArchiveHasOnlyKeys(value.heatPercentiles, allowedPercentiles) ||
+          !Object.values(value.heatPercentiles).every((item) => commentArchiveCounter(item) && item <= 1)) return false;
+    }
+    if (!commentArchiveOptional(value.corrections, (item) => commentArchiveStringList(
+      item, COMMENT_ARCHIVE_METRIC_COUNT_KEYS, 7
+    )) || !commentArchiveOptional(value.missingMetrics, (item) => commentArchiveStringList(
+      item, COMMENT_ARCHIVE_METRIC_COUNT_KEYS, 7
+    )) || !commentArchiveOptional(value.reasons, (item) => commentArchiveStringList(
+      item, COMMENT_ARCHIVE_REASON_VALUES, 6
+    ))) return false;
+    return true;
+  }
+
+  function commentArchiveNoteState(value) {
+    const allowed = new Set(['noteId', 'title', 'status', 'capturedCount', 'updatedAt']);
+    return commentArchiveHasOnlyKeys(value, allowed) &&
+      commentArchiveText(value.noteId, 160, true) &&
+      commentArchiveOptional(value.title, (item) => commentArchiveText(item, 500, true)) &&
+      commentArchiveOptional(value.status, (item) => COMMENT_ARCHIVE_CAPTURE_STATUSES.has(item)) &&
+      commentArchiveOptional(value.capturedCount, commentArchiveCounter) &&
+      commentArchiveOptional(value.updatedAt, commentArchiveTimestamp);
+  }
+
+  function commentArchiveSemantic(value) {
+    const countKeys = new Set([
+      'itemCount', 'classifiedCount', 'abstainedCount', 'retryableCount',
+      'purchaseIntentCount', 'unresolvedQuestionCount',
+    ]);
+    const allowed = new Set([
+      'status', 'provider', 'model', 'promptVersion', 'taxonomyVersion', 'errorCode',
+      ...countKeys, 'sentimentCounts', 'categoryCounts',
+    ]);
+    if (!commentArchiveHasOnlyKeys(value, allowed)) return false;
+    for (const [key, maximum] of Object.entries({
+      status: 80, provider: 80, model: 160, promptVersion: 80, taxonomyVersion: 80, errorCode: 120,
+    })) {
+      if (!commentArchiveOptional(value[key], (item) => commentArchiveText(item, maximum, true))) return false;
+    }
+    for (const key of countKeys) {
+      if (!Object.prototype.hasOwnProperty.call(value, key) || !commentArchiveCounter(value[key])) return false;
+    }
+    const sentiments = new Set(['positive', 'neutral', 'negative']);
+    if (!commentArchiveHasOnlyKeys(value.sentimentCounts, sentiments) ||
+        ![...sentiments].every((key) => commentArchiveCounter(value.sentimentCounts[key]))) return false;
+    const categories = new Set(COMMENT_ARCHIVE_SEMANTIC_CATEGORY_IDS);
+    return commentArchiveHasOnlyKeys(value.categoryCounts, categories) &&
+      [...categories].every((key) => commentArchiveCounter(value.categoryCounts[key]));
+  }
+
+  function commentArchiveInterval(value) {
+    const allowed = new Set(['from', 'to', 'days', 'missedDays', 'dailyAttribution', 'label']);
+    return commentArchiveHasOnlyKeys(value, allowed) &&
+      commentArchiveOptional(value.from, commentArchiveTimestamp) &&
+      commentArchiveOptional(value.to, commentArchiveTimestamp) &&
+      commentArchiveOptional(value.days, commentArchiveCounter) &&
+      commentArchiveOptional(value.missedDays, commentArchiveCounter) &&
+      commentArchiveOptional(value.dailyAttribution, (item) => typeof item === 'boolean') &&
+      ['本次更新增量', '自上次成功以来增量'].includes(value.label);
+  }
+
+  function validCommentArchiveSummary(value) {
+    const allowed = new Set([
+      'schema', 'schemaVersion', 'accountRef', 'bindingSourceRunId', 'generatedAt',
+      'platformUpdatedAt', 'interval', ...COMMENT_ARCHIVE_COUNT_KEYS,
+      'categories', 'noteMetrics', 'noteStates', 'semantic',
+    ]);
+    if (!commentArchiveHasOnlyKeys(value, allowed) || value.schema !== 'CommentInsightSummaryV1' ||
+        value.schemaVersion !== 1 || !/^[0-9a-f]{64}$/u.test(value.accountRef) ||
+        !commentArchiveTimestamp(value.generatedAt) || !commentArchiveCategories(value.categories) ||
+        !Array.isArray(value.noteMetrics) || value.noteMetrics.length > 2000 ||
+        !value.noteMetrics.every(commentArchiveMetric) || !Array.isArray(value.noteStates) ||
+        value.noteStates.length > 2000 || !value.noteStates.every(commentArchiveNoteState)) return false;
+    if (!commentArchiveOptional(value.bindingSourceRunId, (item) => commentArchiveText(item, 160, true)) ||
+        !commentArchiveOptional(value.platformUpdatedAt, commentArchiveTimestamp) ||
+        !commentArchiveOptional(value.interval, commentArchiveInterval) ||
+        !commentArchiveOptional(value.semantic, commentArchiveSemantic)) return false;
+    for (const key of COMMENT_ARCHIVE_COUNT_KEYS) {
+      if (!commentArchiveOptional(value[key], commentArchiveCounter)) return false;
+    }
+    return true;
+  }
+
+  function validCommentArchiveRun(value) {
+    const snapshots = isPlainObject(value && value.snapshots) ? value.snapshots : {};
+    const hasCommentSummary = Object.prototype.hasOwnProperty.call(snapshots, COMMENT_ARCHIVE_SNAPSHOT_KEY);
+    if (!value || value.taskType !== 'comment_monitor') return !hasCommentSummary;
+    if (!commentArchiveHasOnlyKeys(value, COMMENT_ARCHIVE_RUN_KEYS) || value.schema !== 3 ||
+        !/^store-run-[a-z0-9-]+$/iu.test(value.runId || '') ||
+        !commentArchiveText(value.batchId, 120, true) || value.runMode !== 'current' ||
+        !['success', 'partial'].includes(value.status) ||
+        !commentArchiveCounter(value.startedAt) || !commentArchiveCounter(value.finishedAt) ||
+        !commentArchiveCounter(value.updatedAt) || value.finishedAt < value.startedAt ||
+        value.updatedAt < value.finishedAt) return false;
+    if (!commentArchiveHasOnlyKeys(value.account, COMMENT_ARCHIVE_ACCOUNT_KEYS) ||
+        value.account.platform !== 'xiaohongshu' ||
+        !commentArchiveText(value.account.storeId, 100, true) ||
+        !commentArchiveText(value.account.storeName, 120, true) ||
+        !Object.values(value.account).every((item) => typeof item === 'string' && item.length <= 240)) return false;
+    if (!commentArchiveHasOnlyKeys(value.xinghe, new Set(['state', 'noPermission'])) ||
+        !commentArchiveText(value.xinghe.state, 100, false) ||
+        typeof value.xinghe.noPermission !== 'boolean' || !Array.isArray(value.failures) ||
+        value.failures.length > 100 ||
+        !value.failures.every((item) => commentArchiveText(item, 120, true))) return false;
+    return Object.keys(snapshots).length === 1 && hasCommentSummary &&
+      validCommentArchiveSummary(snapshots[COMMENT_ARCHIVE_SNAPSHOT_KEY]);
+  }
+
+  function assertCommentArchiveBoundary(value) {
+    if (!validCommentArchiveRun(value)) {
+      throw new Error('评论监测归档结构不符合脱敏 schema，已拒绝同步。');
+    }
   }
 
   function cleanText(value, maxLength) {
@@ -138,6 +386,126 @@
     };
   }
 
+  function classificationInteger(value, maxValue) {
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) return 0;
+    return Math.min(parsed, maxValue == null ? Number.MAX_SAFE_INTEGER : maxValue);
+  }
+
+  function classificationText(value, maxLength) {
+    return typeof value === 'string' || typeof value === 'number'
+      ? String(value).trim().slice(0, maxLength)
+      : '';
+  }
+
+  function classificationTerms(value, maxItems, maxLength) {
+    const seen = new Set();
+    const result = [];
+    (Array.isArray(value) ? value : []).slice(0, maxItems).some((raw) => {
+      const term = classificationText(raw, maxLength);
+      const key = term.toLowerCase();
+      if (term && !seen.has(key)) {
+        seen.add(key);
+        result.push(term);
+      }
+      return result.length >= maxItems;
+    });
+    return result;
+  }
+
+  function highestPriorityClassificationTerm(value, priority) {
+    const candidates = classificationTerms(value, 20, 80);
+    return priority.find((item) => candidates.includes(item)) || candidates[0] || '';
+  }
+
+  function sanitizeClassificationPatch(value, legacy) {
+    const patch = isPlainObject(value) ? value : {};
+    const old = isPlainObject(legacy) ? legacy : {};
+    const topicTagsExplicit = Array.isArray(patch.topicTagIds);
+    const entityRelation = classificationText(
+      patch.entityRelation == null ? old.commercialCategory : patch.entityRelation,
+      80
+    );
+    const topicTagId = highestPriorityClassificationTerm(
+      patch.topicTagIds == null ? old.topicTagIds : patch.topicTagIds,
+      [
+        'safety_adverse_effect', 'need_pain_point', 'core_category', 'usage_scenario',
+        'adjacent_category', 'industry_interest', 'unrelated',
+      ]
+    );
+    const prioritizedIntentId = highestPriorityClassificationTerm(
+      patch.intentIds == null ? old.secondaryIntents : patch.intentIds,
+      [
+        'purchase_decision', 'comparison', 'problem_solving', 'usage',
+        'brand_product_lookup', 'category_exploration', 'interest_browsing', 'unclear',
+      ]
+    );
+    let primaryIntentId = classificationText(
+      patch.primaryIntentId == null ? (old.primaryIntent || old.intent) : patch.primaryIntentId,
+      80
+    );
+    if (!primaryIntentId) primaryIntentId = prioritizedIntentId;
+    const topicTagIds = topicTagId ? [topicTagId] : [];
+    const intentIds = primaryIntentId ? [primaryIntentId] : [];
+    const relevance = classificationText(
+      patch.relevance == null ? old.relevance : patch.relevance,
+      80
+    );
+    return Object.assign(
+      {},
+      entityRelation ? { entityRelation } : {},
+      topicTagIds.length || topicTagsExplicit ? { topicTagIds } : {},
+      intentIds.length ? { intentIds } : {},
+      primaryIntentId ? { primaryIntentId } : {},
+      relevance ? { relevance } : {}
+    );
+  }
+
+  function sanitizeClassificationOverride(value) {
+    const item = isPlainObject(value) ? value : {};
+    const keyword = classificationText(item.keyword || item.normalizedKeyword, 160);
+    const keywordKey = classificationText(item.keywordKey, 240);
+    const normalizedKeyword = classificationText(item.normalizedKeyword, 160);
+    const overrideId = classificationText(item.id || keywordKey || normalizedKeyword || keyword, 96);
+    if (!overrideId || !keyword) return null;
+    return Object.assign({
+      id: overrideId,
+      scopeKey: classificationText(item.scopeKey, 160),
+      keyword,
+    }, keywordKey ? { keywordKey } : {}, normalizedKeyword ? { normalizedKeyword } : {}, {
+      active: item.active !== false,
+      reason: classificationText(item.reason, 160),
+      patch: sanitizeClassificationPatch(item.patch, item),
+      updatedAt: classificationInteger(item.updatedAt),
+    });
+  }
+
+  function sanitizeStoreClassification(value) {
+    if (!isPlainObject(value) || Number(value.schema) !== 1) return null;
+    const overrideIds = new Set();
+    const manualOverrides = [];
+    (Array.isArray(value.manualOverrides) ? value.manualOverrides : [])
+      .slice(0, 500).some((raw) => {
+        const item = sanitizeClassificationOverride(raw);
+        if (item && !overrideIds.has(item.id)) {
+          overrideIds.add(item.id);
+          manualOverrides.push(item);
+        }
+        return manualOverrides.length >= 500;
+      });
+    return {
+      schema: 1,
+      profileId: classificationText(value.profileId, 96),
+      customIndustry: classificationText(value.customIndustry, 120),
+      ownBrandTerms: classificationTerms(value.ownBrandTerms, 200, 64),
+      ownProductTerms: classificationTerms(value.ownProductTerms, 200, 64),
+      competitorTerms: classificationTerms(value.competitorTerms, 200, 64),
+      manualOverrides,
+      revision: classificationInteger(value.revision, 2147483647),
+      updatedAt: classificationInteger(value.updatedAt),
+    };
+  }
+
   function sanitizeDirectory(value) {
     if (!isPlainObject(value) || Number(value.schema) !== 1 || !timestamp(value.updatedAt)) return null;
     const groupIds = new Set();
@@ -156,13 +524,14 @@
       const name = cleanText(store.name, 120);
       if (!id || !name || storeIds.has(id)) return null;
       storeIds.add(id);
-      return {
+      const classification = sanitizeStoreClassification(store.classification);
+      return Object.assign({
         id,
         name,
         groupId: groupIds.has(store.groupId) ? store.groupId : '',
         createdAt: cleanText(store.createdAt, 80),
         updatedAt: cleanText(store.updatedAt, 80),
-      };
+      }, classification ? { classification } : {});
     }).filter(Boolean);
     return {
       schema: 1,
@@ -232,6 +601,42 @@
     return false;
   }
 
+  function containsUrlControlCharacter(value) {
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code <= 31 || code === 127) return true;
+    }
+    return false;
+  }
+
+  function isOfficialPgyNoteUrl(value, expectedNoteId) {
+    if (typeof value !== 'string' || value !== value.trim() ||
+        typeof expectedNoteId !== 'string' || expectedNoteId !== expectedNoteId.trim() ||
+        !/^https:\/\/www\.xiaohongshu\.com\/explore\//.test(value) ||
+        !/^[a-z0-9_-]{3,128}$/i.test(expectedNoteId) ||
+        containsUrlControlCharacter(value)) return false;
+    let url;
+    try {
+      url = new URL(value);
+    } catch (error) {
+      return false;
+    }
+    const pathMatch = /^\/explore\/([a-z0-9_-]{3,128})$/i.exec(url.pathname);
+    if (url.protocol !== 'https:' || url.hostname !== 'www.xiaohongshu.com' || url.port ||
+        url.username || url.password || url.hash || !pathMatch || pathMatch[1] !== expectedNoteId) {
+      return false;
+    }
+    const rawQuery = url.search.slice(1);
+    const sourceSuffix = '&xsec_source=pc_pgyexport';
+    if (!rawQuery.startsWith('xsec_token=') || !rawQuery.endsWith(sourceSuffix) ||
+        rawQuery.indexOf('&') !== rawQuery.length - sourceSuffix.length) return false;
+    const token = String(url.searchParams.get('xsec_token') || '');
+    return token.length >= 8 && token.length <= 2048 && !/\s/.test(token) &&
+      !containsUrlControlCharacter(token) &&
+      url.searchParams.getAll('xsec_token').length === 1 &&
+      url.searchParams.getAll('xsec_source').length === 1;
+  }
+
   function containsSensitiveRunField(value, seen, depth) {
     if (containsSignedCredentialUrl(value)) return true;
     if (!value || typeof value !== 'object') return false;
@@ -241,20 +646,44 @@
     visited.add(value);
     for (const [key, child] of Object.entries(value)) {
       if (isSensitiveRunKey(key)) return true;
+      if (key === 'noteUrl' && Object.prototype.hasOwnProperty.call(value, 'noteId') &&
+          isOfficialPgyNoteUrl(child, value.noteId)) continue;
       if (containsSensitiveRunField(child, visited, Number(depth || 0) + 1)) return true;
     }
     return false;
   }
 
-  function containsForbiddenXhsState(value, seen, depth) {
+  function isSafeClassificationArchiveCacheKey(value) {
+    return typeof value === 'string' &&
+      /^xhs-search-classification-v2:[0-9a-f]{16}$/u.test(value);
+  }
+
+  function containsForbiddenXhsState(value, seen, depth, context) {
     if (!value || typeof value !== 'object') return false;
     if (Number(depth) > 64) return true;
     const visited = seen || new Set();
     if (visited.has(value)) return false;
     visited.add(value);
+    if (Array.isArray(value)) {
+      const itemContext = context === 'classificationEntries' ? 'classificationEntry' : '';
+      return value.some((child) => containsForbiddenXhsState(
+        child, visited, Number(depth || 0) + 1, itemContext
+      ));
+    }
+    const classificationArchive = value.schema === 'xhsSearchClassificationArchiveV1' &&
+      Number(value.schemaVersion) === 1 && Array.isArray(value.entries);
     for (const [key, child] of Object.entries(value)) {
-      if (isForbiddenXhsStateKey(key)) return true;
-      if (containsForbiddenXhsState(child, visited, Number(depth || 0) + 1)) return true;
+      if (isForbiddenXhsStateKey(key)) {
+        if (normalizedRunKey(key) === 'cachekey' && context === 'classificationEntry' &&
+            isSafeClassificationArchiveCacheKey(child)) continue;
+        return true;
+      }
+      const childContext = classificationArchive && key === 'entries'
+        ? 'classificationEntries'
+        : '';
+      if (containsForbiddenXhsState(
+        child, visited, Number(depth || 0) + 1, childContext
+      )) return true;
     }
     return false;
   }
@@ -294,6 +723,7 @@
     if (!isPlainObject(cloned.snapshots) || !isPlainObject(cloned.account)) {
       throw new Error('本地历史归档结构无效。');
     }
+    assertCommentArchiveBoundary(cloned);
     assertXhsSnapshotsSafe(cloned.snapshots);
     return cloned;
   }

@@ -69,11 +69,85 @@ function createHarness() {
   const restoredVault = {
     schema: 4,
     accountGroups: [],
-    storeGroups: [],
-    stores: [],
+    storeGroups: [{ id: 'group-1', name: '默认组' }],
+    stores: [{
+      id: 'store-1',
+      name: '家具店',
+      groupId: 'group-1',
+      credentialBindings: { taobaoAccountId: '', xiaohongshuAccountId: '' },
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+    }],
     accounts: [],
     notification: { webhook: '', secret: '' },
     updatedAt: '2026-08-24T00:00:00.000Z',
+  };
+  const classification = {
+    schema: 1,
+    profileId: 'home-furnishing-v1',
+    customIndustry: '家具',
+    ownBrandTerms: ['顾家'],
+    ownProductTerms: ['护腰床垫'],
+    competitorTerms: ['慕思'],
+    manualOverrides: [{
+      id: 'override-1',
+      scopeKey: 'store-1',
+      keyword: '顾家床垫值得买吗',
+      active: true,
+      reason: '运营人工确认',
+      patch: {
+        entityRelation: 'own_brand',
+        topicTagIds: ['core_category'],
+        intentIds: ['purchase_decision'],
+        primaryIntentId: 'purchase_decision',
+        relevance: 'strong',
+        token: 'must-drop',
+      },
+      updatedAt: 1788048000000,
+      password: 'must-drop',
+    }],
+    revision: 3,
+    updatedAt: 1788048000000,
+    secret: 'must-drop',
+    unknown: 'must-drop',
+  };
+  const expectedClassification = {
+    schema: 1,
+    profileId: 'home-furnishing-v1',
+    customIndustry: '家具',
+    ownBrandTerms: ['顾家'],
+    ownProductTerms: ['护腰床垫'],
+    competitorTerms: ['慕思'],
+    manualOverrides: [{
+      id: 'override-1',
+      scopeKey: 'store-1',
+      keyword: '顾家床垫值得买吗',
+      active: true,
+      reason: '运营人工确认',
+      patch: {
+        entityRelation: 'own_brand',
+        topicTagIds: ['core_category'],
+        intentIds: ['purchase_decision'],
+        primaryIntentId: 'purchase_decision',
+        relevance: 'strong',
+      },
+      updatedAt: 1788048000000,
+    }],
+    revision: 3,
+    updatedAt: 1788048000000,
+  };
+  const projectDirectory = {
+    schema: 1,
+    storeGroups: [{ id: 'group-1', name: '默认组' }],
+    stores: [{
+      id: 'store-1',
+      name: '家具店',
+      groupId: 'group-1',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+      classification,
+    }],
+    updatedAt: 1788048000000,
   };
   const element = (selector) => {
     if (!elements.has(selector)) elements.set(selector, fixtureElement());
@@ -85,7 +159,10 @@ function createHarness() {
       return { vaultScopeId: 'local:tbcontentdata', vaultLockEpoch: 4 };
     }
     if (message.action === 'getStorage') {
-      return { taobaoAccountVaultV1: encryptedVault };
+      return {
+        taobaoAccountVaultV1: encryptedVault,
+        taobaoProjectDirectoryV1: projectDirectory,
+      };
     }
     if (message.action === 'getAccountManagementSession') {
       return {
@@ -148,7 +225,7 @@ function createHarness() {
     window: windowObject,
   });
   vm.runInContext(accountsSource, context, { filename: 'accounts-reopen-session.js' });
-  return { element, requests };
+  return { element, expectedClassification, requests };
 }
 
 async function settle() {
@@ -174,4 +251,11 @@ test('reopening account management restores the current Chrome vault session and
   assert.ok(actions.includes('encryptAccountVaultFromSession'));
   assert.ok(actions.includes('setAccountVault'));
   assert.ok(actions.includes('setAccountSession'));
+  const directoryWrite = harness.requests.find((request) => request.action === 'setProjectDirectory');
+  assert.ok(directoryWrite, '保存账号库时应重建项目目录');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(directoryWrite.payload.directory.stores[0].classification)),
+    harness.expectedClassification,
+    '按 storeId 重建目录时必须保留并清洗已有分类配置',
+  );
 });

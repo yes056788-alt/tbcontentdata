@@ -10,6 +10,11 @@ importScripts(
   'xhs/page-client.js',
   'xhs/adstar-collector.js',
   'xhs/pgy-collector.js',
+  'xhs/pgy-comment-inventory.js',
+  'xhs/comment-monitor.js',
+  'xhs/comment-summary-archive.js',
+  'xhs/comment-capture-coordinator.js',
+  'xhs/comment-monitor-runtime.js',
   'xhs/juguang-accounts.js',
   'xhs/juguang-collector.js',
   'xhs/analysis.js',
@@ -20,6 +25,7 @@ importScripts(
 const TAG = '[光合分析]';
 const xhsPageClient = XhsPageClient.createPageClient({
   sendMessage: (tabId, envelope) => chrome.tabs.sendMessage(tabId, envelope),
+  recoverBridge: recoverXhsPageBridge,
 });
 const xhsLocalCollectionCache = XhsLocalCache.createIndexedDbCache({});
 const xhsRuntime = XhsRuntime.createXhsRuntime({
@@ -44,6 +50,29 @@ const xhsRuntime = XhsRuntime.createXhsRuntime({
   },
 });
 xhsRuntime.register();
+const pgyCommentInventory = XhsPgyCommentInventory.createPgyCommentInventoryCollector({
+  pageClient: xhsPageClient,
+});
+const commentCaptureCoordinator = XhsCommentCaptureCoordinator.createCommentCaptureCoordinator({
+  chrome,
+});
+commentCaptureCoordinator.register();
+const commentSummaryArchive = XhsCommentSummaryArchive.createCommentSummaryArchiveService({
+  chrome,
+  model: XhsCommentMonitor,
+});
+const commentMonitorRuntime = XhsCommentMonitorRuntime.createCommentMonitorRuntime({
+  chrome,
+  model: XhsCommentMonitor,
+  cache: xhsLocalCollectionCache,
+  collectInventory: collectCommentMonitorInventory,
+  resolveOfficialLinks: resolveCommentMonitorOfficialLinks,
+  collectNoteComments: (task) => commentCaptureCoordinator.collect(task),
+  analyzeSemantics: analyzeCommentMonitorSemantics,
+  persistSummary: (summary, context) => commentSummaryArchive.persist(summary, context),
+  isTrustedMessageSender: isCommentMonitorWebToolSender,
+});
+commentMonitorRuntime.register();
 const SYCM_CONTENT_ANALYSIS_PATH = '/xsite/contentanalysis/overview_new_v2';
 const WXT_TRACE_STORAGE_KEY = 'wxtReportApiTraceV1';
 const WXT_TRACE_MAX_RECORDS = 120;
@@ -168,6 +197,8 @@ async function recoverProjectTaskStartupStatus() {
         paused: false,
         waitingForVerification: false,
         verificationPlatforms: [],
+        waitingForLogin: false,
+        loginPlatforms: [],
         cancelling: false,
         cancelled: true,
         status: 'cancelled',
@@ -1520,6 +1551,155 @@ function isOneClickWebToolSender(message, sender) {
   }
 }
 
+function isCommentMonitorWebToolSender(message, sender) {
+  if (!isBusinessDefenseWebToolSender(message, sender)) return false;
+  try {
+    const url = new URL(String(sender && (sender.url || sender.tab && sender.tab.url) || ''));
+    return url.pathname === '/comments.html' && Number(sender && sender.frameId || 0) === 0;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function commentMonitorPgyTabId(options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const prepared = await prepareCurrentSessionProjectPlatforms(['pgy'], {
+    signal: source.signal,
+  });
+  const result = prepared && prepared.platforms && prepared.platforms.pgy;
+  const tabId = Number(result && result.tabId || prepared && prepared.taskOwnedTabIds &&
+    prepared.taskOwnedTabIds.pgy);
+  if (!result || result.ok !== true || !Number.isInteger(tabId) || tabId <= 0) {
+    const error = new Error(result && result.message || '蒲公英当前登录态未准备完成。');
+    error.code = String(result && result.code || 'PGY_SESSION_PREPARE_FAILED');
+    error.tabId = Number.isInteger(tabId) && tabId > 0 ? tabId : null;
+    throw error;
+  }
+  return tabId;
+}
+
+async function collectCommentMonitorInventory(request) {
+  const tabId = await commentMonitorPgyTabId({ signal: request && request.signal });
+  const inventory = await pgyCommentInventory.collect({
+    tabId,
+    signal: request && request.signal,
+  });
+  return Object.assign({}, inventory, { tabId });
+}
+
+async function resolveCommentMonitorOfficialLinks(inventory, candidates) {
+  const source = inventory && typeof inventory === 'object' ? inventory : {};
+  const notes = Array.isArray(candidates) ? candidates : [];
+  return pgyCommentInventory.resolveOfficialLinks({
+    tabId: source.tabId || await commentMonitorPgyTabId(),
+    brandUserId: source.brandUserId || source.accountKey,
+    noteIds: notes.map((item) => String(item && item.noteId || '')).filter(Boolean),
+    notes,
+  });
+}
+
+async function commentMonitorSemanticWorkbenchTab() {
+  const tabs = await chrome.tabs.query({
+    url: [
+      'http://127.0.0.1:3400/*',
+      'http://localhost:3400/*',
+      'https://tbdata.aizicheng.com/*',
+    ],
+  });
+  const candidates = (Array.isArray(tabs) ? tabs : []).filter((tab) => {
+    try {
+      const url = new URL(String(tab && tab.url || ''));
+      return tab && tab.id && BUSINESS_DEFENSE_WEB_TOOL_ORIGINS.has(url.origin) &&
+        !['/login', '/login/'].includes(url.pathname);
+    } catch (error) {
+      return false;
+    }
+  });
+  return candidates.find((tab) => {
+    try { return new URL(tab.url).pathname === '/comments.html'; } catch (error) { return false; }
+  }) || candidates[0] || null;
+}
+
+async function requestCommentMonitorSemanticBatch(tabId, payload) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: async (body) => {
+      try {
+        const response = await fetch('/api/comment-insights', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        let value = null;
+        try { value = await response.json(); } catch (error) {}
+        return { ok: response.ok, status: response.status, value };
+      } catch (error) {
+        return { ok: false, status: 0, message: String(error && error.message || error) };
+      }
+    },
+    args: [payload],
+  });
+  const result = results && results[0] && results[0].result;
+  if (!result || result.ok !== true || !result.value || !Array.isArray(result.value.items)) {
+    const errorValue = result && result.value && result.value.error;
+    const error = new Error(String(errorValue && errorValue.message ||
+      result && result.message || '评论语义分类服务暂时不可用。'));
+    error.code = String(errorValue && errorValue.code || 'AI_UNAVAILABLE');
+    error.retryable = errorValue ? errorValue.retryable !== false : true;
+    throw error;
+  }
+  return result.value;
+}
+
+async function analyzeCommentMonitorSemantics(comments) {
+  const values = Array.isArray(comments) ? comments : [];
+  if (!values.length) return { status: 'empty', items: [] };
+  const tab = await commentMonitorSemanticWorkbenchTab();
+  if (!tab) {
+    const error = new Error('评论语义分析等待评论监测工作台在线。');
+    error.code = 'AI_WORKBENCH_UNAVAILABLE';
+    error.retryable = true;
+    throw error;
+  }
+  const items = values.map((comment, index) => {
+    const source = comment && typeof comment === 'object' ? comment : {};
+    const rawCommentId = String(source.commentId || '').trim();
+    const rawNoteId = String(source.noteId || '').trim();
+    return {
+      itemId: /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(rawCommentId)
+        ? rawCommentId
+        : `comment-${index + 1}`,
+      noteId: /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(rawNoteId)
+        ? rawNoteId
+        : `note-${index + 1}`,
+      text: String(source.content || '').slice(0, 5000),
+      ruleCategoryIds: XhsCommentMonitor.classifyCommentRules(source).categories.slice(0, 2),
+    };
+  });
+  const output = [];
+  let provider = '';
+  let model = '';
+  for (let offset = 0; offset < items.length; offset += 100) {
+    const response = await requestCommentMonitorSemanticBatch(tab.id, {
+      schema: 'xhsCommentSemanticBatchRequestV1',
+      schemaVersion: 1,
+      requestId: `comment-monitor-${Date.now().toString(36)}-${offset}`,
+      promptVersion: 'comment-monitor-v1',
+      taxonomyVersion: 'comment-topics-v1',
+      items: items.slice(offset, offset + 100),
+    });
+    provider = provider || String(response.provider || '');
+    model = model || String(response.model || '');
+    output.push(...response.items);
+  }
+  return {
+    schema: 'xhsCommentSemanticBatchResponseV1', schemaVersion: 1,
+    status: 'completed', provider, model, items: output,
+  };
+}
+
 const TEAM_VAULT_START_AUTH_CHALLENGE_TYPE = 'TEAM_VAULT_START_AUTH_CHALLENGE';
 const TEAM_VAULT_SCOPE_ID = 'team:https://tbdata.aizicheng.com';
 const LOCAL_VAULT_SCOPE_ID = 'local:tbcontentdata';
@@ -2208,11 +2388,12 @@ async function waitTabComplete(tabId, timeoutMs, signal) {
   throw new Error('页面加载超时。');
 }
 
-async function reloadPlatformTab(tabId, timeoutMs) {
+async function reloadPlatformTab(tabId, timeoutMs, signal) {
+  if (signal) throwIfProjectTaskCancelled(signal);
   await chrome.tabs.reload(tabId);
-  await waitTabComplete(tabId, timeoutMs);
+  await waitTabComplete(tabId, timeoutMs, signal);
   // 页面 status=complete 后，单页应用仍需要一小段时间初始化路由和原生请求。
-  await waitMilliseconds(1200);
+  await (signal ? waitMillisecondsWithSignal(1200, signal) : waitMilliseconds(1200));
 }
 
 async function openOrReuseTab(url, queryPatterns, options) {
@@ -2247,6 +2428,54 @@ async function injectScripts(tabId, scripts) {
       files: script.files,
       world: script.world || 'ISOLATED',
     });
+  }
+}
+
+async function recoverXhsPageBridge(request) {
+  const source = request && typeof request === 'object' ? request : {};
+  const signal = source.signal;
+  const platform = String(source.platform || '');
+  const tabId = Number(source.tabId);
+  const config = XhsRuntime.PLATFORM_CONFIG && XhsRuntime.PLATFORM_CONFIG[platform];
+  const fail = (message, retryable) => {
+    const error = new Error(message);
+    error.code = 'XHS_PAGE_BRIDGE_RECOVERY_FAILED';
+    error.retryable = retryable !== false;
+    return error;
+  };
+  if (!config || !config.hookFile || !Number.isInteger(tabId) || tabId <= 0 ||
+      !chrome.scripting || typeof chrome.scripting.executeScript !== 'function') {
+    throw fail('小红书页面桥接自动恢复不可用。', false);
+  }
+  if (signal) throwIfProjectTaskCancelled(signal);
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const tabUrl = new URL(String(tab && tab.url || ''));
+    if (tabUrl.protocol !== 'https:' || tabUrl.origin !== config.origin) {
+      throw fail(config.name + '任务标签页已离开官方平台。', false);
+    }
+    const target = { tabId, frameIds: [0] };
+    await chrome.scripting.executeScript({
+      target,
+      world: 'MAIN',
+      files: [config.hookFile],
+      injectImmediately: true,
+    });
+    if (signal) throwIfProjectTaskCancelled(signal);
+    await chrome.scripting.executeScript({
+      target,
+      world: 'ISOLATED',
+      files: ['xhs-platform-content.js'],
+      injectImmediately: true,
+    });
+    if (signal) throwIfProjectTaskCancelled(signal);
+  } catch (error) {
+    if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
+    if (error && error.code === 'XHS_PAGE_BRIDGE_RECOVERY_FAILED') throw error;
+    throw fail(
+      (config.name || '小红书平台') + '页面连接自动恢复失败，请刷新该平台页面后重试：' +
+      String(error && error.message || error || '脚本注入失败')
+    );
   }
 }
 
@@ -3242,13 +3471,18 @@ async function runBusinessDefenseGuanghe(options) {
   });
 }
 
-async function runBusinessDefenseSycm() {
+async function runBusinessDefenseSycm(options) {
+  const source = options && typeof options === 'object' ? options : {};
+  const signal = source.signal;
+  if (signal) throwIfProjectTaskCancelled(signal);
   const tabId = await openOrReuseTab(BUSINESS_DEFENSE_SYCM_TRAFFIC_URL, ['*://sycm.taobao.com/flow/monitor/overview*']);
   await waitTabComplete(tabId, 45000, signal);
-  await reloadPlatformTab(tabId, 45000);
+  await reloadPlatformTab(tabId, 45000, signal);
+  if (signal) throwIfProjectTaskCancelled(signal);
   await injectScripts(tabId, [
     { files: ['sycm-content-script.js'], allFrames: true },
   ]);
+  if (signal) throwIfProjectTaskCancelled(signal);
   const startedAt = Date.now();
   let response = null;
   let responseError = null;
@@ -3256,18 +3490,18 @@ async function runBusinessDefenseSycm() {
     try {
       response = await sendTabMessageWithRetry(tabId, {
         type: 'SYCM_RUN_TRAFFIC_DIAGNOSIS',
-      }, 90000, { frameId: 0 });
+      }, 90000, { frameId: 0 }, signal);
       if (response && response.ok) break;
       const message = String(response && response.message || '');
       if (attempt === 0 && /30天|日期工具条|日期未完成切换|页面稳定/.test(message)) {
-        await waitMilliseconds(2500);
+        await (signal ? waitMillisecondsWithSignal(2500, signal) : waitMilliseconds(2500));
         continue;
       }
       break;
     } catch (error) {
       responseError = error;
       if (attempt === 0) {
-        await waitMilliseconds(2500);
+        await (signal ? waitMillisecondsWithSignal(2500, signal) : waitMilliseconds(2500));
         continue;
       }
     }
@@ -4207,6 +4441,7 @@ async function runXhsAnalysisTask(options) {
     platforms,
     taskConcurrency: source.taskConcurrency,
     concurrentAccountTabs: source.concurrentAccountTabs,
+    taskOwnedTabIds: source.taskOwnedTabIds,
     signal,
   });
   if (trackPendingRun) trackPendingRun(collectionRun);
@@ -4323,7 +4558,7 @@ async function runContentDiagnosisReport(options) {
       platform: 'sycm',
       name: '生意参谋流量诊断',
       run: async () => {
-        const detail = await runBusinessDefenseSycm();
+        const detail = await runBusinessDefenseSycm({ signal });
         report.sycm = detail.snapshot;
         return detail;
       },
@@ -4393,6 +4628,7 @@ async function runContentDiagnosisReport(options) {
           platforms: selectedXhsPlatforms,
           taskConcurrency: options && options.taskConcurrency,
           concurrentAccountTabs: options && options.concurrentAccountTabs,
+          taskOwnedTabIds: options && options.taskOwnedTabIds,
           signal,
           trackPendingRun,
         });
@@ -5221,13 +5457,30 @@ async function waitForXingheState(tabId, predicate, timeoutMs, signal) {
   return lastState || { kind: 'loading', message: '\u661f\u6cb3\u9875\u9762\u52a0\u8f7d\u8d85\u65f6。' };
 }
 
-async function prepareXingheTab(signal) {
+async function prepareXingheTab(signal, options) {
+  const source = options && typeof options === 'object' ? options : {};
   if (signal) throwIfProjectTaskCancelled(signal);
-  const tabId = await openOrReuseTab(
-    BUSINESS_DEFENSE_XINGHE_URL,
-    ['*://adstar.alimama.com/*'],
-    { navigate: false }
-  );
+  const requestedTabId = Number(source.taskOwnedTabId);
+  const hasTaskOwnedTab = Number.isInteger(requestedTabId) && requestedTabId > 0;
+  let tabId;
+  if (hasTaskOwnedTab) {
+    tabId = requestedTabId;
+  } else if (source.freshTaskTab === true) {
+    const created = await chrome.tabs.create({
+      url: BUSINESS_DEFENSE_XINGHE_URL,
+      active: false,
+    });
+    tabId = Number(created && created.id);
+    if (!Number.isInteger(tabId) || tabId <= 0) {
+      throw new Error('无法为星河创建任务标签页。');
+    }
+  } else {
+    tabId = await openOrReuseTab(
+      BUSINESS_DEFENSE_XINGHE_URL,
+      ['*://adstar.alimama.com/*'],
+      { navigate: false }
+    );
+  }
   const tab = await chrome.tabs.get(tabId);
   if (!tab.url || !String(tab.url).startsWith('https://adstar.alimama.com/')) {
     if (signal) throwIfProjectTaskCancelled(signal);
@@ -5305,17 +5558,25 @@ function checkXingheBlockingState(state, tabId) {
 }
 
 async function loginXingheAccount(account, options) {
-  const resume = Boolean(options && options.resume);
-  const signal = options && options.signal;
-  const assertCredentialAuthorization = options &&
-    typeof options.assertCredentialAuthorization === 'function'
-    ? options.assertCredentialAuthorization
+  const source = options && typeof options === 'object' ? options : {};
+  const resume = Boolean(source.resume);
+  const signal = source.signal;
+  const allowExistingSession = source.allowExistingSession === true;
+  const assertCredentialAuthorization =
+    typeof source.assertCredentialAuthorization === 'function'
+    ? source.assertCredentialAuthorization
     : null;
-  const tabId = await prepareXingheTab(signal);
+  const tabId = await prepareXingheTab(signal, {
+    taskOwnedTabId: source.taskOwnedTabId,
+    freshTaskTab: source.freshTaskTab === true,
+  });
   if (signal) throwIfProjectTaskCancelled(signal);
   let state = await waitForXingheState(tabId, (item) => item && item.kind !== 'loading', 45000, signal);
   state = await resolveXinghePendingState(tabId, state, 20000, signal);
   checkXingheBlockingState(state, tabId);
+  if (allowExistingSession && state && ['loggedIn', 'noPermission'].includes(state.kind)) {
+    return { tabId, state: state.kind, noPermission: state.kind === 'noPermission' };
+  }
   if (!resume && (!state || state.kind !== 'login')) {
     await logoutXinghe(tabId, signal);
     // Account switches made back-to-back are more likely to trigger platform risk controls.
@@ -5456,7 +5717,7 @@ async function readXhsLoginState(tabId, platform, signal) {
       if (!XhsAccountLogin.isAllowedPlatformDocumentUrl(platform, href) ||
           !XhsAccountLogin.sameExactOrigin(frame.url, href)) return null;
       const kind = batchText(response.state.kind, 40);
-      if (!['verification', 'loginError', 'login', 'entry', 'loggedIn', 'productReady', 'unsupported']
+      if (!['loading', 'verification', 'loginError', 'login', 'entry', 'loggedIn', 'productReady', 'unsupported']
         .includes(kind)) return null;
       return {
         kind,
@@ -5890,6 +6151,9 @@ async function loginXhsAccount(account, options) {
     : null;
   const platforms = Array.from(new Set((Array.isArray(source.platforms) ? source.platforms : [])
     .filter((platform) => platform === 'pgy' || platform === 'juguang')));
+  const taskOwnedTabIds = source.taskOwnedTabIds && typeof source.taskOwnedTabIds === 'object'
+    ? source.taskOwnedTabIds
+    : {};
   if (!platforms.length) return { state: 'skipped', platforms: {} };
   if (signal) throwIfProjectTaskCancelled(signal);
   const results = {};
@@ -5914,11 +6178,11 @@ async function loginXhsAccount(account, options) {
         ensureXhsPlatformSession(platform, account, {
           signal: sessionSignal,
           assertCredentialAuthorization: source.assertCredentialAuthorization,
-          allowExistingSession: taskSessionCoordinator.established,
+          allowExistingSession: source.allowExistingSession === true || taskSessionCoordinator.established,
           taskSessionCoordinator,
           taskOwnedTabId: resumeContext && resumeContext.platform === platform
             ? resumeContext.tabId
-            : null,
+            : taskOwnedTabIds[platform],
         })
       ), {
         signal: loginSignal,
@@ -6581,6 +6845,12 @@ async function prepareCurrentSessionProjectPlatforms(platforms, options) {
   const onVerificationResolved = typeof source.onVerificationResolved === 'function'
     ? source.onVerificationResolved
     : null;
+  const onLoginWaiting = typeof source.onLoginWaiting === 'function'
+    ? source.onLoginWaiting
+    : null;
+  const onLoginResolved = typeof source.onLoginResolved === 'function'
+    ? source.onLoginResolved
+    : null;
   const suppliedTabIds = source.taskOwnedTabIds && typeof source.taskOwnedTabIds === 'object'
     ? source.taskOwnedTabIds
     : {};
@@ -6619,12 +6889,16 @@ async function prepareCurrentSessionProjectPlatforms(platforms, options) {
   const isAllowedTaskUrl = (platform, value) => platform === 'adstar'
     ? isAllowedXingheTaskUrl(value)
     : XhsAccountLogin.isAllowedPlatformDocumentUrl(platform, value);
+  const isAllowedTaskTabNavigation = (platform, tab) => Boolean(tab && (
+    isAllowedTaskUrl(platform, tab.url) ||
+    (tab.status !== 'complete' && isAllowedTaskUrl(platform, tab.pendingUrl))
+  ));
   const assertTaskOwnedTab = async (platform, tabId) => {
     let tab = await chrome.tabs.get(tabId);
-    if (!isAllowedTaskUrl(platform, tab && tab.url)) {
+    if (!isAllowedTaskTabNavigation(platform, tab)) {
       throw new Error(projectVerificationPlatformName(platform) + '任务标签页已离开官方平台。');
     }
-    if (tab && tab.status !== 'complete') {
+    if (tab.status !== 'complete' || !isAllowedTaskUrl(platform, tab.url)) {
       await waitTabComplete(tabId, 45000, signal);
       if (signal) throwIfProjectTaskCancelled(signal);
       tab = await chrome.tabs.get(tabId);
@@ -6646,14 +6920,7 @@ async function prepareCurrentSessionProjectPlatforms(platforms, options) {
         continue;
       }
       if (platform === 'adstar') {
-        taskOwnedTabIds[platform] = await prepareXingheTab(signal);
-        continue;
-      }
-      const existing = await queryUniqueXhsLoginTarget(platform);
-      if (signal) throwIfProjectTaskCancelled(signal);
-      if (existing && existing.id) {
-        candidateTabId = Number(existing.id);
-        taskOwnedTabIds[platform] = await assertTaskOwnedTab(platform, candidateTabId);
+        taskOwnedTabIds[platform] = await prepareXingheTab(signal, { freshTaskTab: true });
         continue;
       }
       const created = await chrome.tabs.create({
@@ -6708,6 +6975,9 @@ async function prepareCurrentSessionProjectPlatforms(platforms, options) {
   const isReadyState = (platform, state) => platform === 'adstar'
     ? ['loggedIn', 'noPermission'].includes(state && state.kind)
     : ['loggedIn', 'productReady'].includes(state && state.kind);
+  const isManualLoginState = (platform, state) => platform === 'adstar'
+    ? ['login', 'rolePicker', 'loginError'].includes(state && state.kind)
+    : ['login', 'entry', 'loginError'].includes(state && state.kind);
   const isProductUrl = (platform, value) => platform === 'adstar'
     ? /^https:\/\/adstar\.alimama\.com(?:\/|$)/i.test(String(value || ''))
     : XhsAccountLogin.isPlatformOriginUrl(platform, value);
@@ -6717,7 +6987,7 @@ async function prepareCurrentSessionProjectPlatforms(platforms, options) {
     while (Date.now() < deadline) {
       if (signal) throwIfProjectTaskCancelled(signal);
       const tab = await chrome.tabs.get(tabId);
-      if (!isAllowedTaskUrl(platform, tab && tab.url)) {
+      if (!isAllowedTaskTabNavigation(platform, tab)) {
         throw new Error(projectVerificationPlatformName(platform) + '任务标签页已离开官方平台。');
       }
       if (isProductUrl(platform, tab && tab.url)) {
@@ -6743,7 +7013,7 @@ async function prepareCurrentSessionProjectPlatforms(platforms, options) {
       await (signal ? waitMillisecondsWithSignal(800, signal) : waitMilliseconds(800));
     }
     const name = projectVerificationPlatformName(platform);
-    const error = new Error(name + '验证完成后未返回对应产品页，请重新启动任务。');
+    const error = new Error(name + '登录或验证完成后未返回对应产品页，请重新启动任务。');
     if (lastReadError) error.cause = lastReadError;
     throw error;
   };
@@ -6752,6 +7022,8 @@ async function prepareCurrentSessionProjectPlatforms(platforms, options) {
     if (results[platform] && results[platform].state === 'failed') continue;
     const tabId = taskOwnedTabIds[platform];
     let verificationInProgress = false;
+    let loginInProgress = false;
+    let sessionRefreshAttempted = false;
     try {
       if (signal) throwIfProjectTaskCancelled(signal);
       let state = await readState(platform, tabId);
@@ -6783,7 +7055,42 @@ async function prepareCurrentSessionProjectPlatforms(platforms, options) {
           state = await waitForProductOriginState(platform, tabId);
           if (state && state.kind === 'verification') continue;
         }
+        if (isManualLoginState(platform, state)) {
+          if (platform !== 'adstar' && !sessionRefreshAttempted) {
+            const currentTab = await chrome.tabs.get(tabId);
+            if (!isProductUrl(platform, currentTab && currentTab.url)) {
+              sessionRefreshAttempted = true;
+              await chrome.tabs.update(tabId, {
+                url: XHS_PLATFORM_ENTRY_URLS[platform],
+                active: false,
+              });
+              await waitTabComplete(tabId, 45000, signal).catch((error) => {
+                if (signal && signal.aborted) throwIfProjectTaskCancelled(signal);
+              });
+              state = await readState(platform, tabId);
+              continue;
+            }
+          }
+          if (!loginInProgress) {
+            loginInProgress = true;
+            try { await chrome.tabs.update(tabId, { active: true }); } catch (activateError) {}
+            if (onLoginWaiting) {
+              await onLoginWaiting({
+                platform,
+                waitingPlatforms: [platform],
+                message: projectVerificationPlatformName(platform) +
+                  '当前未登录，请在新打开的页面完成登录，任务会自动继续。',
+              });
+            }
+          }
+          await (signal ? waitMillisecondsWithSignal(800, signal) : waitMilliseconds(800));
+          state = await readState(platform, tabId);
+          continue;
+        }
         assertReadyState(platform, state);
+        if (loginInProgress && onLoginResolved) {
+          await onLoginResolved({ platform, waitingPlatforms: [] });
+        }
         break;
       }
       results[platform] = { ok: true, state: state.kind, tabId };
@@ -6798,6 +7105,9 @@ async function prepareCurrentSessionProjectPlatforms(platforms, options) {
 async function prepareProjectPlatformSessions(plan, options) {
   const source = options && typeof options === 'object' ? options : {};
   const signal = source.signal;
+  const taskOwnedTabIds = source.taskOwnedTabIds && typeof source.taskOwnedTabIds === 'object'
+    ? source.taskOwnedTabIds
+    : {};
   const onVerificationWaiting = typeof source.onVerificationWaiting === 'function'
     ? source.onVerificationWaiting
     : null;
@@ -6938,6 +7248,10 @@ async function prepareProjectPlatformSessions(plan, options) {
                 loginXingheAccount(plan.accounts.taobao, {
                   resume: Boolean(resumeContext),
                   signal: sessionSignal,
+                  taskOwnedTabId: resumeContext && resumeContext.platform === 'adstar'
+                    ? resumeContext.tabId
+                    : taskOwnedTabIds.adstar,
+                  allowExistingSession: true,
                   assertCredentialAuthorization: assertProjectCredentialAuthorization,
                 })
               ), {
@@ -6986,6 +7300,11 @@ async function prepareProjectPlatformSessions(plan, options) {
                 resume: Boolean(resumeContext),
                 resumeContext,
                 signal: branchSignal,
+                taskOwnedTabIds: Object.fromEntries(selected.map((platform) => [
+                  platform,
+                  taskOwnedTabIds[platform],
+                ])),
+                allowExistingSession: true,
                 assertCredentialAuthorization: assertProjectCredentialAuthorization,
                 sessionPreparationTimeoutMs: source.sessionPreparationTimeoutMs,
               })
@@ -7094,6 +7413,8 @@ async function runProjectTask(payload, executionOptions) {
     paused: false,
     waitingForVerification: false,
     verificationPlatforms: [],
+    waitingForLogin: false,
+    loginPlatforms: [],
     cancelling: false,
     cancelled: false,
     startedAt,
@@ -7108,6 +7429,35 @@ async function runProjectTask(payload, executionOptions) {
   let credentialPlan = execution.credentialPlan || null;
   execution.credentialPlan = null;
   let loginResult = { state: credentialMode === 'vault' ? 'pending' : 'currentSession', noPermission: false };
+  const taskOwnedTabIds = {};
+  const createdTaskTabIds = new Set();
+  const rememberPreparedTab = (platform, result, fallbackTabId) => {
+    const state = String(result && result.state || '');
+    if (result && (result.ok === false || state === 'failed')) return;
+    const tabId = Number(result && result.tabId || fallbackTabId);
+    if (!Number.isInteger(tabId) || tabId <= 0) return;
+    const pinnedTabId = Number(taskOwnedTabIds[platform]);
+    if (Number.isInteger(pinnedTabId) && pinnedTabId > 0 && pinnedTabId !== tabId) {
+      throw new Error(projectVerificationPlatformName(platform) + '登录准备切换了任务标签页，已停止取数。');
+    }
+    taskOwnedTabIds[platform] = tabId;
+  };
+  const createFreshProjectTabs = async () => {
+    const selected = platforms.filter((platform) => ['adstar', 'pgy', 'juguang'].includes(platform));
+    for (const platform of selected) {
+      const url = platform === 'adstar'
+        ? BUSINESS_DEFENSE_XINGHE_URL
+        : XHS_PLATFORM_ENTRY_URLS[platform];
+      const created = await chrome.tabs.create({ url, active: false });
+      const tabId = Number(created && created.id);
+      if (!Number.isInteger(tabId) || tabId <= 0) {
+        throw new Error('无法为' + projectVerificationPlatformName(platform) + '创建任务标签页。');
+      }
+      createdTaskTabIds.add(tabId);
+      taskOwnedTabIds[platform] = tabId;
+      throwIfProjectTaskCancelled(signal);
+    }
+  };
   try {
     throwIfProjectTaskCancelled(signal);
 
@@ -7126,6 +7476,8 @@ async function runProjectTask(payload, executionOptions) {
     throwIfProjectTaskCancelled(signal);
     await clearAccountRunSnapshots();
     throwIfProjectTaskCancelled(signal);
+    await createFreshProjectTabs();
+    throwIfProjectTaskCancelled(signal);
 
     if (credentialMode === 'vault') {
       await saveProjectTaskStatus(
@@ -7135,6 +7487,7 @@ async function runProjectTask(payload, executionOptions) {
       throwIfProjectTaskCancelled(signal);
       const prepared = await prepareProjectPlatformSessions(credentialPlan, {
         signal,
+        taskOwnedTabIds,
         assertFreshVaultAuthorization: execution.assertFreshVaultAuthorization,
         onVerificationWaiting: async (details) => {
           const waiting = Array.isArray(details && details.waitingPlatforms)
@@ -7170,6 +7523,11 @@ async function runProjectTask(payload, executionOptions) {
           }), taskId);
         },
       });
+      rememberPreparedTab('adstar', prepared.taobao);
+      const preparedXhs = prepared.xiaohongshu && prepared.xiaohongshu.platforms || {};
+      for (const platform of ['pgy', 'juguang']) {
+        rememberPreparedTab(platform, preparedXhs[platform]);
+      }
       loginResult = {
         state: 'vault',
         noPermission: Boolean(prepared.taobao && prepared.taobao.noPermission),
@@ -7182,8 +7540,9 @@ async function runProjectTask(payload, executionOptions) {
         taskId,
       );
       throwIfProjectTaskCancelled(signal);
-      await prepareCurrentSessionProjectPlatforms(platforms, {
+      const prepared = await prepareCurrentSessionProjectPlatforms(platforms, {
         signal,
+        taskOwnedTabIds,
         onVerificationWaiting: async (details) => {
           const waiting = Array.isArray(details && details.waitingPlatforms)
             ? details.waitingPlatforms
@@ -7217,7 +7576,33 @@ async function runProjectTask(payload, executionOptions) {
               : '',
           }), taskId);
         },
+        onLoginWaiting: async (details) => {
+          const waiting = Array.isArray(details && details.waitingPlatforms)
+            ? details.waitingPlatforms
+            : [];
+          const names = waiting.map(projectVerificationPlatformName);
+          await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+            paused: true,
+            waitingForLogin: true,
+            loginPlatforms: waiting,
+            phase: '等待' + (names.length ? names.join('、') : '平台') + '登录',
+            status: 'waiting_login',
+            pauseReason: details && details.message ||
+              '请在新打开的平台页面完成登录，任务会自动继续。',
+          }), taskId);
+        },
+        onLoginResolved: async () => {
+          await saveProjectTaskStatus(Object.assign({}, baseStatus, {
+            phase: '登录已完成，继续检查当前会话',
+            status: 'running',
+          }), taskId);
+        },
       });
+      const preparedPlatforms = prepared && prepared.platforms || {};
+      const preparedTabIds = prepared && prepared.taskOwnedTabIds || {};
+      for (const platform of ['adstar', 'pgy', 'juguang']) {
+        rememberPreparedTab(platform, preparedPlatforms[platform], preparedTabIds[platform]);
+      }
       throwIfProjectTaskCancelled(signal);
     }
 
@@ -7259,6 +7644,7 @@ async function runProjectTask(payload, executionOptions) {
         targetRoi: source.targetRoi,
         taskConcurrency: source.taskConcurrency,
         concurrentAccountTabs: source.concurrentAccountTabs,
+        taskOwnedTabIds,
         signal,
         onVerificationRequired: onReportVerificationRequired,
       }).promise;
@@ -7375,6 +7761,15 @@ async function runProjectTask(payload, executionOptions) {
       status: 'cancelled',
       message: '任务已取消，本次结果未归档。',
     };
+  } finally {
+    if (execution.drainPromise && typeof execution.drainPromise.then === 'function') {
+      try { await execution.drainPromise; } catch (drainError) {}
+    }
+    if (chrome.tabs && typeof chrome.tabs.remove === 'function') {
+      await Promise.allSettled(Array.from(createdTaskTabIds, (tabId) => (
+        chrome.tabs.remove(tabId)
+      )));
+    }
   }
 }
 
@@ -7506,6 +7901,8 @@ function ensureProjectTask(payload, launchOptions) {
       paused: false,
       waitingForVerification: false,
       verificationPlatforms: [],
+      waitingForLogin: false,
+      loginPlatforms: [],
       cancelling: false,
       cancelled,
       finishedAt: Date.now(),

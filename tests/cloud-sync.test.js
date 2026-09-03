@@ -35,19 +35,47 @@ function makeVault(updatedAt, data) {
   };
 }
 
-function makeDirectory(updatedAt, storeName) {
+function makeDirectory(updatedAt, storeName, classification) {
   return {
     schema: 1,
     storeGroups: [{ id: 'group-1', name: '默认组' }],
-    stores: [{
+    stores: [Object.assign({
       id: 'store-1',
       name: storeName,
       groupId: 'group-1',
       createdAt: '2026-08-01T00:00:00.000Z',
       updatedAt: '2026-08-01T00:00:00.000Z',
-    }],
+    }, classification ? { classification } : {})],
     updatedAt,
   };
+}
+
+function makeClassification(overrides) {
+  return Object.assign({
+    schema: 1,
+    profileId: 'home-furnishing-v1',
+    customIndustry: '家具',
+    ownBrandTerms: ['顾家'],
+    ownProductTerms: ['护腰床垫'],
+    competitorTerms: ['慕思'],
+    manualOverrides: [{
+      id: 'override-1',
+      scopeKey: 'store-1',
+      keyword: '顾家床垫值得买吗',
+      active: true,
+      reason: '运营人工确认',
+      patch: {
+        entityRelation: 'own_brand',
+        topicTagIds: ['core_category'],
+        intentIds: ['purchase_decision'],
+        primaryIntentId: 'purchase_decision',
+        relevance: 'strong',
+      },
+      updatedAt: 1788048000000,
+    }],
+    revision: 3,
+    updatedAt: 1788048000000,
+  }, overrides || {});
 }
 
 function makeRun(runId, updatedAt, storeName) {
@@ -212,7 +240,10 @@ async function testInitialOwnerSync() {
     masterPassword: 'must-never-upload',
   });
   const localDirectory = makeDirectory(now - 20000, '本地店铺');
-  const remoteDirectory = makeDirectory(now - 5000, '云端店铺');
+  const remoteDirectory = makeDirectory(now - 5000, '云端店铺', makeClassification({
+    token: 'must-drop',
+    unknown: 'must-drop',
+  }));
   const localRun = makeRun('store-run-local-1', now - 4000, '本地店铺');
   const remoteRun = makeRun('store-run-remote-1', now - 3000, '云端店铺');
   const storage = {
@@ -308,12 +339,98 @@ async function testInitialOwnerSync() {
   assert.equal(setVaults.length, 0);
   assert.equal(setDirectories.length, 1);
   assert.equal(setDirectories[0].stores[0].name, '云端店铺');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(setDirectories[0].stores[0].classification)),
+    makeClassification(),
+    '下载云端目录时不得丢失分类配置，也不得透传未知或秘密字段',
+  );
   const runUpload = uploads.find((item) => item.type === 'run').body;
   assert.equal(runUpload.run.runId, localRun.runId);
   assert.equal(runUpload.expectedAbsent, true);
   assert.equal(imports.length, 1);
   assert.equal(imports[0].runId, remoteRun.runId);
   assert.ok(fetchCalls.every((item) => item.path.startsWith('/api/')));
+  environment.windowObject.TaobaoCloudSync.stop();
+}
+
+async function testDirectoryClassificationUpload() {
+  const now = Date.now();
+  const localDirectory = makeDirectory(now - 1000, '本地家具店', makeClassification({
+    manualOverrides: [{
+      id: 'override-legacy',
+      scopeKey: 'store-1',
+      keyword: '家具怎么选',
+      active: false,
+      reason: '人工复核',
+      commercialCategory: 'generic_category',
+      primaryIntent: 'purchase_decision',
+      secondaryIntents: ['purchase_decision', 'problem_solving'],
+      relevance: 'strong',
+      password: 'must-drop',
+    }],
+    secret: 'must-drop',
+  }));
+  let directoryUpload = null;
+  const environment = createEnvironment({
+    origin: 'https://tool.example.com',
+    bridge: async (message) => {
+      if (message.action === 'ping') return { connected: true, capabilities: ['cloudSync'] };
+      if (message.action === 'getStorage') {
+        return message.payload.keys.includes('taobaoProjectDirectoryV1')
+          ? { taobaoProjectDirectoryV1: localDirectory }
+          : {};
+      }
+      if (message.action === 'listStoreRuns') return { runs: [] };
+      throw new Error('unexpected bridge action: ' + message.action);
+    },
+    fetch: async (input, init) => {
+      const url = new URL(input);
+      const method = (init && init.method) || 'GET';
+      if (url.pathname === '/api/session') return jsonResponse({ role: 'owner' });
+      if (url.pathname === '/api/vault') return jsonResponse({ vault: null, revision: 0 });
+      if (url.pathname === '/api/directory' && method === 'GET') {
+        return jsonResponse({ directory: null, revision: 0 });
+      }
+      if (url.pathname === '/api/directory' && method === 'PUT') {
+        directoryUpload = JSON.parse(init.body);
+        return jsonResponse({ revision: 1 });
+      }
+      if (url.pathname === '/api/runs') return jsonResponse({ runs: [] });
+      return jsonResponse({ error: { message: 'not found' } }, 404);
+    },
+  });
+
+  const result = await environment.windowObject.TaobaoCloudSync.ready;
+  assert.equal(result.ok, true);
+  assert.ok(directoryUpload, '本地目录应上传到云端');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(directoryUpload.directory.stores[0].classification)),
+    {
+      schema: 1,
+      profileId: 'home-furnishing-v1',
+      customIndustry: '家具',
+      ownBrandTerms: ['顾家'],
+      ownProductTerms: ['护腰床垫'],
+      competitorTerms: ['慕思'],
+      manualOverrides: [{
+        id: 'override-legacy',
+        scopeKey: 'store-1',
+        keyword: '家具怎么选',
+        active: false,
+        reason: '人工复核',
+        patch: {
+          entityRelation: 'generic_category',
+          intentIds: ['purchase_decision'],
+          primaryIntentId: 'purchase_decision',
+          relevance: 'strong',
+        },
+        updatedAt: 0,
+      }],
+      revision: 3,
+      updatedAt: 1788048000000,
+    },
+    '上传目录时应把旧人工修正规范化为 patch，并删除秘密字段',
+  );
   environment.windowObject.TaobaoCloudSync.stop();
 }
 
@@ -732,6 +849,7 @@ async function run() {
   await testEmbeddedNoop();
   await testLocalhostServerSyncEnabled();
   await testInitialOwnerSync();
+  await testDirectoryClassificationUpload();
   await testVaultRevisionConflictDoesNotOverwrite();
   await testServerRunDeletionRemovesRemoteBeforeLocal();
   await testRemoteTombstoneClearsStaleLocalWithoutUpload();

@@ -171,6 +171,373 @@ async function run() {
     }
   );
 
+  send('setProjectDirectory', {
+    directory: {
+      schema: 1,
+      storeGroups: [{ id: 'group-1', name: '默认组', unknown: 'drop' }],
+      stores: [{
+        id: 'store-1',
+        name: '家具店',
+        groupId: 'group-1',
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-24T00:00:00.000Z',
+        classification: {
+          schema: 1,
+          profileId: 'home-furnishing-v1',
+          customIndustry: '家'.repeat(150),
+          ownBrandTerms: Array.from({ length: 205 }, (_, index) => ` 品牌 ${index} `),
+          ownProductTerms: ['护腰床垫', '护腰床垫'],
+          competitorTerms: ['慕思'],
+          manualOverrides: [{
+            id: 'override-1',
+            scopeKey: 'store-1',
+            keyword: '顾家床垫值得买吗',
+            active: false,
+            reason: '运营人工确认',
+            commercialCategory: 'own_brand',
+            topicTagIds: ['core_category', 'safety_adverse_effect'],
+            secondaryIntents: ['problem_solving', 'purchase_decision'],
+            relevance: 'strong',
+            password: 'must-drop',
+          }, {
+            id: 'override-clear-topic',
+            keyword: '清空旧主题',
+            patch: {
+              topicTagIds: [],
+              relevance: 'review',
+            },
+          }],
+          revision: 3,
+          updatedAt: 1788048000000,
+          token: 'must-drop',
+          unknown: 'must-drop',
+        },
+        cookies: 'must-drop',
+      }],
+      updatedAt: 1788048000000,
+      password: 'must-drop',
+    },
+  }, 'set-classification-directory');
+  await settle();
+  const classificationDirectory = storageState.taobaoProjectDirectoryV1;
+  assert.ok(classificationDirectory, '桥接层应保存项目目录');
+  assert.equal(classificationDirectory.stores[0].classification.customIndustry.length, 120);
+  assert.equal(classificationDirectory.stores[0].classification.ownBrandTerms.length, 200);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(classificationDirectory.stores[0].classification)),
+    {
+      schema: 1,
+      profileId: 'home-furnishing-v1',
+      customIndustry: '家'.repeat(120),
+      ownBrandTerms: Array.from({ length: 200 }, (_, index) => `品牌 ${index}`),
+      ownProductTerms: ['护腰床垫'],
+      competitorTerms: ['慕思'],
+      manualOverrides: [{
+        id: 'override-1',
+        scopeKey: 'store-1',
+        keyword: '顾家床垫值得买吗',
+        active: false,
+        reason: '运营人工确认',
+        patch: {
+          entityRelation: 'own_brand',
+          topicTagIds: ['safety_adverse_effect'],
+          intentIds: ['purchase_decision'],
+          primaryIntentId: 'purchase_decision',
+          relevance: 'strong',
+        },
+        updatedAt: 0,
+      }, {
+        id: 'override-clear-topic',
+        scopeKey: '',
+        keyword: '清空旧主题',
+        active: true,
+        reason: '',
+        patch: {
+          topicTagIds: [],
+          relevance: 'review',
+        },
+        updatedAt: 0,
+      }],
+      revision: 3,
+      updatedAt: 1788048000000,
+    },
+  );
+
+  const classificationCurrentSnapshot = {
+    schema: 'xhsAnalysisSnapshotV1',
+    schemaVersion: 1,
+    runId: 'analysis-classification-1',
+    storeId: 'store-1',
+    oldTopLevel: { keep: true },
+    pgy: {
+      coverage: 'complete',
+      facts: [{ keyword: '护腰床垫', notes: 9 }],
+      oldPgyField: { keep: true },
+    },
+  };
+  const classificationHistoryRunId = 'store-run-classification-history-1';
+  const classificationWrongAnalysisRunId = 'store-run-classification-wrong-analysis';
+  const classificationOtherStoreRunId = 'store-run-classification-other-store';
+  const classificationHistoryRun = {
+    schema: 2,
+    runId: classificationHistoryRunId,
+    account: { storeId: 'store-1', storeName: '家具店' },
+    snapshots: {
+      xhsAnalysisSnapshotV1: JSON.parse(JSON.stringify(classificationCurrentSnapshot)),
+      otherSnapshot: { keep: true },
+    },
+    oldRunField: { keep: true },
+    updatedAt: 100,
+  };
+  const classificationWrongAnalysisRun = {
+    schema: 2,
+    runId: classificationWrongAnalysisRunId,
+    account: { storeId: 'store-1', storeName: '家具店' },
+    snapshots: {
+      xhsAnalysisSnapshotV1: Object.assign({}, classificationCurrentSnapshot, {
+        runId: 'analysis-classification-other',
+      }),
+    },
+    updatedAt: 200,
+  };
+  const classificationOtherStoreRun = {
+    schema: 2,
+    runId: classificationOtherStoreRunId,
+    account: { storeId: 'store-2', storeName: '其他店' },
+    snapshots: {
+      xhsAnalysisSnapshotV1: Object.assign({}, classificationCurrentSnapshot, {
+        storeId: 'store-2',
+      }),
+    },
+    updatedAt: 300,
+  };
+  const classificationRunIndex = [
+    { runId: classificationHistoryRunId, storeId: 'store-1', updatedAt: 100, keep: true },
+    { runId: classificationWrongAnalysisRunId, storeId: 'store-1', updatedAt: 200, keep: true },
+    { runId: classificationOtherStoreRunId, storeId: 'store-2', updatedAt: 300, keep: true },
+  ];
+  Object.assign(storageState, {
+    xhsAnalysisSnapshotV1: classificationCurrentSnapshot,
+    taobaoStoreRunIndexV1: classificationRunIndex,
+    [`taobaoStoreRunV1:${classificationHistoryRunId}`]: classificationHistoryRun,
+    [`taobaoStoreRunV1:${classificationWrongAnalysisRunId}`]: classificationWrongAnalysisRun,
+    [`taobaoStoreRunV1:${classificationOtherStoreRunId}`]: classificationOtherStoreRun,
+  });
+  const maliciousClassificationArchive = {
+    schema: 'xhsSearchClassificationArchiveV1',
+    schemaVersion: 1,
+    status: 'partial',
+    configRevision: 'furniture-r3',
+    profileId: 'home-furnishing-v1',
+    generatedAt: '2026-08-30T01:02:03.000Z',
+    engine: {
+      rulesetVersion: 'hybrid-rules-v1',
+      taxonomyVersion: 'search-taxonomy-v2',
+      provider: 'qwen',
+      model: 'qwen3.7-plus-2026-05-26',
+      promptVersion: 'hybrid-v1',
+      apiKey: 'TOP-SECRET-ARCHIVE',
+      rawPrompt: 'TOP-SECRET-PROMPT',
+    },
+    entries: [{
+      cacheKey: 'xhs-search-classification-v2:0123456789abcdef',
+      normalizedKeyword: '护腰床垫有副作用吗',
+      scopeKey: 'store-1',
+      automatic: {
+        schema: 'xhsSearchClassificationV2',
+        schemaVersion: 2,
+        entity: {
+          relation: 'generic_category',
+          label: '伪造实体标签',
+          matchedTerm: '护腰床垫',
+          source: 'fact',
+          lockedByFact: true,
+          token: 'TOP-SECRET-ENTITY',
+        },
+        topicTags: [
+          { id: 'core_category', label: '伪造主题', evidence: ['床垫'], source: 'rule' },
+          { id: 'safety_adverse_effect', evidence: ['副作用'], source: 'qwen' },
+        ],
+        intents: [
+          { id: 'problem_solving', isPrimary: true, evidence: ['副作用'], source: 'qwen' },
+          { id: 'purchase_decision', isPrimary: false, evidence: ['值得买'], source: 'rule' },
+        ],
+        relevance: { id: 'strong', label: '伪造相关度', source: 'hybrid' },
+        source: 'hybrid',
+        confidenceScore: 0.83,
+        needsReview: false,
+        reasonCodes: ['RULE_MATCH', 'INVALID CODE', 'QWEN:CLASSIFIED'],
+        rawModelResponse: 'TOP-SECRET-MODEL-OUTPUT',
+      },
+      effective: {
+        schema: 'xhsSearchClassificationV2',
+        schemaVersion: 2,
+        entity: {
+          relation: 'own_brand',
+          matchedTerm: '顾家',
+          source: 'override',
+          lockedByFact: false,
+        },
+        topicTags: [
+          { id: 'usage_scenario', evidence: ['卧室'], source: 'override' },
+          { id: 'need_pain_point', evidence: ['护腰'], source: 'fact' },
+        ],
+        intents: [
+          { id: 'usage', isPrimary: true, evidence: ['怎么用'], source: 'override' },
+          { id: 'comparison', isPrimary: false, evidence: ['对比'], source: 'qwen' },
+        ],
+        relevance: { id: 'strong', source: 'override' },
+        source: 'override',
+        confidenceScore: 1,
+        needsReview: false,
+        reasonCodes: ['MANUAL_OVERRIDE'],
+        messages: [{ role: 'system', content: 'TOP-SECRET-SYSTEM-PROMPT' }],
+      },
+      appliedOverrideId: 'manual-1',
+      authorization: 'Bearer TOP-SECRET-TOKEN',
+    }, {
+      cacheKey: 'cache-invalid-score',
+      normalizedKeyword: '应被丢弃',
+      scopeKey: 'store-1',
+      automatic: {
+        schema: 'xhsSearchClassificationV2', schemaVersion: 2,
+        confidenceScore: 99,
+      },
+      effective: {
+        schema: 'xhsSearchClassificationV2', schemaVersion: 2,
+        confidenceScore: 99,
+      },
+    }],
+    apiKey: 'TOP-SECRET-TOP-LEVEL',
+    rawModelResponse: 'TOP-SECRET-RAW-RESPONSE',
+  };
+  const classificationHistoryBefore = JSON.parse(JSON.stringify(classificationHistoryRun));
+  const wrongAnalysisBefore = JSON.parse(JSON.stringify(classificationWrongAnalysisRun));
+  const otherStoreBefore = JSON.parse(JSON.stringify(classificationOtherStoreRun));
+  send('patchXhsSearchClassification', {
+    storeId: 'store-1',
+    analysisRunId: 'analysis-classification-1',
+    archive: maliciousClassificationArchive,
+  }, 'patch-search-classification-scan');
+  await settle();
+  const classificationPatchResponse = posted.find((message) => (
+    message.requestId === 'patch-search-classification-scan'
+  ));
+  assert.equal(classificationPatchResponse && classificationPatchResponse.ok, true);
+  assert.equal(classificationPatchResponse.data.currentUpdated, true);
+  assert.deepEqual(
+    Array.from(classificationPatchResponse.data.historyRunIds),
+    [classificationHistoryRunId],
+  );
+  const savedClassification = storageState.xhsAnalysisSnapshotV1.pgy.searchClassification;
+  assert.equal(savedClassification.schema, 'xhsSearchClassificationArchiveV1');
+  assert.equal(savedClassification.entries.length, 1, '非法分类项应逐项丢弃');
+  assert.deepEqual(
+    Array.from(savedClassification.entries[0].automatic.topicTags, (item) => item.id),
+    ['safety_adverse_effect'],
+  );
+  assert.deepEqual(
+    Array.from(savedClassification.entries[0].automatic.intents, (item) => item.id),
+    ['purchase_decision'],
+  );
+  assert.equal(savedClassification.entries[0].automatic.intents[0].isPrimary, true);
+  assert.deepEqual(
+    Array.from(savedClassification.entries[0].effective.topicTags, (item) => item.id),
+    ['need_pain_point'],
+  );
+  assert.deepEqual(
+    Array.from(savedClassification.entries[0].effective.intents, (item) => item.id),
+    ['comparison'],
+  );
+  assert.equal(savedClassification.entries[0].effective.intents[0].isPrimary, true);
+  assert.equal(savedClassification.entries[0].effective.entity.label, '自有品牌');
+  assert.equal(savedClassification.entries[0].automatic.relevance.label, '强相关');
+  assert.deepEqual(Array.from(savedClassification.entries[0].automatic.reasonCodes), [
+    'RULE_MATCH', 'QWEN:CLASSIFIED',
+  ]);
+  assert.equal(storageState.xhsAnalysisSnapshotV1.oldTopLevel.keep, true);
+  assert.equal(storageState.xhsAnalysisSnapshotV1.pgy.oldPgyField.keep, true);
+  const savedHistoryRun = storageState[`taobaoStoreRunV1:${classificationHistoryRunId}`];
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(savedHistoryRun.snapshots.xhsAnalysisSnapshotV1.pgy.searchClassification)),
+    JSON.parse(JSON.stringify(savedClassification)),
+  );
+  assert.equal(savedHistoryRun.oldRunField.keep, true);
+  assert.equal(savedHistoryRun.snapshots.otherSnapshot.keep, true);
+  assert.ok(savedHistoryRun.updatedAt > classificationHistoryBefore.updatedAt);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(storageState[`taobaoStoreRunV1:${classificationWrongAnalysisRunId}`])),
+    wrongAnalysisBefore,
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(storageState[`taobaoStoreRunV1:${classificationOtherStoreRunId}`])),
+    otherStoreBefore,
+  );
+  const savedClassificationIndex = storageState.taobaoStoreRunIndexV1;
+  assert.equal(savedClassificationIndex[0].keep, true);
+  assert.ok(savedClassificationIndex[0].updatedAt > classificationRunIndex[0].updatedAt);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(savedClassificationIndex.slice(1))),
+    JSON.parse(JSON.stringify(classificationRunIndex.slice(1))),
+  );
+  const savedClassificationText = JSON.stringify(savedClassification);
+  assert.equal(savedClassificationText.includes('TOP-SECRET'), false);
+  assert.equal(savedClassificationText.includes('rawModelResponse'), false);
+  assert.equal(savedClassificationText.includes('messages'), false);
+  assert.equal(savedClassificationText.includes('apiKey'), false);
+
+  const savedGeneratedAt = savedClassification.generatedAt;
+  send('patchXhsSearchClassification', {
+    runId: classificationWrongAnalysisRunId,
+    storeId: 'store-1',
+    analysisRunId: 'analysis-classification-1',
+    archive: Object.assign({}, maliciousClassificationArchive, {
+      generatedAt: '2026-08-30T02:03:04.000Z',
+    }),
+  }, 'patch-search-classification-exact-mismatch');
+  await settle();
+  const exactMismatchResponse = posted.find((message) => (
+    message.requestId === 'patch-search-classification-exact-mismatch'
+  ));
+  assert.equal(exactMismatchResponse && exactMismatchResponse.ok, false);
+  assert.match(exactMismatchResponse.message, /不匹配|未找到/);
+  assert.equal(
+    storageState.xhsAnalysisSnapshotV1.pgy.searchClassification.generatedAt,
+    savedGeneratedAt,
+    '精确 run 不匹配时不应部分写入当前快照',
+  );
+
+  storageState.xhsAnalysisSnapshotV1 = Object.assign({}, classificationCurrentSnapshot, {
+    storeId: 'store-current-other',
+  });
+  send('patchXhsSearchClassification', {
+    runId: classificationHistoryRunId,
+    storeId: 'store-1',
+    analysisRunId: 'analysis-classification-1',
+    archive: Object.assign({}, maliciousClassificationArchive, {
+      generatedAt: '2026-08-30T03:04:05.000Z',
+    }),
+  }, 'patch-search-classification-exact-match');
+  await settle();
+  const exactMatchResponse = posted.find((message) => (
+    message.requestId === 'patch-search-classification-exact-match'
+  ));
+  assert.equal(exactMatchResponse && exactMatchResponse.ok, true);
+  assert.equal(exactMatchResponse.data.currentUpdated, false);
+  assert.deepEqual(Array.from(exactMatchResponse.data.historyRunIds), [classificationHistoryRunId]);
+  assert.equal(storageState.xhsAnalysisSnapshotV1.pgy.searchClassification, undefined);
+  assert.equal(
+    storageState[`taobaoStoreRunV1:${classificationHistoryRunId}`]
+      .snapshots.xhsAnalysisSnapshotV1.pgy.searchClassification.generatedAt,
+    '2026-08-30T03:04:05.000Z',
+  );
+
+  delete storageState.xhsAnalysisSnapshotV1;
+  delete storageState.taobaoStoreRunIndexV1;
+  delete storageState[`taobaoStoreRunV1:${classificationHistoryRunId}`];
+  delete storageState[`taobaoStoreRunV1:${classificationWrongAnalysisRunId}`];
+  delete storageState[`taobaoStoreRunV1:${classificationOtherStoreRunId}`];
+
   send('patchStoreRunManualInput', {
     runId: 'store-run-history-1',
     key: 'xhs_contentAudienceAsset',

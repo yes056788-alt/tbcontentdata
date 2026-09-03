@@ -22,10 +22,13 @@ const publicWebFiles = [
   "accounts.js",
   "app.css",
   "batch-report-export.js",
+  "comments.css",
+  "comments.js",
   "portal.css",
   "project.js",
   "report.css",
   "report.js",
+  "search-classification-client.js",
   "task.js",
 ];
 
@@ -33,6 +36,7 @@ const protectedHtmlSources = [
   ["workspace.html", "index.html"],
   ["accounts.html", "accounts.html"],
   ["report.html", "report.html"],
+  ["comments.html", "comments.html"],
   ["data.html", "data.html"],
   ["report-view.html", "report-view.html"],
 ];
@@ -63,6 +67,7 @@ await Promise.all([
   copyFile(resolve(extensionRoot, "diagnosis-spec.js"), resolve(publicRoot, "diagnosis-spec.js")),
   copyFile(resolve(extensionRoot, "xhs/contract.js"), resolve(publicRoot, "xhs-contract.js")),
   copyFile(resolve(extensionRoot, "xhs/metrics.js"), resolve(publicRoot, "xhs-metrics.js")),
+  copyFile(resolve(extensionRoot, "xhs/search-classification.js"), resolve(publicRoot, "xhs-search-classification.js")),
   copyFile(resolve(extensionRoot, "xhs/report-model.js"), resolve(publicRoot, "xhs-report-model.js")),
   copyFile(resolve(extensionRoot, "vendor/xlsx.full.min.js"), resolve(publicRoot, "xlsx.full.min.js")),
   copyFile(resolve(webToolRoot, "cloud-sync.js"), resolve(publicRoot, "cloud-sync.js")),
@@ -75,6 +80,8 @@ const versionedWebAssets = new Map(await Promise.all([
   "diagnosis-spec.js",
   "xhs-contract.js",
   "xhs-metrics.js",
+  "xhs-search-classification.js",
+  "search-classification-client.js",
   "xhs-report-model.js",
   "xlsx.full.min.js",
 ].map(async (name) => [name, await versionedPublicAssetUrl(name)])));
@@ -106,7 +113,7 @@ function prepareHtml(input, filename) {
 }
 
 function addCloudTeamNavigation(input, filename) {
-  const headerPattern = /<header class="(portal-topbar|management-topbar)">[\s\S]*?<\/header>/;
+  const headerPattern = /<header class="(portal-topbar|management-topbar|comment-topbar)">[\s\S]*?<\/header>/;
   const match = input.match(headerPattern);
   if (!match) return input;
   const withStylesheet = input.replace(
@@ -114,12 +121,14 @@ function addCloudTeamNavigation(input, filename) {
     `  <link rel="stylesheet" href="${cloudNavigationStylesheet}">\n</head>`,
   );
   const activePage = filename === "report.html" ? "report"
+      : filename === "comments.html" ? "comments"
       : filename === "accounts.html" ? "accounts"
         : "projects";
   const navigation = [
     ["home", "/", "首页"],
     ["projects", "/workspace.html", "项目管理"],
     ["report", "/report.html", "一键取数"],
+    ["comments", "/comments.html", "评论监测"],
     ["accounts", "/accounts.html", "账号库管理"],
     ["team", "/admin", "团队管理"],
   ].map(([id, href, label]) => {
@@ -167,6 +176,8 @@ async function buildExtensionPackage() {
     "adstar-page-hook.js",
     "pgy-page-hook.js",
     "juguang-page-hook.js",
+    "lingxi-page-hook.js",
+    "lingxi-content-script.js",
     "xhs-platform-content.js",
     "xhs/contract.js",
     "xhs/quality.js",
@@ -176,12 +187,20 @@ async function buildExtensionPackage() {
     "xhs/local-cache.js",
     "xhs/page-client.js",
     "xhs/adstar-collector.js",
+    "xhs/pgy-export-links.js",
     "xhs/pgy-collector.js",
+    "xhs/pgy-comment-inventory.js",
+    "xhs/comment-monitor.js",
+    "xhs/comment-summary-archive.js",
+    "xhs/comment-monitor-runtime.js",
+    "xhs/comment-capture-coordinator.js",
     "xhs/juguang-accounts.js",
     "xhs/juguang-collector.js",
     "xhs/runtime.js",
     "xhs/analysis.js",
     "xhs/metrics.js",
+    "xhs-comment-page-hook.js",
+    "xhs-comment-content.js",
     "xiaohongshu-login-content.js",
     "xinghe-content-script.js",
     "diagnosis-popup.js",

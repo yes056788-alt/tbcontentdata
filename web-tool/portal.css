@@ -27,13 +27,15 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 a:focus-visible {
   outline: 2px solid rgba(11, 103, 209, .3);
   outline-offset: 2px;
@@ -329,8 +331,20 @@ select {
   color: #182230;
 }
 
+textarea {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #182230;
+  line-height: 1.55;
+  resize: vertical;
+}
+
 input:hover,
-select:hover {
+select:hover,
+textarea:hover {
   border-color: #98a2b3;
 }
 
@@ -1356,6 +1370,279 @@ select:hover {
   border-top: 0;
 }
 
+.pgy-classification-setup {
+  margin-top: 16px;
+  overflow: hidden;
+  border: 1px solid #cddcf2;
+  border-radius: 8px;
+  background: #f8fbff;
+  box-shadow: 0 8px 22px rgba(30, 80, 145, .07);
+}
+
+.pgy-classification-setup[hidden] {
+  display: none;
+}
+
+.pgy-classification-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px;
+  border-bottom: 1px solid #dce6f4;
+  background: linear-gradient(135deg, #edf5ff 0%, #f8fbff 70%);
+}
+
+.pgy-classification-head h2 {
+  margin-top: 2px;
+  color: #253044;
+  font-size: 17px;
+}
+
+.pgy-classification-head p {
+  max-width: 760px;
+  margin-top: 5px;
+  color: #52647d;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.pgy-platform-badge {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid #9ec1f6;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #0b67d1;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.pgy-classification-setup .classification-layout {
+  min-height: 0;
+}
+
+.pgy-classification-setup .classification-form {
+  min-height: 0;
+  padding: 20px 22px;
+}
+
+.pgy-classification-setup.is-disabled .classification-form {
+  background: #f8fafc;
+}
+
+.pgy-model-guide code {
+  overflow-wrap: anywhere;
+  color: #1d4f91;
+  font-size: 10px;
+}
+
+.qwen-api-key-form {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #dce2ea;
+}
+
+.qwen-api-key-form > label,
+.qwen-api-key-form > small {
+  display: block;
+}
+
+.qwen-api-key-form > label {
+  margin-bottom: 7px;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.qwen-api-key-form > input {
+  width: 100%;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  letter-spacing: .04em;
+}
+
+.qwen-api-key-form > small {
+  margin-top: 7px;
+  color: #667085;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.qwen-api-key-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.qwen-api-key-actions .button {
+  min-width: 0;
+  padding-right: 9px;
+  padding-left: 9px;
+}
+
+.qwen-api-key-status {
+  min-height: 36px;
+  margin-top: 11px !important;
+  padding: 9px 10px;
+  border-radius: 5px;
+  background: #f2f4f7;
+  color: #475467 !important;
+  line-height: 1.55 !important;
+}
+
+.qwen-api-key-status[data-tone="success"] {
+  background: #ecfdf3;
+  color: #087443 !important;
+}
+
+.qwen-api-key-status[data-tone="warning"] {
+  background: #fff7e8;
+  color: #8a4b08 !important;
+}
+
+.qwen-api-key-status[data-tone="error"] {
+  background: #fff1f1;
+  color: #b42318 !important;
+}
+
+.pgy-model-security {
+  padding: 10px 11px;
+  border-radius: 5px;
+  background: #eef5ff;
+  color: #344f73 !important;
+}
+
+.classification-layout {
+  display: grid;
+  min-height: inherit;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  align-items: start;
+}
+
+.classification-form {
+  min-width: 0;
+  min-height: inherit;
+  padding: 24px;
+  border-right: 1px solid #dce2ea;
+  background: #ffffff;
+}
+
+.classification-form-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #eaecf0;
+}
+
+.classification-form-head h2,
+.classification-guide h2 {
+  color: #253044;
+  font-size: 16px;
+}
+
+.classification-form-head p,
+.classification-guide p {
+  margin-top: 4px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.classification-field > label,
+.classification-field > small {
+  display: block;
+}
+
+.classification-field > label {
+  margin-bottom: 6px;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.classification-field > small {
+  margin-top: 6px;
+  color: #667085;
+  font-size: 11px;
+}
+
+.classification-field + .classification-field {
+  margin-top: 16px;
+}
+
+.classification-field select,
+#classificationCustomIndustry,
+#pgyClassificationCustomIndustry {
+  max-width: 460px;
+}
+
+.classification-term-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.classification-term-grid .classification-field {
+  min-width: 0;
+  margin-top: 0;
+}
+
+.classification-term-grid textarea {
+  min-height: 154px;
+}
+
+.classification-form-actions {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid #eaecf0;
+}
+
+.classification-form-actions > span {
+  color: #667085;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.classification-guide {
+  padding: 24px 20px;
+}
+
+.classification-guide > p {
+  line-height: 1.7;
+}
+
+.classification-guide dl {
+  margin: 20px 0 0;
+}
+
+.classification-guide dl > div {
+  padding: 13px 0;
+  border-top: 1px solid #dce2ea;
+}
+
+.classification-guide dt {
+  color: #344054;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.classification-guide dd {
+  margin: 4px 0 0;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
 .batch-export-dialog {
   width: min(920px, calc(100vw - 32px));
   max-width: none;
@@ -1777,6 +2064,36 @@ html.embedded-view .report-shell {
   .task-layout {
     grid-template-columns: 1fr;
   }
+
+  .classification-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .classification-form {
+    border-right: 0;
+  }
+
+  .classification-guide {
+    border-top: 1px solid #dce2ea;
+  }
+
+  .project-viewbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0;
+    padding: 0 14px 9px;
+  }
+
+  .project-view-tabs {
+    width: 100%;
+    min-height: 44px;
+    overflow-x: auto;
+  }
+
+  .project-view-tools {
+    width: 100%;
+    justify-content: space-between;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1890,12 +2207,22 @@ html.embedded-view .report-shell {
   .project-view-tabs {
     width: 100%;
     min-height: 44px;
-    justify-content: space-between;
+    overflow-x: auto;
+    justify-content: flex-start;
     gap: 12px;
   }
 
   .project-view-frame {
     min-height: 680px;
+  }
+
+  .classification-term-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .classification-form,
+  .classification-guide {
+    padding: 18px 16px;
   }
 
   .portal-heading {
@@ -2004,6 +2331,15 @@ html.embedded-view .report-shell {
 
   .platform-picker-grid {
     grid-template-columns: 1fr;
+  }
+
+  .classification-form-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .classification-form-actions .button {
+    width: 100%;
   }
 
   .batch-session-notice {

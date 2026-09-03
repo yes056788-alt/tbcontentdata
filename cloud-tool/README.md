@@ -29,6 +29,8 @@
 
 ## 本地开发
 
+本地 Cloudflare 开发运行时从 `cloud-tool/.dev.vars` 读取基础服务端变量。该文件已被 Git 忽略；不要把真实密钥写进 README、源码或可提交的配置。蒲公英搜索词分类沿用希宝报告的确定性行业规则，不调用大模型，不需要 API Key 或模型变量。
+
 ```bash
 npm install
 npm run dev
@@ -79,7 +81,7 @@ npm run start:node
 
 所有者随后用临时密码登录并立即设置私有新密码。部署管理员必须在成功或到期后立即删除全部 `OWNER_RECOVERY_*` 运行时变量并重启；删除后生产启动仍正常，恢复接口会安全地返回“未配置”。
 
-不要把 `.env.production`、密钥、迁移口令、TLS 私钥或 `.tbmig` 文件提交到 Git 或放入 Docker build context。
+不要把 `.env.production`、`.dev.vars`、密钥、迁移口令、TLS 私钥或 `.tbmig` 文件提交到 Git 或放入 Docker build context。
 
 ## 阿里云 ECS Docker 部署
 
@@ -197,6 +199,6 @@ npm run build
 npm test
 ```
 
-`.openai/hosting.json` 仍声明 D1 `DB` 和 R2 `RUNS`。Cloudflare 环境同样需要设置 `PASSWORD_PEPPER`、`RUN_DATA_KEY`、`BOOTSTRAP_TOKEN` 与精确的 `APP_PUBLIC_ORIGIN`；短期 `OWNER_RECOVERY_*` 配置遵循上面的同一规则。
+`.openai/hosting.json` 仍声明 D1 `DB` 和 R2 `RUNS`。Cloudflare 环境同样需要设置 `PASSWORD_PEPPER`、`RUN_DATA_KEY`、`BOOTSTRAP_TOKEN` 与精确的 `APP_PUBLIC_ORIGIN`。短期 `OWNER_RECOVERY_*` 配置遵循上面的同一规则。
 
 取得稳定 HTTPS 地址后，还必须把该精确 origin 加入扩展的 `manifest.json`、`web-tool-bridge.js` 与 `background.js`，重新打包并让同事安装对应扩展。更换域名时要同时更新这些白名单和 `APP_PUBLIC_ORIGIN`。

@@ -317,6 +317,41 @@ test('runtime rejects unrelated message types and non-workbench senders', async 
   assert.equal(fixture.chrome.fixture.storageWrites.length, 0);
 });
 
+test('web messages cannot inject a task-owned tab id to bypass duplicate-tab isolation', async () => {
+  const runtimeModule = loadRuntime();
+  let collectCount = 0;
+  const chrome = createFakeChrome([
+    { id: 201, url: 'https://pgy.xiaohongshu.com/solar/post-trade/content-manage' },
+    { id: 202, url: 'https://pgy.xiaohongshu.com/solar/post-trade/content-manage?task=1' },
+  ]);
+  chrome.tabs.get = async (tabId) => ({
+    id: Number(tabId),
+    url: 'https://pgy.xiaohongshu.com/solar/post-trade/content-manage?task=1',
+  });
+  const fixture = createRuntimeOptions({
+    chrome,
+    collectByPlatform(platform) {
+      collectCount += 1;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const response = await runtime.handleMessage({
+    type: MESSAGE_TYPE,
+    payload: runInput({
+      runId: 'fixture-web-tab-injection',
+      platforms: ['pgy'],
+      taskOwnedTabIds: { pgy: 202 },
+    }),
+  }, allowedSender());
+
+  assert.equal(response.ok, true);
+  assert.equal(response.result.status, 'failed');
+  assert.equal(response.result.platforms.pgy.errors[0].code, 'XHS_PLATFORM_TAB_AMBIGUOUS');
+  assert.equal(collectCount, 0);
+});
+
 test('runtime register exposes the guarded message entry through chrome.runtime', () => {
   const runtimeModule = loadRuntime();
   const fixture = createRuntimeOptions();
@@ -414,8 +449,98 @@ test('runtime refuses ambiguous duplicate exact-origin tabs for every XHS platfo
       );
       assert.match(result.platforms[entry.platform].errors[0].message, new RegExp(entry.name));
       assert.match(result.platforms[entry.platform].errors[0].message, /关闭.*重复.*标签/);
+      assert.doesNotMatch(result.platforms[entry.platform].errors[0].message, /多个已登录/);
     });
   }
+});
+
+test('runtime pins the current-session task-owned PGY tab when another exact-origin tab exists', async () => {
+  const runtimeModule = loadRuntime();
+  const tabs = [
+    {
+      id: 201,
+      url: 'https://pgy.xiaohongshu.com/solar/post-trade/content-manage',
+      active: true,
+    },
+    {
+      id: 202,
+      url: 'https://pgy.xiaohongshu.com/solar/post-trade/content-manage?task-owned=1',
+      active: false,
+    },
+  ];
+  const chrome = createFakeChrome(tabs);
+  chrome.tabs.get = async (tabId) => clone(
+    tabs.find((tab) => Number(tab.id) === Number(tabId)) || null
+  );
+  const collectedTabIds = [];
+  let pageRequestCount = 0;
+  const fixture = createRuntimeOptions({
+    chrome,
+    pageClient: {
+      async request() {
+        pageRequestCount += 1;
+        if (pageRequestCount === 1) {
+          const error = new Error('fixture stale bridge');
+          error.code = 'XHS_PAGE_BRIDGE_UNAVAILABLE';
+          throw error;
+        }
+        return { ok: true };
+      },
+    },
+    async collectByPlatform(platform, input, dependencies) {
+      collectedTabIds.push(Number(input.tabId));
+      await dependencies.pageClient.request({
+        platform,
+        endpoint: 'identity.get',
+        tabId: input.tabId,
+        signal: input.signal,
+      });
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({
+    runId: 'fixture-task-owned-pgy-tab',
+    platforms: ['pgy'],
+    taskOwnedTabIds: { pgy: 202 },
+  }));
+
+  assert.equal(result.status, 'complete');
+  assert.equal(result.platforms.pgy.status, 'complete');
+  assert.deepEqual(collectedTabIds, [202]);
+  assert.equal(pageRequestCount, 2, 'bridge recovery must stay pinned to the preflight-owned tab');
+});
+
+test('runtime fails closed when a task-owned platform tab leaves its verified origin', async () => {
+  const runtimeModule = loadRuntime();
+  const tabs = [{
+    id: 202,
+    url: 'https://ad.xiaohongshu.com/aurora/ad/datareports-basic/note',
+  }];
+  const chrome = createFakeChrome(tabs);
+  chrome.tabs.get = async (tabId) => clone(
+    tabs.find((tab) => Number(tab.id) === Number(tabId)) || null
+  );
+  let collectCount = 0;
+  const fixture = createRuntimeOptions({
+    chrome,
+    collectByPlatform(platform) {
+      collectCount += 1;
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({
+    runId: 'fixture-task-owned-pgy-tab-changed',
+    platforms: ['pgy'],
+    taskOwnedTabIds: { pgy: 202 },
+  }));
+
+  assert.equal(collectCount, 0);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.platforms.pgy.errors[0].code, 'XHS_PLATFORM_TAB_CHANGED');
 });
 
 test('runtime invokes adstar and pgy collectors with their exact tabs and shared run scope', async () => {
@@ -448,7 +573,7 @@ test('runtime invokes adstar and pgy collectors with their exact tabs and shared
   assert.equal(typeof fixture.dependencies.adstar.pageClient.request, 'function');
 });
 
-test('runtime creates, pins, and closes isolated temporary Juguang tabs for the collector', async () => {
+test('runtime creates, pins, and closes three isolated temporary Juguang tabs for the collector', async () => {
   const runtimeModule = loadRuntime();
   const identities = new Map();
   const requests = [];
@@ -464,11 +589,11 @@ test('runtime creates, pins, and closes isolated temporary Juguang tabs for the 
     juguang: (dependencies) => ({
       async collect(input) {
         const tabIds = await dependencies.createConcurrentAccountTabs({
-          count: 2,
+          count: 3,
           sourceTabId: input.tabId,
           signal: input.signal,
         });
-        assert.equal(tabIds.length, 2);
+        assert.equal(tabIds.length, 3);
         const targets = tabIds.map((tabId, index) => ({
           vSellerId: `fixture-child-${index + 1}`,
           advertiserId: 7001 + index,
@@ -514,12 +639,13 @@ test('runtime creates, pins, and closes isolated temporary Juguang tabs for the 
   }));
 
   assert.equal(result.platforms.juguang.status, 'complete');
-  assert.equal(chrome.fixture.tabCreates.length, 2);
+  assert.equal(chrome.fixture.tabCreates.length, 3);
   assert.deepEqual(chrome.fixture.tabCreates.map((entry) => entry.properties), [
     { url: 'about:blank', active: false },
     { url: 'about:blank', active: false },
+    { url: 'about:blank', active: false },
   ]);
-  assert.deepEqual(chrome.fixture.tabRemovals, [[101, 102]]);
+  assert.deepEqual(chrome.fixture.tabRemovals, [[101, 102, 103]]);
   assert.ok(requests.some((request) => (
     request.endpoint === 'reports.query' && request.tabId === 101
   )));
@@ -867,6 +993,54 @@ test('runtime retries a stale Juguang identity after child-account navigation un
   assert.equal(result.platforms.juguang.status, 'complete');
   assert.equal(currentAttempts, 2);
   assert.equal(waitCalls, 1);
+});
+
+test('runtime keeps probing a cold Juguang tab after the first identity retry batch', async () => {
+  const runtimeModule = loadRuntime();
+  const previous = {
+    vSellerId: null,
+    advertiserId: 654321,
+    accountType: 4,
+    name: '虚构聚光冷启动主账户',
+  };
+  const target = {
+    vSellerId: 'fictional-vseller-cold-tab-target',
+    advertiserId: 123456,
+    accountType: 602,
+    name: '虚构聚光冷启动目标子账户',
+  };
+  let currentAttempts = 0;
+  let waitCalls = 0;
+  const fixture = createRuntimeOptions({
+    pageClient: {
+      async request(input) {
+        assert.equal(input.platform, 'juguang');
+        assert.equal(input.endpoint, 'accounts.current');
+        currentAttempts += 1;
+        return clone(currentAttempts <= 4 ? previous : target);
+      },
+    },
+    bridgeRetry: { attempts: 2, delayMs: 1 },
+    transitionTimeoutMs: 100,
+    wait: async () => { waitCalls += 1; },
+    collectByPlatform: async (platform, input, dependencies) => {
+      const verified = await dependencies.switchAccount({
+        tabId: input.tabId,
+        target,
+        reportPath: '/aurora/ad/datareports-basic/note',
+      });
+      assert.equal(verified.vSellerId, target.vSellerId);
+      assert.equal(verified.advertiserId, target.advertiserId);
+      return completeResult(platform);
+    },
+  });
+  const runtime = runtimeModule.createXhsRuntime(fixture.options);
+
+  const result = await runtime.run(runInput({ platforms: ['juguang'] }));
+
+  assert.equal(result.platforms.juguang.status, 'complete');
+  assert.equal(currentAttempts, 5);
+  assert.ok(waitCalls >= 4);
 });
 
 test('runtime waits for a new committed Juguang document even when tab metadata already claims complete', async () => {
@@ -3947,7 +4121,7 @@ test('runtime recovers one stale receiver on the current unique tab and retries 
         return undefined;
       }
       return {
-        channel: 'xhs-page-bridge-v2',
+        channel: 'xhs-page-bridge-v3',
         type: 'XHS_PAGE_RESPONSE',
         requestId: message.requestId,
         platform: message.platform,
@@ -4095,7 +4269,7 @@ test('runtime does not recover or duplicate a bridge request rejected by the pla
     async sendMessage(tabId, message) {
       sendCount += 1;
       return {
-        channel: 'xhs-page-bridge-v2',
+        channel: 'xhs-page-bridge-v3',
         type: 'XHS_PAGE_RESPONSE',
         requestId: message.requestId,
         platform: message.platform,
@@ -4150,7 +4324,7 @@ test('runtime fails closed instead of replaying a data endpoint on a replacement
       sends.push({ tabId, endpoint: message.endpoint });
       if (message.endpoint === 'accounts.current') {
         return {
-          channel: 'xhs-page-bridge-v2',
+          channel: 'xhs-page-bridge-v3',
           type: 'XHS_PAGE_RESPONSE',
           requestId: message.requestId,
           platform: message.platform,
@@ -4167,7 +4341,7 @@ test('runtime fails closed instead of replaying a data endpoint on a replacement
         return undefined;
       }
       return {
-        channel: 'xhs-page-bridge-v2',
+          channel: 'xhs-page-bridge-v3',
         type: 'XHS_PAGE_RESPONSE',
         requestId: message.requestId,
         platform: message.platform,
@@ -4234,7 +4408,7 @@ test('runtime may reinstall and replay a data endpoint once when the unique tab 
       sendCount += 1;
       if (sendCount === 1) return undefined;
       return {
-        channel: 'xhs-page-bridge-v2',
+        channel: 'xhs-page-bridge-v3',
         type: 'XHS_PAGE_RESPONSE',
         requestId: message.requestId,
         platform: message.platform,

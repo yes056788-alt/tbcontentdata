@@ -6,6 +6,7 @@ const LEGACY_ROUTES = [
   "workspace.html",
   "accounts.html",
   "report.html",
+  "comments.html",
   "data.html",
   "report-view.html",
 ];
@@ -67,6 +68,7 @@ test("report and data viewers allow their required inline styles only", async ()
     "workspace.html",
     "accounts.html",
     "report.html",
+    "comments.html",
   ]) {
     const policy = legacyContentSecurityPolicy(filename);
     assert.match(policy, /style-src 'self'(?:;|$)/, filename);

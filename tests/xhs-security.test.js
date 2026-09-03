@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const {
+  sanitizeOfficialNoteUrl,
   sanitizeSensitiveData,
 } = require('../xhs/contract');
 
@@ -62,6 +63,29 @@ test('removes sensitive parameters from signed URLs while preserving safe parame
   assert.match(sanitized.nested[0], /advertiserId=fictional-advertiser-001/);
   assert.doesNotMatch(sanitized.nested[0], /access_token|fictional-access/);
   assert.equal(sanitized.nested[1], 'plain fictional text');
+});
+
+test('preserves only the platform-exported Xiaohongshu note link capability', () => {
+  const noteId = 'fictional-note-official-001';
+  const official = `https://www.xiaohongshu.com/explore/${noteId}` +
+    '?utm_source=discard-me&xsec_token=fictional-official-token-001&xsec_source=pc_pgyexport';
+  const normalized = sanitizeOfficialNoteUrl(official, noteId);
+
+  assert.equal(
+    normalized,
+    `https://www.xiaohongshu.com/explore/${noteId}` +
+      '?xsec_token=fictional-official-token-001&xsec_source=pc_pgyexport',
+  );
+  assert.equal(sanitizeSensitiveData({ noteUrl: official }).noteUrl, normalized);
+  for (const rejected of [
+    official.replace('www.xiaohongshu.com', 'attacker.example'),
+    official.replace(noteId, 'different-note-id'),
+    official.replace('pc_pgyexport', 'pc_search'),
+    `https://www.xiaohongshu.com/explore/${noteId}?xsec_source=pc_pgyexport`,
+    `https://www.xiaohongshu.com/explore/${noteId}`,
+  ]) {
+    assert.equal(sanitizeOfficialNoteUrl(rejected, noteId), null, rejected);
+  }
 });
 
 test('removes XHS signature aliases and secret-value keys and redacts the full Bearer credential', () => {

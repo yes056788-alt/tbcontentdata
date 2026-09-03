@@ -173,6 +173,7 @@ test('background one-click report runs selected XHS sources, creates a gated ana
   const projectTask = block(source, 'async function runProjectTask', '\nasync function ');
   assert.match(projectTask, /dateRange/);
   assert.match(projectTask, /ensureContentDiagnosisReportTask\s*\(\s*\{[^}]*dateRange/s);
+  assert.match(reportSource, /taskOwnedTabIds:\s*options\s*&&\s*options\.taskOwnedTabIds/);
 });
 
 test('runXhsAnalysisTask waits for all three sources before analysis', async () => {
@@ -208,6 +209,34 @@ test('runXhsAnalysisTask waits for all three sources before analysis', async () 
     Object.keys(harness.analysisInputs[0].collections),
     ['adstar', 'pgy', 'juguang'],
   );
+});
+
+test('runXhsAnalysisTask forwards preflight-owned platform tabs into the runtime', async () => {
+  let runtimeInput = null;
+  const harness = createRunXhsHarness({
+    runtimeRun(input) {
+      runtimeInput = input;
+      return {
+        status: 'complete',
+        platforms: { pgy: { status: 'complete' } },
+      };
+    },
+    snapshot: {
+      schema: 'xhsAnalysisSnapshotV1',
+      notes: [],
+      quality: { decisionReady: true, issues: [] },
+    },
+  });
+
+  await harness.run({
+    runId: 'fixture-owned-platform-tab-forwarding',
+    storeId: 'fixture-store-owned-tab',
+    dateRange: { from: '2030-01-01', to: '2030-01-07', timezone: 'Asia/Shanghai' },
+    platforms: ['pgy'],
+    taskOwnedTabIds: { pgy: 202 },
+  });
+
+  assert.deepEqual(runtimeInput.taskOwnedTabIds, { pgy: 202 });
 });
 
 test('report progress treats the parallel three-source XHS pipeline as one top-level step', () => {

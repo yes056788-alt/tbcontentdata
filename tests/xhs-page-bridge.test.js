@@ -8,7 +8,7 @@ const root = path.join(__dirname, '..');
 const pageClientPath = path.join(root, 'xhs', 'page-client.js');
 const platformContentPath = path.join(root, 'xhs-platform-content.js');
 
-const EXPECTED_CHANNEL = 'xhs-page-bridge-v2';
+const EXPECTED_CHANNEL = 'xhs-page-bridge-v3';
 const EXPECTED_REQUEST_TYPE = 'XHS_PAGE_REQUEST';
 const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
 const PLATFORM_CASES = [
@@ -59,6 +59,7 @@ function evaluatePlatformContent({
 } = {}) {
   const source = fs.readFileSync(platformContentPath, 'utf8');
   const runtimeListeners = [];
+  const activeRuntimeListeners = new Set();
   const windowListeners = [];
   const posted = [];
   let nonceSequence = 0;
@@ -66,6 +67,11 @@ function evaluatePlatformContent({
   const windowObject = {
     addEventListener(type, listener) {
       if (type === 'message') windowListeners.push(listener);
+    },
+    removeEventListener(type, listener) {
+      if (type !== 'message') return;
+      const index = windowListeners.indexOf(listener);
+      if (index >= 0) windowListeners.splice(index, 1);
     },
     postMessage(message, targetOrigin) {
       posted.push({ message, targetOrigin });
@@ -91,7 +97,9 @@ function evaluatePlatformContent({
         onMessage: {
           addListener(listener) {
             runtimeListeners.push(listener);
+            activeRuntimeListeners.add(listener);
           },
+          hasListener(listener) { return activeRuntimeListeners.has(listener); },
         },
       },
     },
@@ -107,12 +115,19 @@ function evaluatePlatformContent({
 
   vm.runInContext(source, context, { filename: platformContentPath });
   return {
+    activeRuntimeListeners,
     posted,
     runtimeListeners,
     windowListeners,
     windowObject,
     dispatchWindowMessage(event) {
       for (const listener of windowListeners) listener(event);
+    },
+    invalidateRuntime() {
+      activeRuntimeListeners.clear();
+    },
+    reinject() {
+      vm.runInContext(source, context, { filename: platformContentPath });
     },
   };
 }
@@ -269,6 +284,57 @@ test('page-client classifies Chrome stale-receiver rejection for one runtime-own
   }
 });
 
+test('page-client restores a missing platform receiver once and replays only that undelivered request', async () => {
+  const { createPageClient } = loadPageClient();
+  const recoveries = [];
+  let sendCount = 0;
+  const client = createPageClient({
+    async sendMessage(tabId, message) {
+      sendCount += 1;
+      if (sendCount === 1) {
+        throw new Error('Could not establish connection. Receiving end does not exist.');
+      }
+      return responseFor(message, { data: { restored: true } });
+    },
+    async recoverBridge(request) {
+      recoveries.push(request);
+    },
+  });
+
+  const result = await client.request(pageRequest());
+
+  assert.deepEqual(result, { restored: true });
+  assert.equal(sendCount, 2);
+  assert.equal(recoveries.length, 1);
+  assert.equal(recoveries[0].tabId, 17);
+  assert.equal(recoveries[0].platform, 'pgy');
+  assert.equal(recoveries[0].endpoint, 'notes.list');
+});
+
+test('page-client never replays a request whose response channel closed after possible delivery', async () => {
+  const { BRIDGE_UNAVAILABLE_CODE, createPageClient } = loadPageClient();
+  let sendCount = 0;
+  let recoveryCount = 0;
+  const client = createPageClient({
+    async sendMessage() {
+      sendCount += 1;
+      throw new Error(
+        'A listener indicated an asynchronous response, but the message channel closed before a response was received.'
+      );
+    },
+    async recoverBridge() {
+      recoveryCount += 1;
+    },
+  });
+
+  await assert.rejects(
+    client.request(pageRequest()),
+    (error) => error && error.code === BRIDGE_UNAVAILABLE_CODE,
+  );
+  assert.equal(sendCount, 1);
+  assert.equal(recoveryCount, 0);
+});
+
 test('platform content bridge does not register outside a top-level exact origin', () => {
   const childFrame = evaluatePlatformContent({ topFrame: false });
   assert.equal(childFrame.runtimeListeners.length, 0);
@@ -283,6 +349,18 @@ test('platform content bridge does not register outside a top-level exact origin
     assert.equal(untrusted.runtimeListeners.length, 0, origin);
     assert.equal(untrusted.windowListeners.length, 0, origin);
   }
+});
+
+test('platform content bridge reinstalls its receiver after an extension runtime reload', () => {
+  const bridge = evaluatePlatformContent();
+  assert.equal(bridge.activeRuntimeListeners.size, 1);
+
+  bridge.invalidateRuntime();
+  assert.equal(bridge.activeRuntimeListeners.size, 0);
+  bridge.reinject();
+
+  assert.equal(bridge.activeRuntimeListeners.size, 1);
+  assert.equal(bridge.windowListeners.length, 1);
 });
 
 test('platform content bridge forwards only the endpoint allowlisted for its exact origin', () => {

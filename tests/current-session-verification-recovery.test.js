@@ -97,11 +97,13 @@ function createHarness(tabs, options = {}) {
         async create(details) {
           createdTabs.push(copy(details));
           if (options.allowCreateTabs === true) {
-            const tab = {
+            const tab = Object.assign({
               id: nextCreatedTabId,
               status: 'complete',
               url: String(details && details.url || ''),
-            };
+            }, copy(options.createdTabState) || {}, {
+              id: nextCreatedTabId,
+            });
             nextCreatedTabId += 1;
             browserTabs.set(tab.id, tab);
             return copy(tab);
@@ -340,6 +342,82 @@ test('task-owned tab trust is revalidated after a loading tab finishes redirecti
   assert.deepEqual(harness.stateReads, [], '重定向后的非官方页面不得进入登录状态读取。');
 });
 
+test('fresh PGY task tab accepts its official pending URL before the first navigation commits', async () => {
+  const entryUrl = accountLogin.XHS_PLATFORM_ENTRY_URLS.pgy;
+  const harness = createHarness([], {
+    allowCreateTabs: true,
+    createdTabState: {
+      status: 'loading',
+      url: '',
+      pendingUrl: entryUrl,
+    },
+    states: {
+      pgy: [
+        { kind: 'productReady', frameId: 0 },
+        { kind: 'productReady', frameId: 0 },
+      ],
+    },
+    async onWaitTabComplete({ browserTabs, tabId }) {
+      browserTabs.set(tabId, {
+        id: tabId,
+        status: 'complete',
+        url: entryUrl,
+      });
+    },
+  });
+
+  const result = await harness.context.prepareCurrentSessionProjectPlatformsUnderTest(
+    ['pgy'],
+    {
+      signal: new AbortController().signal,
+      taskOwnedTabIds: {},
+    },
+  );
+
+  assert.equal(
+    result.platforms.pgy.ok,
+    true,
+    result.platforms.pgy.message || '官方蒲公英 pendingUrl 不应被判定为离开官方平台。',
+  );
+  assert.equal(result.platforms.pgy.tabId, 100);
+  assert.deepEqual(harness.createdTabs, [{ url: entryUrl, active: false }]);
+  assert.deepEqual(harness.stateReads, [
+    { tabId: 100, platform: 'pgy' },
+    { tabId: 100, platform: 'pgy' },
+  ]);
+});
+
+test('fresh PGY task tab rejects an external pending navigation before reading login state', async () => {
+  const harness = createHarness([], {
+    allowCreateTabs: true,
+    createdTabState: {
+      status: 'loading',
+      url: '',
+      pendingUrl: 'https://attacker.example.test/fake-pgy',
+    },
+    async onWaitTabComplete({ browserTabs, tabId }) {
+      browserTabs.set(tabId, {
+        id: tabId,
+        status: 'complete',
+        url: 'https://attacker.example.test/fake-pgy',
+      });
+    },
+  });
+
+  const result = await harness.context.prepareCurrentSessionProjectPlatformsUnderTest(
+    ['pgy'],
+    {
+      signal: new AbortController().signal,
+      taskOwnedTabIds: {},
+    },
+  );
+
+  assert.equal(result.platforms.pgy.state, 'failed');
+  assert.match(result.platforms.pgy.message, /任务标签页已离开官方平台/);
+  assert.equal(result.platforms.pgy.tabId, 100);
+  assert.deepEqual(harness.stateReads, [], '外站 pendingUrl 不得进入登录状态读取。');
+});
+
 test('verification resolution waits for the same task-owned tab to return to every product origin', async () => {
   const cases = [
     {
@@ -407,7 +485,18 @@ test('verification resolution waits for the same task-owned tab to return to eve
 });
 
 test('currentSession preflight creates PGY and Juguang at their exact official product entries', async () => {
-  const harness = createHarness([], {
+  const harness = createHarness([
+    {
+      id: 91,
+      status: 'complete',
+      url: accountLogin.XHS_PLATFORM_ENTRY_URLS.pgy,
+    },
+    {
+      id: 92,
+      status: 'complete',
+      url: accountLogin.XHS_PLATFORM_ENTRY_URLS.juguang,
+    },
+  ], {
     allowCreateTabs: true,
     states: {
       pgy: [
@@ -435,10 +524,56 @@ test('currentSession preflight creates PGY and Juguang at their exact official p
   ]);
   assert.equal(result.platforms.pgy.tabId, 100);
   assert.equal(result.platforms.juguang.tabId, 101);
+  assert.deepEqual(
+    harness.stateReads.map((entry) => entry.tabId),
+    [100, 100, 101, 101],
+    '每次预检必须只读取本次新建页，不得复用已有产品页。',
+  );
   assert.doesNotMatch(
     JSON.stringify({ created: harness.createdTabs, navigated: harness.navigations }),
     /www\.xiaohongshu\.com|\/explore(?:[/?"']|$)/i,
   );
+});
+
+test('currentSession activates its fresh PGY tab and continues automatically after manual login', async () => {
+  const loginWaits = [];
+  const loginResolutions = [];
+  const harness = createHarness([], {
+    allowCreateTabs: true,
+    states: {
+      pgy: [
+        { kind: 'login', frameId: 0 },
+        { kind: 'productReady', frameId: 0 },
+        { kind: 'productReady', frameId: 0 },
+      ],
+    },
+  });
+
+  const result = await harness.context.prepareCurrentSessionProjectPlatformsUnderTest(
+    ['pgy'],
+    {
+      signal: new AbortController().signal,
+      taskOwnedTabIds: {},
+      async onLoginWaiting(details) {
+        loginWaits.push(copy(details));
+      },
+      async onLoginResolved(details) {
+        loginResolutions.push(copy(details));
+      },
+    },
+  );
+
+  assert.equal(result.platforms.pgy.ok, true);
+  assert.equal(result.platforms.pgy.tabId, 100);
+  assert.deepEqual(harness.createdTabs, [{
+    url: accountLogin.XHS_PLATFORM_ENTRY_URLS.pgy,
+    active: false,
+  }]);
+  assert.deepEqual(harness.activations, [{ tabId: 100, update: { active: true } }]);
+  assert.equal(loginWaits.length, 1);
+  assert.equal(loginWaits[0].platform, 'pgy');
+  assert.match(loginWaits[0].message, /登录.*继续/);
+  assert.deepEqual(loginResolutions, [{ platform: 'pgy', waitingPlatforms: [] }]);
 });
 
 test('an ordinary currentSession preflight failure is isolated to its XHS platform', async () => {

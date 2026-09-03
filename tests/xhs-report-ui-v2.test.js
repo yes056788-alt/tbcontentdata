@@ -1052,7 +1052,8 @@ test('standalone HTML export keeps the XHS web disclosures folded and clickable'
     ...seedNote,
     noteId: `fictional-export-note-${index + 1}`,
     title: `虚构导出笔记 ${index + 1}`,
-    noteUrl: `https://www.xiaohongshu.com/explore/fictional-export-note-${index + 1}`,
+    noteUrl: `https://www.xiaohongshu.com/explore/fictional-export-note-${index + 1}` +
+      `?xsec_token=fictional-export-token-${index + 1}&xsec_source=pc_pgyexport`,
   }));
   harness.api.setState({ status: collectionStatus(), analysis: snapshot });
 
@@ -1082,7 +1083,7 @@ test('standalone HTML export keeps the XHS web disclosures folded and clickable'
   assert.equal((exported.match(/<tr[^>]*data-xhs-export-note-overflow/g) || []).length, 2,
     'Top20 之外的笔记应保留在导出文档并默认折叠');
   assert.match(exported,
-    /href="https:\/\/www\.xiaohongshu\.com\/explore\/fictional-export-note-1" target="_blank" rel="noopener noreferrer"/);
+    /href="https:\/\/www\.xiaohongshu\.com\/explore\/fictional-export-note-1\?xsec_token=fictional-export-token-1&amp;xsec_source=pc_pgyexport" target="_blank" rel="noopener noreferrer"/);
   assert.match(exported, /querySelectorAll\("\[data-xhs-pgy-note-toggle\]"\)/);
   assert.match(exported, /querySelectorAll\("\[data-xhs-star-toggle\]"\)/);
   assert.match(exported, /querySelectorAll\("\[data-xhs-note-toggle\]"\)/);
@@ -1096,16 +1097,26 @@ test('standalone HTML export enables PGY dates and Star full-path filters over e
   const harness = createReportHarness({ reportModel: realXhsReportModel });
   const snapshot = uiSnapshot();
   snapshot.pgy.defaultDateRange = { from: '2030-01-01', to: '2030-01-31' };
+  snapshot.pgy.searchKeywordProfile = {
+    id: 'home-furnishing-v1',
+    industry: 'furniture',
+    label: '家具家居行业分类标准',
+  };
   snapshot.pgy.facts = [
     {
       noteId: 'fictional-export-pgy-january', title: '虚构一月笔记', publishDate: '2030-01-05',
       spuName: '虚构 SPU A', crossDomainProjectName: '虚构跨域项目 A',
       costs: { cooperation: 100, platformFee: 10, total: 110 }, metrics: {},
+      searchKeywordFetchStatus: 'complete',
+      searchKeywords: [{
+        keyword: '虚构导出搜索词', impressions: 100, reads: 25, clickRate: 0.25,
+      }],
     },
     {
       noteId: 'fictional-export-pgy-february', title: '虚构二月笔记', publishDate: '2030-02-05',
       spuName: '虚构 SPU B', crossDomainProjectName: '虚构跨域项目 B',
       costs: { cooperation: 200, platformFee: 20, total: 220 }, metrics: {},
+      searchKeywordFetchStatus: 'failed', searchKeywords: [],
     },
   ];
   snapshot.spotlight.daily = Array.from({ length: 27 }, (_, index) => ({
@@ -1131,13 +1142,63 @@ test('standalone HTML export enables PGY dates and Star full-path filters over e
   const payload = JSON.parse(payloadMatch[1]);
   assert.equal(payload.pgy.facts.length, 2,
     '默认一月视图不能删除二月蒲公英事实');
+  assert.equal(payload.pgy.facts[0].searchKeywords[0].keyword, '虚构导出搜索词',
+    '离线筛选快照必须携带逐篇搜索词事实');
+  assert.deepEqual(payload.pgy.searchKeywordProfile, snapshot.pgy.searchKeywordProfile,
+    '离线搜索词重算必须保留归档时的行业分类模板');
+  assert.deepEqual(payload.pgy.searchFilters, {
+    commercialCategory: '', relevance: '', intent: '',
+    classificationSource: '', reviewRequired: null,
+  }, '离线快照必须携带搜索词分类联动筛选状态');
   assert.equal(payload.spotlight.daily.length, 27);
+  const staticExportMarkup = exported.slice(0, payloadMatch.index);
+  const searchFilterControls = staticExportMarkup.match(
+    /<select[^>]*data-xhs-pgy-search-filter="(?:commercialCategory|relevance|intent)"[^>]*>/g,
+  ) || [];
+  assert.deepEqual(searchFilterControls.map((control) => (
+    control.match(/data-xhs-pgy-search-filter="([^"]+)"/)[1]
+  )), ['commercialCategory', 'relevance', 'intent'],
+  '搜索词主表表头必须按商业分类、品类相关度、搜索意图提供 3 个筛选器');
+  for (const control of searchFilterControls) {
+    assert.doesNotMatch(control, /\sdisabled(?:\s|>)/,
+      '导出报告的搜索词筛选器必须可交互');
+  }
+  assert.match(staticExportMarkup,
+    /<button[^>]*data-xhs-pgy-search-filter="(?:commercialCategory|relevance|intent)"[^>]*data-xhs-pgy-search-value="[^"]+"[^>]*aria-pressed="false"/,
+    '三张维度对比表的分类标签必须可点击并与表头筛选联动');
+  assert.match(staticExportMarkup,
+    /<tbody[^>]*data-xhs-export-pgy-search-body[^>]*>\s*<tr class="xhs-total-row"[^>]*data-xhs-pgy-search-total="keywords"/,
+    '搜索词主表首行必须是筛选后汇总');
+  for (const dimension of ['commercialCategory', 'relevance', 'intent']) {
+    assert.match(staticExportMarkup, new RegExp(
+      `<tbody[^>]*data-xhs-export-pgy-search-summary-body="${dimension}"[^>]*>\\s*` +
+      `<tr class="xhs-total-row"[^>]*data-xhs-pgy-search-total="${dimension}"`,
+    ), `${dimension} 维度表首行必须是筛选后汇总`);
+  }
   assert.equal((exported.match(/<tr[^>]*data-xhs-export-note-row/g) || []).length, 45,
     '星河 Top20 只控制初始可见行，不能截断导出快照');
   for (const control of exported.match(/<(?:select|input)[^>]*(?:data-xhs-pgy-(?:spu|date)|data-xhs-note-(?:filter|date))[^>]*>/g) || []) {
     assert.doesNotMatch(control, /\sdisabled(?:\s|>)/);
   }
   assert.match(exported, /function renderPgy\(/);
+  assert.match(exported, /data-xhs-export-pgy-search-body/);
+  assert.match(exported, /function renderPgySearchKeywordRows\(/);
+  assert.match(exported, /number\(coverage\.failedNoteCount\)\s*>\s*0/,
+    '离线报告的交互筛选必须把全部失败表述为不可用，而不是无搜索数据');
+  const offlineRuntimeSource = exported.slice(payloadMatch.index + payloadMatch[0].length);
+  assert.match(offlineRuntimeSource,
+    /querySelectorAll\(['"]\[data-xhs-pgy-search-filter\]['"]\)/,
+    '离线运行时必须绑定三个搜索词表头筛选器');
+  assert.match(offlineRuntimeSource,
+    /closest\(['"]\[data-xhs-pgy-search-value\]['"]\)/,
+    '离线运行时必须响应维度表分类标签点击');
+  assert.match(offlineRuntimeSource, /model\.filterPgySearchKeywords\(/,
+    '离线筛选必须用共享模型按三维 AND 重算搜索词和汇总');
+  for (const total of ['keywords', 'commercialCategory', 'relevance', 'intent']) {
+    assert.match(offlineRuntimeSource,
+      new RegExp(`data-xhs-pgy-search-total=["']${total}["']`),
+      `离线重渲染必须保留 ${total} 汇总行标记`);
+  }
   assert.match(exported, /function applyNoteFilters\(/);
 });
 

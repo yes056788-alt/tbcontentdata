@@ -6,6 +6,7 @@ const {
   parsePgyPage,
   normalizePgyProject,
   normalizePgyNote,
+  normalizePgySearchKeywords,
   normalizePgySummary,
   applyPgyTaskEndDates,
   reconcilePgyCollection,
@@ -24,6 +25,7 @@ const FICTIONAL_NOTES = Object.freeze([
     bizId: 'fictional-cooperation-001',
     noteTitle: '虚构笔记一',
     notePublishTime: '2030-01-02 09:30:00',
+    orderCategory: 'fictional-order-category-deal',
     thirdProjectId: 'fictional-pgy-project-001',
     starData: { thirdBriefId: '  fictional-taobao-task-001  ' },
     thirdBriefEndTime: '2030-01-31 23:59:59',
@@ -45,6 +47,7 @@ const FICTIONAL_NOTES = Object.freeze([
     bizId: 'fictional-cooperation-002',
     noteTitle: '虚构笔记二',
     notePublishTime: '2030-01-04 12:00:00',
+    orderCategory: 'fictional-order-category-sail',
     kolId: 'fictional-creator-002',
     kolNickName: '虚构达人二',
     actualConsume: null,
@@ -60,6 +63,7 @@ const FICTIONAL_NOTES = Object.freeze([
     bizId: 'fictional-cooperation-003',
     noteTitle: '虚构笔记三',
     notePublishTime: '2030-01-07 23:59:00',
+    orderCategory: 'fictional-order-category-deal',
     kolId: 'fictional-creator-003',
     kolNickName: '虚构达人三',
     actualConsume: '50',
@@ -72,8 +76,39 @@ const FICTIONAL_NOTES = Object.freeze([
   },
 ]);
 
+const FICTIONAL_SEARCH_KEYWORDS_BY_NOTE = Object.freeze({
+  'fictional-note-001': Object.freeze([
+    Object.freeze({
+      keyword: '虚构品牌搜索词',
+      impressions: '120',
+      reads: '30',
+      clickRate: '25%',
+    }),
+    Object.freeze({
+      keyword: '虚构品类搜索词',
+      impressions: 80,
+      reads: 0,
+      clickRate: 0,
+    }),
+  ]),
+  'fictional-note-002': Object.freeze([]),
+  'fictional-note-003': Object.freeze([
+    Object.freeze({
+      keyword: '这条数据不应在失败后出现',
+      impressions: 999,
+      reads: 999,
+      clickRate: 1,
+    }),
+  ]),
+});
+
 function clone(value) {
   return structuredClone(value);
+}
+
+function officialNoteUrl(noteId) {
+  return `https://www.xiaohongshu.com/explore/${encodeURIComponent(noteId)}` +
+    `?xsec_token=official-export-${encodeURIComponent(noteId)}&xsec_source=pc_pgyexport`;
 }
 
 function rawSummary(overrides = {}) {
@@ -94,6 +129,21 @@ function createFakePageClient(options = {}) {
   let rows = clone(FICTIONAL_NOTES);
   if (options.zero) rows = [];
   if (options.duplicate) rows = [clone(FICTIONAL_NOTES[0]), clone(FICTIONAL_NOTES[1]), clone(FICTIONAL_NOTES[1])];
+  if (options.historicalNote) rows.push({
+    ...clone(FICTIONAL_NOTES[0]),
+    noteId: 'fictional-note-historical',
+    bizId: 'fictional-cooperation-historical',
+    noteTitle: '虚构任务日期范围外的历史笔记',
+    notePublishTime: '2029-12-31 23:59:00',
+    orderCategory: undefined,
+    actualConsume: '0',
+    totalConsume: '0',
+    refundAmount: '0',
+    totalPlatformPrice: '0',
+    impNum: '0',
+    readNum: '0',
+    engageNum: '0',
+  });
   if (options.missingDirectTaskEnd && rows[0]) rows[0].thirdBriefEndTime = null;
 
   async function request(input) {
@@ -140,6 +190,42 @@ function createFakePageClient(options = {}) {
       };
     }
 
+    if (input.endpoint === 'notes.searchKeywords') {
+      const noteId = String(input.payload.noteId || '');
+      if (options.searchKeywordHang) return new Promise(() => {});
+      if (options.searchKeywordFailureNoteId === noteId) {
+        const error = new Error(`fictional PGY search-keyword failure for ${noteId}`);
+        error.retryable = false;
+        throw error;
+      }
+      return {
+        data: {
+          list: clone(FICTIONAL_SEARCH_KEYWORDS_BY_NOTE[noteId] || []),
+        },
+      };
+    }
+
+    if (input.endpoint === 'notes.linkExport.submit') {
+      if (options.linkExportFailure) {
+        const error = new Error('fictional official-link export failure');
+        error.code = 'PGY_LINK_EXPORT_FIXTURE_FAILED';
+        error.retryable = false;
+        throw error;
+      }
+      return { taskId: 'fictional-link-export-task-001' };
+    }
+
+    if (input.endpoint === 'notes.linkExport.status') return { status: 3 };
+
+    if (input.endpoint === 'notes.linkExport.result') {
+      const selectedRows = options.linkExportPartial ? rows.slice(0, 1) : rows;
+      return {
+        links: selectedRows.map((row) => [row.noteId, officialNoteUrl(row.noteId)]),
+        parsedRowCount: selectedRows.length,
+        rejectedRowCount: 0,
+      };
+    }
+
     if (input.endpoint === 'projects.list') {
       if (options.projectFailure) {
         const error = new Error('fictional PGY project task metadata failure');
@@ -175,6 +261,7 @@ function createCollector(pageClient) {
     pageClient,
     cache: createMemoryCache(),
     now: () => '2030-02-01T00:00:00.000Z',
+    linkExportPollIntervalMs: 0,
   });
 }
 
@@ -234,7 +321,8 @@ test('normalizes note identity, publish date, cooperation cost, service fee, and
   assert.equal(normalized.noteId, 'fictional-note-001');
   assert.equal(normalized.sourceKey, 'fictional-cooperation-001');
   assert.equal(normalized.title, '虚构笔记一');
-  assert.equal(normalized.noteUrl, 'https://www.xiaohongshu.com/explore/fictional-note-001');
+  assert.equal(normalized.noteUrl, null,
+    'a bare noteId must never be presented as a working Xiaohongshu link');
   assert.equal(normalized.publishDate, '2030-01-02');
   assert.equal(normalized.taobaoTaskId, 'fictional-taobao-task-001');
   assert.equal(normalized.taskEndDate, '2030-01-31');
@@ -273,6 +361,88 @@ test('normalizes note identity, publish date, cooperation cost, service fee, and
     serialized,
     /fictional-xsec|fictional-signature|fictional-row-token|xsec_token|sign=|fictional-raw-business-payload|fictional-unused-decoration/
   );
+});
+
+test('defaults a missing PGY order category to the platform search-keyword category zero', () => {
+  const normalized = normalizePgyNote({
+    noteId: 'fictional-note-without-order-category',
+    noteTitle: '虚构未返回订单分类的笔记',
+  }, { includeSearchContext: true });
+
+  assert.equal(normalized.orderCategory, '0',
+    'the working PGY search_keyword_data request requires orderCategory=0 when the note list omits it');
+});
+
+test('finds real search-keyword rows without treating metadata arrays or generic names as data', () => {
+  assert.deepEqual(normalizePgySearchKeywords({
+    data: {
+      metadata: [],
+      legend: [{ name: '曝光' }],
+      actualRows: [{
+        searchKeyword: '虚构真实搜索词',
+        impNum: 90,
+        readNum: 18,
+        ctr: 0.2,
+      }],
+    },
+  }), [{
+    keyword: '虚构真实搜索词',
+    impressions: 90,
+    reads: 18,
+    clickRate: 0.2,
+  }]);
+
+  assert.throws(
+    () => normalizePgySearchKeywords({ data: { legend: [{ name: '曝光' }] } }),
+    /list is missing|invalid/i,
+  );
+});
+
+test('preserves the collected PGY searchScore as search heat without substituting reads', () => {
+  const normalized = normalizePgySearchKeywords({
+    data: {
+      list: [
+        {
+          searchKeyword: '虚构有搜索热度词',
+          searchScore: '8765',
+          impNum: 90,
+          readNum: 18,
+          ctr: 0.2,
+        },
+        {
+          searchKeyword: '虚构缺失搜索热度词',
+          impNum: 80,
+          readNum: 8765,
+          ctr: 0.25,
+        },
+      ],
+    },
+  });
+
+  assert.equal(normalized[0].searchScore, 8765,
+    '搜索热度必须来自蒲公英原始 searchScore 字段');
+  assert.equal(Object.prototype.hasOwnProperty.call(normalized[1], 'searchScore'), false,
+    '原始数据缺少 searchScore 时必须保持缺失，不得用阅读量代替');
+});
+
+test('normalizes every returned PGY search keyword without truncating the list at 20 rows', () => {
+  const sourceRows = Array.from({ length: 25 }, (_, index) => ({
+    keyword: `虚构全量搜索词-${String(index + 1).padStart(2, '0')}`,
+    impressions: 25 - index,
+    reads: index % 3,
+    clickRate: index % 3 / (25 - index),
+  }));
+
+  const normalized = normalizePgySearchKeywords({ data: { list: sourceRows } });
+
+  assert.equal(normalized.length, 25,
+    '采集器必须保留接口返回的全部搜索词，不得在本地截断为 Top20');
+  assert.deepEqual(
+    normalized.map((row) => row.keyword),
+    sourceRows.map((row) => row.keyword),
+    '全量搜索词应按曝光降序保留，包括原第 21–25 条',
+  );
+  assert.equal(normalized.at(-1).keyword, '虚构全量搜索词-25');
 });
 
 test('backfills note task end dates from the PGY cross-domain project task fields', () => {
@@ -506,8 +676,137 @@ test('collects identity, sum, and every list page without applying the task date
   const serialized = JSON.stringify(result);
   assert.doesNotMatch(
     serialized,
-    /fictional-xsec|fictional-signature|fictional-row-token|xsec_token|sign=/
+    /fictional-xsec|fictional-signature|fictional-row-token|sign=/
   );
+  assert.deepEqual(
+    result.notes.map((note) => note.noteUrl),
+    FICTIONAL_NOTES.map((note) => officialNoteUrl(note.noteId)),
+  );
+  assert.deepEqual(result.officialLinkCoverage, {
+    taskType: 'content_note_download_task',
+    totalNoteCount: 3,
+    matchedNoteCount: 3,
+    missingNoteCount: 0,
+    parsedRowCount: 3,
+    rejectedRowCount: 0,
+    status: 'complete',
+  });
+  const linkResultCall = pageClient.calls.find((call) => (
+    call.endpoint === 'notes.linkExport.result'
+  ));
+  assert.equal(linkResultCall.timeoutMs, 3 * 60 * 1000,
+    'result download and XLSX parsing must not inherit the ordinary 45-second page timeout');
+});
+
+test('keeps official-link export failure non-critical and leaves missing titles non-clickable', async () => {
+  const result = await createCollector(createFakePageClient({ linkExportFailure: true }))
+    .collect(collectionOptions('fictional-pgy-link-export-failure'));
+
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(result.notes.map((note) => note.noteUrl), [null, null, null]);
+  assert.equal(result.officialLinkCoverage.status, 'failed');
+  assert.equal(result.officialLinkCoverage.missingNoteCount, 3);
+  assert.ok(result.warnings.some((warning) => (
+    warning.code === 'pgy_official_note_links_incomplete' && warning.count === 3
+  )));
+});
+
+test('enriches every PGY note with ordered TOP search keywords and an isolated fetch status', async () => {
+  const pageClient = createFakePageClient({
+    searchKeywordFailureNoteId: 'fictional-note-003',
+  });
+  const result = await createCollector(pageClient).collect(
+    collectionOptions('fictional-pgy-search-keyword-run'),
+  );
+
+  assert.equal(result.status, 'complete',
+    'a non-critical search-keyword failure must not hide complete PGY costs and core metrics');
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.notes.map((note) => ({
+    noteId: note.noteId,
+    searchKeywordFetchStatus: note.searchKeywordFetchStatus,
+    searchKeywordErrorCode: note.searchKeywordErrorCode,
+    searchKeywords: note.searchKeywords,
+  })), [
+    {
+      noteId: 'fictional-note-001',
+      searchKeywordFetchStatus: 'complete',
+      searchKeywordErrorCode: undefined,
+      searchKeywords: [
+        { keyword: '虚构品牌搜索词', impressions: 120, reads: 30, clickRate: 0.25 },
+        { keyword: '虚构品类搜索词', impressions: 80, reads: 0, clickRate: 0 },
+      ],
+    },
+    {
+      noteId: 'fictional-note-002',
+      searchKeywordFetchStatus: 'empty',
+      searchKeywordErrorCode: undefined,
+      searchKeywords: [],
+    },
+    {
+      noteId: 'fictional-note-003',
+      searchKeywordFetchStatus: 'failed',
+      searchKeywordErrorCode: 'pgy_search_keywords_failed',
+      searchKeywords: [],
+    },
+  ]);
+  assert.deepEqual(result.searchKeywordCoverage.failureCodeCounts, {
+    pgy_search_keywords_failed: 1,
+  });
+
+  const searchCalls = pageClient.calls.filter((call) => call.endpoint === 'notes.searchKeywords');
+  assert.deepEqual(searchCalls.map((call) => ({
+    noteId: call.payload.noteId,
+    orderCategory: call.payload.orderCategory,
+  })), [
+    { noteId: 'fictional-note-001', orderCategory: 'fictional-order-category-deal' },
+    { noteId: 'fictional-note-002', orderCategory: 'fictional-order-category-sail' },
+    { noteId: 'fictional-note-003', orderCategory: 'fictional-order-category-deal' },
+  ]);
+});
+
+test('collects search keywords only for notes inside the requested report date range', async () => {
+  const pageClient = createFakePageClient({
+    historicalNote: true,
+    summaryOverride: { total: 4 },
+  });
+  const result = await createCollector(pageClient).collect(
+    collectionOptions('fictional-pgy-search-keyword-date-scope'),
+  );
+
+  assert.equal(result.notes.length, 4, 'the all-available PGY fact archive must retain history');
+  assert.equal(result.searchKeywordCoverage.totalNoteCount, 3,
+    'search-keyword coverage must use the requested report range, not all account history');
+  assert.deepEqual(pageClient.calls
+    .filter((call) => call.endpoint === 'notes.searchKeywords')
+    .map((call) => call.payload.noteId), [
+    'fictional-note-001',
+    'fictional-note-002',
+    'fictional-note-003',
+  ]);
+  const historical = result.notes.find((note) => note.noteId === 'fictional-note-historical');
+  assert.equal(Object.prototype.hasOwnProperty.call(historical, 'searchKeywordFetchStatus'), false);
+});
+
+test('bounds non-critical per-note search-keyword enrichment with a collection-wide time budget', async () => {
+  const pageClient = createFakePageClient({ searchKeywordHang: true });
+  const startedAt = Date.now();
+  const result = await createPgyCollector({
+    pageClient,
+    cache: createMemoryCache(),
+    now: () => '2030-02-01T00:00:00.000Z',
+    searchKeywordBudgetMs: 20,
+  }).collect(collectionOptions('fictional-pgy-search-keyword-budget'));
+
+  assert.ok(Date.now() - startedAt < 500,
+    'a stalled enhancement endpoint must not hold the core PGY report open');
+  assert.equal(result.status, 'complete');
+  assert.equal(result.searchKeywordCoverage.budgetExceeded, true);
+  assert.equal(result.searchKeywordCoverage.failedNoteCount, 3);
+  assert.deepEqual(result.notes.map((note) => note.searchKeywordFetchStatus), [
+    'failed', 'failed', 'failed',
+  ]);
+  assert.ok(result.warnings.some((warning) => warning.code === 'pgy_search_keywords_incomplete'));
 });
 
 test('labels the completed collection as an all-available snapshot with auditable time evidence', async () => {

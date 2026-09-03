@@ -1,8 +1,34 @@
 (function (root, factory) {
   'use strict';
+  const installMarker = '__tbcontentdataXhsLoginContentInstalledV2__';
   const api = factory(root);
   if (typeof module === 'object' && module.exports) module.exports = api;
-  if (root && root.chrome && root.chrome.runtime && root.document) api.register();
+  if (root && root.chrome && root.chrome.runtime && root.document) {
+    const previousListener = root[installMarker];
+    let receiverActive = false;
+    if (typeof previousListener === 'function') {
+      try {
+        receiverActive = typeof root.chrome.runtime.onMessage.hasListener === 'function'
+          ? root.chrome.runtime.onMessage.hasListener(previousListener)
+          : true;
+      } catch (error) {
+        receiverActive = false;
+      }
+    }
+    if (!receiverActive) {
+      const listener = api.register();
+      if (typeof listener !== 'function') return;
+      try {
+        Object.defineProperty(root, installMarker, {
+          value: listener,
+          configurable: true,
+          writable: true,
+        });
+      } catch (error) {
+        try { root[installMarker] = listener; } catch (assignmentError) {}
+      }
+    }
+  }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root) {
   'use strict';
 
@@ -14,7 +40,7 @@
     'https://customer.xiaohongshu.com',
     'https://passport.xiaohongshu.com',
   ]);
-  let registered = false;
+  let registeredListener = null;
   const cancelledLoginOperations = new Set();
   const activeLoginCleanups = new Map();
 
@@ -178,7 +204,7 @@
     ].join(' '));
     if (url.origin === 'https://pgy.xiaohongshu.com') {
       return pageText.includes('蒲公英') &&
-        /\u5185\u5bb9\u5408\u4f5c|\u521b\u610f\u4e2d\u5fc3|\u5408\u4f5c\u7ba1\u7406|\u62a5\u5907|\u6570\u636e\u4e2d\u5fc3|\u54c1\u724c\u5408\u4f5c/.test(pageText);
+        /\u5185\u5bb9\u5e7f\u573a|\u5185\u5bb9\u5408\u4f5c|\u521b\u610f\u4e2d\u5fc3|\u5408\u4f5c\u7ba1\u7406|\u62a5\u5907|\u6570\u636e\u4e2d\u5fc3|\u54c1\u724c\u5408\u4f5c/.test(pageText);
     }
     if (url.origin === 'https://ad.xiaohongshu.com') {
       return pageText.includes('聚光') &&
@@ -369,9 +395,10 @@
   }
 
   function register() {
-    if (registered || !root || !root.chrome || !root.chrome.runtime || !root.document) return;
-    registered = true;
-    root.chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (registeredListener || !root || !root.chrome || !root.chrome.runtime || !root.document) {
+      return registeredListener;
+    }
+    const listener = (message, sender, sendResponse) => {
       if (!message || !String(message.type || '').startsWith('XHS_LOGIN_')) return;
       if (!sender || sender.id !== root.chrome.runtime.id) {
         sendResponse({ ok: false, code: 'XHS_LOGIN_SENDER_UNTRUSTED', message: '小红书登录操作来源无效。' });
@@ -398,7 +425,10 @@
         sendResponse({ ok: false, code: 'XHS_LOGIN_OPERATION_FAILED', message: '小红书登录操作失败。' });
       });
       return true;
-    });
+    };
+    root.chrome.runtime.onMessage.addListener(listener);
+    registeredListener = listener;
+    return registeredListener;
   }
 
   return Object.freeze({

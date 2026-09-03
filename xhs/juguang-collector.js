@@ -826,30 +826,43 @@
           throw tabIsolationError('Juguang child accounts do not expose distinct advertiserId values.');
         }
 
-        await Promise.all(laneContexts.map((laneContext, index) => (
-          switchAccount(laneContext, isolationTargets[index])
-        )));
-        const verified = await Promise.all(laneContexts.map((laneContext, index) => (
-          verifyStableCurrentAccount(laneContext, isolationTargets[index])
-        )));
-        const actualAdvertiserIds = verified.map((entry) => Number(entry.verified.advertiserId));
-        if (new Set(actualAdvertiserIds).size !== actualAdvertiserIds.length) {
-          throw tabIsolationError('Juguang temporary tabs share an advertiserId after switching.');
+        const verified = [];
+        for (let index = 0; index < laneContexts.length; index += 1) {
+          // Account switching can touch a shared product session even when report state is
+          // ultimately tab-scoped. Bootstrap one lane at a time, then re-check every earlier
+          // lane so a third navigation cannot silently drift the first two identities.
+          await switchAccount(laneContexts[index], isolationTargets[index]);
+          verified[index] = await verifyStableCurrentAccount(
+            laneContexts[index], isolationTargets[index]
+          );
+          for (let previous = 0; previous < index; previous += 1) {
+            verified[previous] = await verifyStableCurrentAccount(
+              laneContexts[previous], isolationTargets[previous]
+            );
+          }
+          const activeAdvertiserIds = verified.slice(0, index + 1)
+            .map((entry) => Number(entry.verified.advertiserId));
+          if (new Set(activeAdvertiserIds).size !== activeAdvertiserIds.length) {
+            throw tabIsolationError('Juguang temporary tabs share an advertiserId after switching.');
+          }
         }
         state.isolationVerified = true;
         state.activeLanes = laneCount;
 
         const results = new Array(children.length);
-        let nextIndex = 0;
+        let nextIndex = laneCount;
         let terminalError = null;
-        async function runLane(laneContext) {
+        async function runLane(laneContext, initialIndex) {
+          let index = initialIndex;
+          let alreadyPositioned = true;
           while (!terminalError) {
             collectorCore.throwIfAborted(laneContext.signal);
-            const index = nextIndex;
-            nextIndex += 1;
             if (index >= children.length) return;
             try {
-              await switchAccount(laneContext, children[index]);
+              // The isolation pass already positioned each lane on its first child and
+              // verified that identity. Repeating those navigations concurrently reopens
+              // the exact race the isolation check just closed.
+              if (!alreadyPositioned) await switchAccount(laneContext, children[index]);
               results[index] = await collectAccount(laneContext, children[index], {
                 requireStableCurrentIdentity: true,
                 throwIdentityDrift: true,
@@ -861,9 +874,14 @@
               }
               return;
             }
+            alreadyPositioned = false;
+            index = nextIndex;
+            nextIndex += 1;
           }
         }
-        await Promise.allSettled(laneContexts.map((laneContext) => runLane(laneContext)));
+        await Promise.allSettled(laneContexts.map((laneContext, index) => (
+          runLane(laneContext, index)
+        )));
         if (context.signal && context.signal.aborted) throw collectorCore.abortError(context.signal);
         if (terminalError) throw terminalError;
         if (results.some((entry) => !entry)) {

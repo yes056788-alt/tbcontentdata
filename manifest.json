@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "淘宝内容诊断插件",
-  "version": "2.37.38",
-  "description": "为全链路取数网页提供淘宝经营及星河、蒲公英、聚光后台取数能力",
-  "permissions": ["storage", "unlimitedStorage", "webRequest", "downloads", "tabs", "scripting", "webNavigation"],
+  "version": "2.37.51",
+  "description": "为全链路取数网页提供淘宝经营及星河、蒲公英、聚光、灵犀后台取数能力",
+  "permissions": ["storage", "unlimitedStorage", "webRequest", "downloads", "tabs", "scripting", "webNavigation", "alarms"],
   "action": {
     "default_title": "淘宝全链路取数数据助手",
     "default_popup": "diagnosis-popup.html"
@@ -17,9 +17,12 @@
     "https://adstar.alimama.com/*",
     "https://pgy.xiaohongshu.com/*",
     "https://ad.xiaohongshu.com/*",
+    "https://idea.xiaohongshu.com/*",
     "https://mcc.xiaohongshu.com/*",
     "https://customer.xiaohongshu.com/*",
     "https://passport.xiaohongshu.com/*",
+    "https://www.xiaohongshu.com/*",
+    "https://edith.xiaohongshu.com/*",
     "https://xstore.insights.1688.com/*",
     "https://oapi.dingtalk.com/*",
     "http://localhost:3400/*",
@@ -31,6 +34,17 @@
   },
   "content_scripts": [
     {
+      "matches": ["https://www.xiaohongshu.com/*"],
+      "js": ["xhs-comment-page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.xiaohongshu.com/*"],
+      "js": ["xhs-comment-content.js"],
+      "run_at": "document_start"
+    },
+    {
       "matches": ["https://adstar.alimama.com/*"],
       "js": ["adstar-page-hook.js"],
       "run_at": "document_start",
@@ -38,7 +52,12 @@
     },
     {
       "matches": ["https://pgy.xiaohongshu.com/*"],
-      "js": ["pgy-page-hook.js"],
+      "js": [
+        "vendor/xlsx.full.min.js",
+        "xhs/contract.js",
+        "xhs/pgy-export-links.js",
+        "pgy-page-hook.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
@@ -47,6 +66,18 @@
       "js": ["juguang-page-hook.js"],
       "run_at": "document_start",
       "world": "MAIN"
+    },
+    {
+      "matches": ["https://idea.xiaohongshu.com/*"],
+      "js": ["lingxi-page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://idea.xiaohongshu.com/*"],
+      "js": ["lingxi-content-script.js"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
     },
     {
       "matches": [
@@ -137,7 +168,7 @@
         "http://127.0.0.1:3400/*",
         "https://tbdata.aizicheng.com/*"
       ],
-      "js": ["web-tool-bridge.js"],
+      "js": ["xhs/comment-monitor.js", "web-tool-bridge.js"],
       "run_at": "document_start",
       "all_frames": true
     },

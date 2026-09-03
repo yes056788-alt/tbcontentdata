@@ -282,7 +282,7 @@ async function evaluateLegacyAndCurrentHook(platformCase) {
   vm.runInContext(currentSource, context, { filename: path.join(root, platformCase.hookFile) });
 
   const request = {
-    channel: 'xhs-page-bridge-v2',
+    channel: 'xhs-page-bridge-v3',
     type: 'XHS_PAGE_REQUEST',
     platform: platformCase.platform,
     endpoint: platformCase.endpoint,
@@ -404,18 +404,18 @@ test('reinjecting MAIN hooks and the isolated receiver is idempotent and does no
   }
 });
 
-test('v2 requests ignore a resident unguarded v1 hook and produce exactly one XHR and response', async (t) => {
+test('v3 requests ignore resident older hooks and produce exactly one XHR and response', async (t) => {
   const pageClient = require(path.join(root, 'xhs', 'page-client.js'));
-  assert.equal(pageClient.CHANNEL, 'xhs-page-bridge-v2');
+  assert.equal(pageClient.CHANNEL, 'xhs-page-bridge-v3');
 
   for (const platformCase of PLATFORM_CASES) {
     await t.test(platformCase.platform, async () => {
       const migration = await evaluateLegacyAndCurrentHook(platformCase);
 
-      assert.equal(migration.windowListeners.length, 2, 'one legacy listener plus one guarded v2 listener');
-      assert.equal(migration.requests.length, 1, 'the resident v1 hook must ignore the v2 request');
-      assert.equal(migration.posted.length, 1, 'the v2 hook must return exactly one response');
-      assert.equal(migration.posted[0].message.channel, 'xhs-page-bridge-v2');
+      assert.equal(migration.windowListeners.length, 2, 'one legacy listener plus one guarded v3 listener');
+      assert.equal(migration.requests.length, 1, 'the resident older hook must ignore the v3 request');
+      assert.equal(migration.posted.length, 1, 'the v3 hook must return exactly one response');
+      assert.equal(migration.posted[0].message.channel, 'xhs-page-bridge-v3');
       assert.equal(migration.posted[0].message.requestId, `fixture-migration-${platformCase.platform}`);
     });
   }

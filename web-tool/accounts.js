@@ -93,6 +93,131 @@
     };
   }
 
+  function classificationText(value, maxLength) {
+    return typeof value === 'string' || typeof value === 'number'
+      ? String(value).trim().slice(0, maxLength)
+      : '';
+  }
+
+  function classificationInteger(value, maxValue) {
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) return 0;
+    return Math.min(parsed, maxValue == null ? Number.MAX_SAFE_INTEGER : maxValue);
+  }
+
+  function classificationTerms(value, maxItems, maxLength) {
+    const seen = new Set();
+    const result = [];
+    (Array.isArray(value) ? value : []).slice(0, maxItems).some((raw) => {
+      const term = classificationText(raw, maxLength);
+      const key = term.toLowerCase();
+      if (term && !seen.has(key)) {
+        seen.add(key);
+        result.push(term);
+      }
+      return result.length >= maxItems;
+    });
+    return result;
+  }
+
+  function highestPriorityClassificationTerm(value, priority) {
+    const candidates = classificationTerms(value, 20, 80);
+    return priority.find((item) => candidates.includes(item)) || candidates[0] || '';
+  }
+
+  function sanitizeClassificationPatch(value, legacy) {
+    const patch = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const old = legacy && typeof legacy === 'object' && !Array.isArray(legacy) ? legacy : {};
+    const topicTagsExplicit = Array.isArray(patch.topicTagIds);
+    const entityRelation = classificationText(
+      patch.entityRelation == null ? old.commercialCategory : patch.entityRelation,
+      80
+    );
+    const topicTagId = highestPriorityClassificationTerm(
+      patch.topicTagIds == null ? old.topicTagIds : patch.topicTagIds,
+      [
+        'safety_adverse_effect', 'need_pain_point', 'core_category', 'usage_scenario',
+        'adjacent_category', 'industry_interest', 'unrelated',
+      ]
+    );
+    const prioritizedIntentId = highestPriorityClassificationTerm(
+      patch.intentIds == null ? old.secondaryIntents : patch.intentIds,
+      [
+        'purchase_decision', 'comparison', 'problem_solving', 'usage',
+        'brand_product_lookup', 'category_exploration', 'interest_browsing', 'unclear',
+      ]
+    );
+    let primaryIntentId = classificationText(
+      patch.primaryIntentId == null ? (old.primaryIntent || old.intent) : patch.primaryIntentId,
+      80
+    );
+    if (!primaryIntentId) primaryIntentId = prioritizedIntentId;
+    const topicTagIds = topicTagId ? [topicTagId] : [];
+    const intentIds = primaryIntentId ? [primaryIntentId] : [];
+    const relevance = classificationText(
+      patch.relevance == null ? old.relevance : patch.relevance,
+      80
+    );
+    return Object.assign(
+      {},
+      entityRelation ? { entityRelation } : {},
+      topicTagIds.length || topicTagsExplicit ? { topicTagIds } : {},
+      intentIds.length ? { intentIds } : {},
+      primaryIntentId ? { primaryIntentId } : {},
+      relevance ? { relevance } : {}
+    );
+  }
+
+  function sanitizeClassificationOverride(value) {
+    const item = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const keyword = classificationText(item.keyword || item.normalizedKeyword, 160);
+    const keywordKey = classificationText(item.keywordKey, 240);
+    const normalizedKeyword = classificationText(item.normalizedKeyword, 160);
+    const overrideId = classificationText(
+      item.id || keywordKey || normalizedKeyword || keyword,
+      96
+    );
+    if (!overrideId || !keyword) return null;
+    return Object.assign({
+      id: overrideId,
+      scopeKey: classificationText(item.scopeKey, 160),
+      keyword,
+    }, keywordKey ? { keywordKey } : {}, normalizedKeyword ? { normalizedKeyword } : {}, {
+      active: item.active !== false,
+      reason: classificationText(item.reason, 160),
+      patch: sanitizeClassificationPatch(item.patch, item),
+      updatedAt: classificationInteger(item.updatedAt),
+    });
+  }
+
+  function sanitizeStoreClassification(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Number(value.schema) !== 1) {
+      return null;
+    }
+    const overrideIds = new Set();
+    const manualOverrides = [];
+    (Array.isArray(value.manualOverrides) ? value.manualOverrides : [])
+      .slice(0, 500).some((raw) => {
+        const item = sanitizeClassificationOverride(raw);
+        if (item && !overrideIds.has(item.id)) {
+          overrideIds.add(item.id);
+          manualOverrides.push(item);
+        }
+        return manualOverrides.length >= 500;
+      });
+    return {
+      schema: 1,
+      profileId: classificationText(value.profileId, 96),
+      customIndustry: classificationText(value.customIndustry, 120),
+      ownBrandTerms: classificationTerms(value.ownBrandTerms, 200, 64),
+      ownProductTerms: classificationTerms(value.ownProductTerms, 200, 64),
+      competitorTerms: classificationTerms(value.competitorTerms, 200, 64),
+      manualOverrides,
+      revision: classificationInteger(value.revision, 2147483647),
+      updatedAt: classificationInteger(value.updatedAt),
+    };
+  }
+
   function needsVaultMigration(value) {
     const source = value && typeof value === 'object' ? value : {};
     if (Number(source.schema) !== 4 || !Array.isArray(source.stores)) return true;
@@ -241,14 +366,36 @@
   }
 
   function syncProjectDirectory(snapshot) {
-    return request('setProjectDirectory', {
-      directory: {
-        schema: 1,
-        storeGroups: snapshot.storeGroups,
-        stores: snapshot.stores,
-        updatedAt: Date.now(),
-      },
-    }, 45000);
+    return request('getStorage', { keys: [PROJECT_DIRECTORY_KEY] }, 30000).then((stored) => {
+      const currentDirectory = stored && stored[PROJECT_DIRECTORY_KEY] &&
+        typeof stored[PROJECT_DIRECTORY_KEY] === 'object'
+        ? stored[PROJECT_DIRECTORY_KEY]
+        : {};
+      const classificationByStoreId = new Map();
+      (Array.isArray(currentDirectory.stores) ? currentDirectory.stores : []).forEach((store) => {
+        const storeId = classificationText(store && store.id, 100);
+        const classification = sanitizeStoreClassification(store && store.classification);
+        if (storeId && classification) classificationByStoreId.set(storeId, classification);
+      });
+      const stores = (Array.isArray(snapshot.stores) ? snapshot.stores : []).map((store) => {
+        const classification = classificationByStoreId.get(String(store && store.id || ''));
+        return Object.assign({
+          id: String(store && store.id || '').slice(0, 100),
+          name: String(store && store.name || '').trim().slice(0, 120),
+          groupId: String(store && store.groupId || '').slice(0, 100),
+          createdAt: String(store && store.createdAt || '').slice(0, 80),
+          updatedAt: String(store && store.updatedAt || '').slice(0, 80),
+        }, classification ? { classification } : {});
+      });
+      return request('setProjectDirectory', {
+        directory: {
+          schema: 1,
+          storeGroups: snapshot.storeGroups,
+          stores,
+          updatedAt: Date.now(),
+        },
+      }, 45000);
+    });
   }
 
   async function syncAccountSession(snapshot, sessionKey) {

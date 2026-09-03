@@ -3,10 +3,10 @@
 
   const ORIGIN = 'https://adstar.alimama.com';
   if (self !== top || location.origin !== ORIGIN) return;
-  const INSTALL_FLAG = '__taobaoDataAssistantXhsAdstarHookV2';
+  const INSTALL_FLAG = '__taobaoDataAssistantXhsAdstarHookV3';
   if (window[INSTALL_FLAG]) return;
   Object.defineProperty(window, INSTALL_FLAG, { value: true });
-  const CHANNEL = 'xhs-page-bridge-v2';
+  const CHANNEL = 'xhs-page-bridge-v3';
   const REQUEST_TYPE = 'XHS_PAGE_REQUEST';
   const RESPONSE_TYPE = 'XHS_PAGE_RESPONSE';
   const MAX_PAYLOAD_BYTES = 64 * 1024;
